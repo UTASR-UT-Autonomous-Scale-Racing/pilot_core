@@ -1,0 +1,78 @@
+OS: JETPACK 6.2
+
+######### GENERAL NOTES #########
+
+Cloning Repos:
+git clone https://utasrCar:$(cat git_token.git)@github.com/UTASR-UT-Autonomous-Scale-Racing/Data-Pipeline.git
+
+CUDA Info:
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2024 NVIDIA Corporation
+Built on Wed_Aug_14_10:14:07_PDT_2024
+Cuda compilation tools, release 12.6, V12.6.68
+Build cuda_12.6.r12.6/compiler.34714021_0
+
+Installing nvidia pytorch/torchvision binaries:
+https://forums.developer.nvidia.com/t/pytorch-and-torchvision-for-jetpack-6-2/325257/2
+
+
+### Autossh vm ###
+
+Command running:
+autossh -i /home/forcer/Downloads/vm-key.key -M 0 -N -R 2222:127.0.0.1:22 ubuntu@132.145.97.112
+
+NOTE: 
+If connection is not avaliable:
+1. `sudo reboot now` # clean ports
+2. `chmod 600 /home/forcer/Downloads/vm-key.key` # confirm private key
+
+Help:
+Vm and forecr not connecting?:
+sudo systemctl daemon-reload
+sudo systemctl enable autossh.service
+sudo systemctl start autossh.service
+pkill autossh
+sudo pkill ssh
+sudo systemctl start ssh
+sudo systemctl start autossh.service
+
+
+Where:
+/etc/systemd/system/autossh.service
+
+
+File contents (autossh.service):
+
+```
+[Unit]
+Description=AutoSSH reverse tunnel
+After=network.target
+
+[Service]
+User=forecr
+Environment="AUTOSSH_GATETIME=0"
+ExecStart=/usr/bin/autossh -i /home/forecr/Documents/vm-key.key -M 0 -N \
+  -o ServerAliveInterval=60 \
+  -o ServerAliveCountMax=999 \
+  -o TCPKeepAlive=yes \
+  -R 2222:127.0.0.1:22 opc@40.233.92.144
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
+```
+
+Enabling the service:
+sudo systemctl daemon-reload
+sudo systemctl enable autossh.service
+
+Check status:
+sudo systemctl status autossh.service
+
+Start (if not started):
+sudo systemctl start autossh.service
+
+
+END

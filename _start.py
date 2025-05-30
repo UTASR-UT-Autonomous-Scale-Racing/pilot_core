@@ -1,0 +1,241 @@
+import argparse
+import logging
+import signal
+import sys
+import time
+import cv2
+import yaml
+import importlib
+
+from pilot_ingest import I2CDataProcessor, SegmentProcessor, StateVectorProcessor
+from pilot_controller.control_output import Controller
+from pilot_controller.models import *
+from pilot_vision.models import *
+
+# Global variable used to store the function that stops all running processes
+process_stop_func = None
+
+def handle_signal(signum, frame):
+    """
+    Handle termination signals (SIGINT, SIGTERM) to stop all processes gracefully.
+    """
+    logging.info("Stopping all processes")
+    if process_stop_func:
+        process_stop_func()
+    sys.exit(0)
+
+# Register SIGINT (Ctrl+C) to trigger the signal handler
+signal.signal(signal.SIGINT, handle_signal)
+# Register SIGTERM (kill command) to trigger the signal handler
+signal.signal(signal.SIGTERM, handle_signal)
+
+def start_processes(i2c_processor, segment_processor, state_vector_processor):
+    """
+    Start all necessary processes for data acquisition and processing.
+    """
+    i2c_processor.start_reading()
+    segment_processor.start_stream()
+    state_vector_processor.start_processing()
+
+def stop_processes(i2c_processor, segment_processor, state_vector_processor):
+    """
+    Stop all running processes and clean up resources.
+    """
+    state_vector_processor.stop_processing()
+    i2c_processor.stop_reading()
+    segment_processor.close_stream()
+
+def system_setup(i2c_address, i2c_bus, recording, segmentation_model):
+    """
+    Set up the system components including I2C data processor, segment processor, and state vector processor.
+    """
+
+    # Configure processors
+    i2c_processor = I2CDataProcessor(
+        i2c_address=i2c_address,
+        i2c_bus=i2c_bus
+    )
+    segment_processor = SegmentProcessor(
+        use_oakd_imu=(i2c_address is None or i2c_bus is None),  # True if using OAK-D IMU, False if using board IMU
+        segmentation_model=segmentation_model
+    )
+
+    # Configure the state vector processor
+    state_vector_processor = StateVectorProcessor(
+        designated_I2C_processor=i2c_processor,
+        designated_segment_processor=segment_processor,
+        recording=recording
+    )
+    state_vector_processor.pause_recording()
+
+    # Start all underlying processes
+    start_processes(i2c_processor, segment_processor, state_vector_processor)
+    time.sleep(3)  # Allow time for connections to be established
+
+    # Validate the structure of the state vector
+    test_output = state_vector_processor.get_state_vector()
+    while not test_output:
+        test_output = state_vector_processor.get_state_vector()
+
+    logging.info("Setup complete")
+    try:
+        assert test_output.sensors is not None, "Sensors data is None"
+        assert test_output.frames is not None, "Frames data is None"
+        assert test_output.timestamp is not None, "Timestamp is None"
+    except AssertionError as e:
+        logging.error(str(e))
+        stop_processes(i2c_processor, segment_processor, state_vector_processor)
+        sys.exit(1)
+
+    # Return the initialized processors
+    return i2c_processor, segment_processor, state_vector_processor
+
+def parse_args():
+    """
+    Parse command-line arguments for the data processing pipeline.
+    """
+    parser = argparse.ArgumentParser(
+        description="Run the data processing pipeline.",
+        add_help=False
+    )
+    parser.add_argument('--segmentation_config', required=True, help="Path to segmentation model YAML config")
+    parser.add_argument('--control_config', required=True, help="Path to control model YAML config")
+    parser.add_argument('-k', action='store_true', help="Use keyboard controller over program controls")
+    parser.add_argument('-oakd_imu', action='store_true', help="Use OAK-D IMU over board IMU")
+    parser.add_argument('-r', action='store_true', help="Record all data")
+    parser.add_argument('-d', action='store_true', help="Debug mode, show all data (to be used with a desktop interface)")
+    parser.add_argument('-help', action='store_true', help="Show help message")
+
+    args, _ = parser.parse_known_args()
+
+    if args.help:
+        parser.print_help()
+        sys.exit(0)
+
+    return args
+
+def load_model_from_config(yaml_path):
+    """
+    Load a model class from a YAML configuration file.
+    """
+    with open(yaml_path, "r") as f:
+        config = yaml.safe_load(f)
+    seg_class_name = config.get("class")
+    seg_module_path = config.get("module_path")
+    seg_kwargs = config.get("kwargs", {})
+
+    module = importlib.import_module(seg_module_path)
+    ModelClass = getattr(module, seg_class_name)
+    model = ModelClass(**seg_kwargs)
+    logging.info(f"Loaded {seg_class_name} from {seg_module_path}")
+    return model
+
+def main():
+    # Retrieve command-line arguments
+    args = parse_args()
+
+    # Set up logging level.
+    logging.basicConfig(level=logging.DEBUG if args.d else logging.INFO)
+    if args.r and not args.k:
+        logging.warning("Recording is enabled but keyboard control is not active. You are recording autonomous driving data.")
+
+    # Configure keyboard control and device options
+    keyboard_controlled = True if args.k else None
+    use_oakd_imu = args.oakd_imu
+    debug_mode = args.d
+    recording = args.r
+
+    # Action handler for controlling the vehicle
+    control_handler = Controller()
+
+    # Load segmentation model config and class
+    segmentation_model = load_model_from_config(args.segmentation_config)
+
+    if not keyboard_controlled:
+        # Load control model config and class
+        control_model = load_model_from_config(args.control_config)
+
+    # Device-specific constants
+    if use_oakd_imu:
+        I2C_SLAVE_ADDR = None
+        I2C_BUS = None
+    else:
+        I2C_SLAVE_ADDR = 0x08
+        I2C_BUS = 1
+
+    # Initialize system components
+    i2c_processor, segment_processor, state_vector_processor = system_setup(
+        I2C_SLAVE_ADDR, I2C_BUS, recording, segmentation_model
+    )
+
+    # Set the global stop function for the signal handler
+    global process_stop_func
+    process_stop_func = lambda: stop_processes(i2c_processor, segment_processor, state_vector_processor)
+
+    start_time = time.time()
+    iterations = 0
+    logging_debug_string = ''
+
+    # Main processing loop
+    try:
+        # Start state vector recording
+        state_vector_processor.resume_recording()
+        while True: # TODO: Add a condition to break the loop. Based on the state of car.
+
+            # Retrieve the latest state vector
+            state_vector = state_vector_processor.get_state_vector()
+
+            # Empty state vector check
+            if not state_vector:
+                continue
+            
+            # Increment loop iteration count
+            iterations += 1
+            elapsed_time = time.time() - start_time
+            if elapsed_time > 0:
+                ips = iterations / elapsed_time
+            else:
+                ips = 0
+            logging_debug_string += f"Iterations per second: {ips:.2f}\n"
+
+            # Control head, make control decisions based on the state vector
+            if keyboard_controlled:
+                control_handler.get_keyboard_output()
+            else:
+                normalized_steering, normalized_throttle = control_model.get_action(state_vector.sensors, state_vector.frames)
+                control_handler.get_normalized_action_output(normalized_steering, normalized_throttle)
+            
+            if not use_oakd_imu:
+                # Write control outputs to the I2C bus
+                i2c_processor.write([control_handler.steering, control_handler.throttle])
+            else:
+                logging_debug_string += f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle}\n"
+
+            if debug_mode:
+                # Debugging output for all values
+
+                # Unpack sensor and frame data
+                logging.debug(state_vector.sensors)
+
+                masked_frame = state_vector.frames.components[0]
+                frames_Ts = state_vector.frames.timestamp
+                logging_debug_string += f"Frame Timestamp: {frames_Ts}\n\n"
+
+                logging.debug(logging_debug_string)
+
+                if masked_frame is not None:
+                    cv2.imshow("Processed Frame", masked_frame)
+                
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            logging_debug_string = ''  # Reset debug string after processing
+                   
+    except (KeyboardInterrupt, EOFError) as e:
+        logging.error(f"User interrupted the program: {e}")
+        # Ensure a clean shutdown once the loop ends
+        stop_processes(i2c_processor, segment_processor, state_vector_processor)
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

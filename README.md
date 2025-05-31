@@ -10,7 +10,7 @@ This repository serves as the central control hub for the RC-car project.
 - [`pilot_ingest`](https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_ingest)
 - [`pilot_vision`](https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_vision)
 
-Clone or download these repositories into this directory to enable full functionality.
+Clone these repositories or run setup.sh to install all dependencies.
 
 ## More Information
 

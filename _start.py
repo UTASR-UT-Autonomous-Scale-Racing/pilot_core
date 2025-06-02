@@ -17,7 +17,7 @@ process_stop_func = None
 
 def handle_signal(signum, frame):
     """
-    Handle termination signals (SIGINT, SIGTERM) to stop all processes gracefully.
+    Handle termination signals to stop all processes gracefully.
     """
     logging.info("Stopping all processes")
     if process_stop_func:
@@ -28,6 +28,8 @@ def handle_signal(signum, frame):
 signal.signal(signal.SIGINT, handle_signal)
 # Register SIGTERM (kill command) to trigger the signal handler
 signal.signal(signal.SIGTERM, handle_signal)
+# Register SIGTSTP (Ctrl+Z) to trigger the signal handler
+signal.signal(signal.SIGTSTP, handle_signal)
 
 def start_processes(i2c_processor, segment_processor, state_vector_processor):
     """
@@ -42,8 +44,10 @@ def stop_processes(i2c_processor, segment_processor, state_vector_processor):
     Stop all running processes and clean up resources.
     """
     state_vector_processor.stop_processing()
+    if not use_oakd_imu:
+        i2c_processor.write(["1461", "1397"])
     i2c_processor.stop_reading()
-    segment_processor.close_stream()
+    segment_processor.close_stream() # Reset steering and throttle to neutral values
 
 def system_setup(i2c_address, i2c_bus, recording, segmentation_model):
     """
@@ -105,6 +109,7 @@ def parse_args():
     parser.add_argument('-r', action='store_true', help="Record all data")
     parser.add_argument('-d', action='store_true', help="Debug mode, show all data (to be used with a desktop interface)")
     parser.add_argument('-help', action='store_true', help="Show help message")
+    parser.add_argument('-p', action='store_true', help="Passthrough mode: use IMU-reported steering/throttle instead of model/controller output")
 
     args, _ = parser.parse_known_args()
 
@@ -141,9 +146,11 @@ def main():
 
     # Configure keyboard control and device options
     keyboard_controlled = True if args.k else None
+    global use_oakd_imu
     use_oakd_imu = args.oakd_imu
     debug_mode = args.d
     recording = args.r
+    passthrough_mode = args.p
 
     # Action handler for controlling the vehicle
     control_handler = Controller()
@@ -181,7 +188,6 @@ def main():
         # Start state vector recording
         state_vector_processor.resume_recording()
         while True: # TODO: Add a condition to break the loop. Based on the state of car.
-
             # Retrieve the latest state vector
             state_vector = state_vector_processor.get_state_vector()
 
@@ -199,7 +205,11 @@ def main():
             logging_debug_string += f"Iterations per second: {ips:.2f}\n"
 
             # Control head, make control decisions based on the state vector
-            if keyboard_controlled:
+            if passthrough_mode:
+                raw = state_vector.sensors.to_array()
+                control_handler.throttle = raw[4]
+                control_handler.steering = raw[5]
+            elif keyboard_controlled:
                 control_handler.get_keyboard_output()
             else:
                 normalized_steering, normalized_throttle = control_model.get_action(state_vector.sensors, state_vector.frames)
@@ -228,10 +238,12 @@ def main():
                 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
+            else:
+                # Log the control outputs
+                logging.info(f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle}")
             logging_debug_string = ''  # Reset debug string after processing
                    
     except (KeyboardInterrupt, EOFError) as e:
-        logging.error(f"User interrupted the program: {e}")
         # Ensure a clean shutdown once the loop ends
         stop_processes(i2c_processor, segment_processor, state_vector_processor)
         sys.exit(0)

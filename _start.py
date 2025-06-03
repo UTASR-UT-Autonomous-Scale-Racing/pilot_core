@@ -179,75 +179,70 @@ def main():
     global process_stop_func
     process_stop_func = lambda: stop_processes(i2c_processor, segment_processor, state_vector_processor)
 
-    start_time = time.time()
-    iterations = 0
-    logging_debug_string = ''
+    logging_string = ''
 
     # Main processing loop
-    try:
-        # Start state vector recording
-        state_vector_processor.resume_recording()
-        while True: # TODO: Add a condition to break the loop. Based on the state of car.
-            # Retrieve the latest state vector
-            state_vector = state_vector_processor.get_state_vector()
+    state_vector_processor.resume_recording()
+    ips = 0
+    iter_count = 0
+    last_time = time.time()
+    
+    while True:
+        state_vector = state_vector_processor.get_state_vector()
+        if not state_vector:
+            time.sleep(0.0001)  # Shorter sleep for faster polling
+            continue
 
-            # Empty state vector check
-            if not state_vector:
-                continue
-            
-            # Increment loop iteration count
-            iterations += 1
-            elapsed_time = time.time() - start_time
-            if elapsed_time > 0:
-                ips = iterations / elapsed_time
-            else:
-                ips = 0
-            logging_debug_string += f"Iterations per second: {ips:.2f}\n"
+        iter_count += 1
+        if iter_count % 10 == 0:
+            current_time = time.time()
+            elapsed = current_time - last_time
+            ips = 10 / elapsed if elapsed > 0 else 0
+            last_time = current_time
+        logging_string += f"Iterations per second: {ips:.2f}\n"
 
-            # Control head, make control decisions based on the state vector
-            if passthrough_mode:
-                raw = state_vector.sensors.to_array()
-                control_handler.throttle = raw[4]
-                control_handler.steering = raw[5]
-            elif keyboard_controlled:
-                control_handler.get_keyboard_output()
-            else:
-                normalized_steering, normalized_throttle = control_model.get_action(state_vector.sensors, state_vector.frames)
-                control_handler.get_normalized_action_output(normalized_steering, normalized_throttle)
-            
-            if not use_oakd_imu:
-                # Write control outputs to the I2C bus
-                i2c_processor.write([control_handler.steering, control_handler.throttle])
-            else:
-                logging_debug_string += f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle}\n"
+        # Control logic
+        if passthrough_mode:
+            raw = state_vector.sensors.to_array()
+            control_handler.throttle = raw[4]
+            control_handler.steering = raw[5]
+        elif keyboard_controlled:
+            control_handler.get_keyboard_output()
+        else:
+            normalized_steering, normalized_throttle = control_model.get_action(state_vector.sensors, state_vector.frames)
+            control_handler.get_normalized_action_output(normalized_steering, normalized_throttle)
 
-            if debug_mode:
-                # Debugging output for all values
+        logging_string += f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle}\n"
+        if not use_oakd_imu:
+            i2c_processor.write([control_handler.steering, control_handler.throttle])
 
-                # Unpack sensor and frame data
-                logging.debug(state_vector.sensors)
+        # Debug mode: log sensor data and show processed frame
+        if debug_mode:
+            logging_string += f"Sensors: {state_vector.sensors.components}\n"
+            curr_time = time.time()
+            delta_state_ts = curr_time - state_vector.timestamp
+            delta_frames_ts = curr_time - state_vector.frames.timestamp
+            delta_sensors_ts = curr_time - state_vector.sensors.timestamp
+            logging_string += f"Delta State TS: {delta_state_ts:.4f} seconds\n"
+            logging_string += f"Delta Frames TS: {delta_frames_ts:.4f} seconds\n"
+            logging_string += f"Delta Sensors TS: {delta_sensors_ts:.4f} seconds\n"      
 
-                masked_frame = state_vector.frames.components[0]
-                frames_Ts = state_vector.frames.timestamp
-                logging_debug_string += f"Frame Timestamp: {frames_Ts}\n\n"
+            logging.debug(logging_string)
 
-                logging.debug(logging_debug_string)
+            # Display the processed (masked) frame if available
+            masked_frame = state_vector.frames.components[0]
 
-                if masked_frame is not None:
-                    cv2.imshow("Processed Frame", masked_frame)
-                
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-            else:
-                # Log the control outputs
-                logging.info(f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle}")
-            logging_debug_string = ''  # Reset debug string after processing
-                   
-    except (KeyboardInterrupt, EOFError) as e:
-        # Ensure a clean shutdown once the loop ends
-        stop_processes(i2c_processor, segment_processor, state_vector_processor)
-        sys.exit(0)
+            if masked_frame is not None:
+                cv2.imshow("Processed Frame", masked_frame)
+                # Exit loop if 'q' is pressed
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        else:
+            logging.info(logging_string)
+        logging_string = ''
 
+    stop_processes(i2c_processor, segment_processor, state_vector_processor)
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()

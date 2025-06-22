@@ -209,7 +209,9 @@ def main():
         elif keyboard_controlled:
             control_handler.get_keyboard_output()
         else:
-            normalized_steering, normalized_throttle = control_model.get_action(state_vector.sensors, state_vector.frames)
+            #normalized_steering, normalized_throttle = control_model.get_action(state_vector.sensors, state_vector.frames)
+            #TODO: Remove this line when the model is ready
+            normalized_steering, normalized_throttle = segment_processor.throttle_value, segment_processor.steering_value
             control_handler.get_normalized_action_output(normalized_steering, normalized_throttle)
 
         logging_string += f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle}\n"

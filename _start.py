@@ -39,7 +39,7 @@ def start_processes(i2c_processor, segment_processor, state_vector_processor):
     segment_processor.start_stream()
     state_vector_processor.start_processing()
 
-def stop_processes(i2c_processor, segment_processor, state_vector_processor):
+def stop_processes(i2c_processor, segment_processor, state_vector_processor, use_oakd_imu):
     """
     Stop all running processes and clean up resources.
     """
@@ -54,13 +54,15 @@ def system_setup(i2c_address, i2c_bus, recording, segmentation_model):
     Set up the system components including I2C data processor, segment processor, and state vector processor.
     """
 
+    use_oakd_imu = i2c_address is None or i2c_bus is None
+
     # Configure processors
     i2c_processor = I2CDataProcessor(
         i2c_address=i2c_address,
         i2c_bus=i2c_bus
     )
     segment_processor = SegmentProcessor(
-        use_oakd_imu=(i2c_address is None or i2c_bus is None),  # True if using OAK-D IMU, False if using board IMU
+        use_oakd_imu=use_oakd_imu,  # True if using OAK-D IMU, False if using board IMU
         segmentation_model=segmentation_model
     )
 
@@ -88,7 +90,7 @@ def system_setup(i2c_address, i2c_bus, recording, segmentation_model):
         assert test_output.timestamp is not None, "Timestamp is None"
     except AssertionError as e:
         logging.error(str(e))
-        stop_processes(i2c_processor, segment_processor, state_vector_processor)
+        stop_processes(i2c_processor, segment_processor, state_vector_processor, use_oakd_imu)
         sys.exit(1)
 
     # Return the initialized processors
@@ -146,7 +148,6 @@ def main():
 
     # Configure keyboard control and device options
     keyboard_controlled = True if args.k else None
-    global use_oakd_imu
     use_oakd_imu = args.oakd_imu
     debug_mode = args.d
     recording = args.r
@@ -177,7 +178,7 @@ def main():
 
     # Set the global stop function for the signal handler
     global process_stop_func
-    process_stop_func = lambda: stop_processes(i2c_processor, segment_processor, state_vector_processor)
+    process_stop_func = lambda: stop_processes(i2c_processor, segment_processor, state_vector_processor, use_oakd_imu)
 
     logging_string = ''
 
@@ -190,7 +191,7 @@ def main():
     while True:
         state_vector = state_vector_processor.get_state_vector()
         if not state_vector:
-            time.sleep(0.0001)  # Shorter sleep for faster polling
+            time.sleep(0.000001)  # Shorter sleep for faster polling
             continue
 
         iter_count += 1
@@ -199,8 +200,7 @@ def main():
             elapsed = current_time - last_time
             ips = 10 / elapsed if elapsed > 0 else 0
             last_time = current_time
-        logging_string += f"Iterations per second: {ips:.2f}\n"
-
+            logging.info(f"Iterations per second: {ips:.2f}\n")
         # Control logic
         if passthrough_mode:
             raw = state_vector.sensors.to_array()
@@ -218,7 +218,7 @@ def main():
 
         # Debug mode: log sensor data and show processed frame
         if debug_mode:
-            logging_string += f"Sensors: {state_vector.sensors.components}\n"
+            #logging_string += f"Sensors: {state_vector.sensors.components}\n"
             curr_time = time.time()
             delta_state_ts = curr_time - state_vector.timestamp
             delta_frames_ts = curr_time - state_vector.frames.timestamp
@@ -226,8 +226,6 @@ def main():
             logging_string += f"Delta State TS: {delta_state_ts:.4f} seconds\n"
             logging_string += f"Delta Frames TS: {delta_frames_ts:.4f} seconds\n"
             logging_string += f"Delta Sensors TS: {delta_sensors_ts:.4f} seconds\n"      
-
-            logging.debug(logging_string)
 
             # Display the processed (masked) frame if available
             masked_frame = state_vector.frames.components[0]
@@ -237,8 +235,9 @@ def main():
                 # Exit loop if 'q' is pressed
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-        else:
-            logging.info(logging_string)
+        
+        logging.debug(logging_string)
+
         logging_string = ''
 
     stop_processes(i2c_processor, segment_processor, state_vector_processor)

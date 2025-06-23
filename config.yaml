@@ -1,0 +1,4 @@
+# Configuration file for Pilot Core
+
+segmentation_config_path: pilot_vision/models/default/default.yaml
+control_config_path: pilot_controller/models/default/default.yaml

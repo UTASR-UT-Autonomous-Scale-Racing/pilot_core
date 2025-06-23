@@ -1,6 +1,6 @@
 # pilot_core
 
-This repository serves as the central control hub for the RC-car project.
+This repository serves as the central control hub for UTASR's autonomous scale racing project. It is responsible for coordinating the various components of the RC-car, including control logic, data ingestion, and vision processing.
 
 ## Overview
 
@@ -10,7 +10,26 @@ This repository serves as the central control hub for the RC-car project.
 - [`pilot_ingest`](https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_ingest)
 - [`pilot_vision`](https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_vision)
 
-Clone these repositories or run setup.sh to install all dependencies.
+## Setup
+
+After cloning this repository, run the setup script:
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+This will clone the required repositories: pilot_ingest, pilot_vision, and pilot_control.
+
+## Usage
+
+To run the pilot core, execute the following command:
+
+```bash
+chmod +x jetson_run.sh
+./jetson_run.sh
+```
+This script will pull the latest changes from our repositories and start the pilot core.
 
 ## More Information
 

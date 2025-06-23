@@ -4,8 +4,8 @@ set -e  # Exit on error
 
 # Power Mode (Performance)
 echo "Setting performance mode..."
-sudo nvpmodel -m 0
-sudo jetson_clocks
+#sudo nvpmodel -m 0
+#sudo jetson_clocks
 
 # Run L4T-Nvidia toolkit container (BASE ONLY NOT REQUIRED)
 # echo "Launching Docker container..."

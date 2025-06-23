@@ -11,7 +11,7 @@ orgName="UTASR-UT-Autonomous-Scale-Racing"
 for repo in pilot_ingest pilot_vision pilot_control; do
     if [ ! -d "$(pwd)/$repo" ]; then
         echo "$repo does not exist. Cloning..."
-        git clone "https://$userName:$TOKEN@github.com/$orgName/$repo.git" "$(pwd)/$repo"
+        git clone "https://$userName:${TOKEN}@github.com/$orgName/$repo.git" "$(pwd)/$repo"
     fi
 done
 

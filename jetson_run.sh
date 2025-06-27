@@ -14,9 +14,9 @@ echo "Setting performance mode..."
 
 # Function to update and reset repo
 # Retrieve updates from repos (Overwrites all uncommitted changes)
-cd pilot_ingest && git fetch origin && git reset --hard origin/main && && cd ..
-cd pilot_vision && git fetch origin && git reset --hard origin/main && && cd ..
-cd pilot_control && git fetch origin && git reset --hard origin/main && && cd ..
+cd pilot_ingest && git fetch origin && git reset --hard origin/main && cd ..
+cd pilot_vision && git fetch origin && git reset --hard origin/main && cd ..
+cd pilot_control && git fetch origin && git reset --hard origin/main && cd ..
 echo "All repositories are up to date."
 
 # Read config paths from config.yaml

@@ -195,10 +195,10 @@ def main():
             continue
 
         iter_count += 1
-        if iter_count % 10 == 0:
+        if iter_count % 60 == 0:
             current_time = time.time()
             elapsed = current_time - last_time
-            ips = 10 / elapsed if elapsed > 0 else 0
+            ips = 60 / elapsed if elapsed > 0 else 0
             last_time = current_time
             logging.info(f"Iterations per second: {ips:.2f}\n")
         # Control logic
@@ -215,8 +215,8 @@ def main():
             logging_string += f"Normalized Steering: {normalized_steering}, Normalized Throttle: {normalized_throttle}\n"
             control_handler.get_normalized_action_output(normalized_steering, normalized_throttle)
 
-        logging_string += f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle}\n"
-        logging.info(logging_string)
+        #logging_string += f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle}\n"
+        #logging.info(logging_string)
         if not use_oakd_imu:
             i2c_processor.write([control_handler.steering, control_handler.throttle])
 

@@ -26,4 +26,4 @@ CONTROL_CONFIG=$(grep '^control_config_path:' "$CONFIG_FILE" | awk '{print $2}')
 
 # Start Pilot
 echo "Starting Pilot..."
-sudo -E $(which python) _start.py --segmentation_config "$SEGMENTATION_CONFIG" --control_config "$CONTROL_CONFIG" "$@" 
+sudo -E $(which python) /home/forecr/pilot_core/_start.py --segmentation_config "$SEGMENTATION_CONFIG" --control_config "$CONTROL_CONFIG" "$@" 

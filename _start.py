@@ -4,6 +4,7 @@ import signal
 import sys
 import time
 import cv2
+import numpy
 import yaml
 import importlib
 
@@ -124,12 +125,27 @@ def parse_args():
 def load_model_from_config(yaml_path):
     """
     Load a model class from a YAML configuration file.
+    Expects each model folder to contain config.yaml and model.py
     """
+    import os
     with open(yaml_path, "r") as f:
         config = yaml.safe_load(f)
     seg_class_name = config.get("class")
-    seg_module_path = config.get("module_path")
     seg_kwargs = config.get("kwargs", {})
+
+    # Build module path: assume model.py is in the same directory as config.yaml
+    config_dir = os.path.dirname(yaml_path)
+    # Get relative path from project root
+    rel_path = os.path.relpath(config_dir, os.path.dirname(__file__))
+    # Convert filesystem path to Python package path and append .model
+    package_path = rel_path.replace(os.sep, '.')
+    seg_module_path = f"{package_path}.model"
+
+    # Resolve relative paths in kwargs based on the config file's directory
+    for key, value in seg_kwargs.items():
+        if isinstance(value, str) and not os.path.isabs(value):
+            # Convert relative path to absolute path based on config file location
+            seg_kwargs[key] = os.path.join(config_dir, value)
 
     module = importlib.import_module(seg_module_path)
     ModelClass = getattr(module, seg_class_name)
@@ -231,12 +247,7 @@ def main():
             logging_string += f"Delta Frames TS: {delta_frames_ts:.4f} seconds\n"
             logging_string += f"Delta Sensors TS: {delta_sensors_ts:.4f} seconds\n"      
 
-            # Display the processed (masked) frame if available
-            masked_frame = state_vector.frames.components[0]
-
-            if masked_frame is not None:
-                cv2.imshow("Processed Frame", masked_frame)
-                # Exit loop if 'q' is pressed
+            # Exit loop if 'q' is pressed
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         

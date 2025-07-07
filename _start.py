@@ -199,8 +199,7 @@ def main():
     logging_string = ''
 
     # Main processing loop
-    import numpy as np
-    from numpy import uint8
+
     state_vector_processor.resume_recording()
     ips = 0
     iter_count = 0
@@ -252,10 +251,6 @@ def main():
             # Display the processed (masked) frame if available
             masked_disparity = state_vector.frames.components[0]
 
-            if masked_disparity is not None:
-                masked_disparity = masked_disparity.cpu().numpy().astype(uint8)
-                colored_mask = cv2.applyColorMap(masked_disparity, cv2.COLORMAP_HSV)
-                cv2.imshow("Processed Frame", colored_mask)
                 # Exit loop if 'q' is pressed
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break

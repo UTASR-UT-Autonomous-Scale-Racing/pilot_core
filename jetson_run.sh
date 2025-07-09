@@ -14,6 +14,7 @@ sudo jetson_clocks
 
 # Function to update and reset repo
 # Retrieve updates from repos (Overwrites all uncommitted changes)
+git fetch origin && git reset --hard origin/main
 cd pilot_ingest && git fetch origin && git reset --hard origin/main && cd ..
 cd pilot_vision && git fetch origin && git reset --hard origin/main && cd ..
 cd pilot_controller && git fetch origin && git reset --hard origin/main && cd ..

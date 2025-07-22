@@ -7,6 +7,7 @@ import cv2
 import numpy
 import yaml
 import importlib
+from tqdm import tqdm
 
 from pilot_ingest import I2CDataProcessor, SegmentProcessor, StateVectorProcessor
 from pilot_controller.control_output import Controller
@@ -202,72 +203,64 @@ def main():
     # Main processing loop
 
     state_vector_processor.resume_recording()
-    ips = 0
-    iter_count = 0
-    last_time = time.time()
-    
-    while True:
-        state_vector = state_vector_processor.get_state_vector()
-        if not state_vector:
-            time.sleep(0.000001)  # Shorter sleep for faster polling
-            continue
-
-        iter_count += 1
-        if iter_count % 60 == 0:
-            current_time = time.time()
-            elapsed = current_time - last_time
-            ips = 60 / elapsed if elapsed > 0 else 0
-            last_time = current_time
-            logging.info(f"Iterations per second: {ips:.2f}\n")
-
+  
+    with tqdm(total=None, desc="Processing frames") as frame_counter:
         
-        sensors = state_vector.sensors.to_array()
-        segments = None
-        # Control logic
-        if passthrough_mode:
-            control_handler.throttle = sensors[4]
-            control_handler.steering = sensors[5]
-        elif keyboard_controlled:
-            control_handler.get_keyboard_output()
-        else:
-            # Get the segment depth mask
-            segments = segment_processor.segment_model.get_mask(*state_vector.frames.to_array())
-            #normalized_steering, normalized_throttle = control_model.get_action(state_vector.sensors, state_vector.frames)
-            #TODO: Remove this line when the model is ready
-            normalized_throttle, normalized_steering = segment_processor.throttle_value, segment_processor.steering_value
-            control_handler.get_normalized_action_output(normalized_steering, normalized_throttle)
+        while True:
+            state_vector = state_vector_processor.get_state_vector()
+            if not state_vector:
+                time.sleep(0.000001)  # Shorter sleep for faster polling
+                continue
+            
+            sensors = state_vector.sensors.to_array()
+            segments = None
+            # Control logic
+            if passthrough_mode:
+                control_handler.throttle = sensors[4]
+                control_handler.steering = sensors[5]
+            elif keyboard_controlled:
+                control_handler.get_keyboard_output()
+            else:
+                # Get the segment depth mask
+                segments = segment_processor.segment_model.get_mask(*state_vector.frames.to_array())
+                #normalized_steering, normalized_throttle = control_model.get_action(state_vector.sensors, state_vector.frames)
+                #TODO: Remove this line when the model is ready
+                normalized_throttle, normalized_steering = segment_processor.throttle_value, segment_processor.steering_value
+                control_handler.get_normalized_action_output(normalized_steering, normalized_throttle)
 
-        if not use_oakd_imu:
-            i2c_processor.write([control_handler.steering, control_handler.throttle])
+            if not use_oakd_imu:
+                i2c_processor.write([control_handler.steering, control_handler.throttle])
 
-        # Debug mode: log sensor data and show processed frame
-        if debug_mode:
-            logging_string += f"Quaternion: {sensors[0]}, {sensors[1]}, {sensors[2]}, {sensors[3]}\n"
-            logging_string += f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle }\n"
-            curr_time = time.time()
-            delta_state_ts = curr_time - state_vector.timestamp
-            delta_frames_ts = curr_time - state_vector.frames.timestamp
-            delta_sensors_ts = curr_time - state_vector.sensors.timestamp
-            logging_string += f"Delta State TS: {delta_state_ts:.4f} seconds\n"
-            logging_string += f"Delta Frames TS: {delta_frames_ts:.4f} seconds\n"
-            logging_string += f"Delta Sensors TS: {delta_sensors_ts:.4f} seconds\n"      
+            # Debug mode: log sensor data and show processed frame
+            if debug_mode:
+                logging_string += f"Quaternion: {sensors[0]}, {sensors[1]}, {sensors[2]}, {sensors[3]}\n"
+                logging_string += f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle }\n"
+                curr_time = time.time()
+                delta_state_ts = curr_time - state_vector.timestamp
+                delta_frames_ts = curr_time - state_vector.frames.timestamp
+                delta_sensors_ts = curr_time - state_vector.sensors.timestamp
+                logging_string += f"Delta State TS: {delta_state_ts:.4f} seconds\n"
+                logging_string += f"Delta Frames TS: {delta_frames_ts:.4f} seconds\n"
+                logging_string += f"Delta Sensors TS: {delta_sensors_ts:.4f} seconds\n"      
 
-            if segments is not None:
-                if not isinstance(segments, numpy.ndarray):
-                    segments = Tensor.cpu(segments).numpy()
-                    segments = cv2.applyColorMap(segments, cv2.COLORMAP_HOT)
+                if segments is not None:
+                    if not isinstance(segments, numpy.ndarray):
+                        segments = Tensor.cpu(segments).numpy()
+                        segments = cv2.applyColorMap(segments, cv2.COLORMAP_HOT)
 
-                # Blend the two frames together.
-                combined_frame = cv2.addWeighted(segments, 0.5, state_vector.frames.to_array()[1], 0.5, 0)
-                cv2.imshow("Masked Disparity Frame", combined_frame)
+                    # Blend the two frames together.
+                    combined_frame = cv2.addWeighted(segments, 0.5, state_vector.frames.to_array()[1], 0.5, 0)
+                    cv2.imshow("Masked Disparity Frame", combined_frame)
 
-                # Exit loop if 'q' is pressed
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-        
-            logging.debug(logging_string)
+                    # Exit loop if 'q' is pressed
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            
+                logging.debug(logging_string)
+            
+            frame_counter.update(1)
 
-        logging_string = ''
+            logging_string = ''
 
     stop_processes(i2c_processor, segment_processor, state_vector_processor)
     sys.exit(0)

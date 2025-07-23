@@ -1,4 +1,4 @@
 # Configuration file for Pilot Core
 
-segmentation_config_path: pilot_vision/models/resnet/config.yaml
+segmentation_config_path: pilot_vision/models/default/config.yaml
 control_config_path: pilot_controller/models/default/config.yaml

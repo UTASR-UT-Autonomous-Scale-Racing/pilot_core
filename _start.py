@@ -216,8 +216,8 @@ def main():
             segments = None
             # Control logic
             if passthrough_mode:
-                control_handler.throttle = sensors[4]
-                control_handler.steering = sensors[5]
+                control_handler.throttle = sensors[-2]
+                control_handler.steering = sensors[-1]
             elif keyboard_controlled:
                 control_handler.get_keyboard_output()
             else:
@@ -233,7 +233,7 @@ def main():
 
             # Debug mode: log sensor data and show processed frame
             if debug_mode:
-                logging_string += f"Quaternion: {sensors[0]}, {sensors[1]}, {sensors[2]}, {sensors[3]}\n"
+                logging_string += f"Quaternion: w={sensors[0]}, x={sensors[1]}, y={sensors[2]}, z={sensors[3]}\n"
                 logging_string += f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle }\n"
                 curr_time = time.time()
                 delta_state_ts = curr_time - state_vector.timestamp

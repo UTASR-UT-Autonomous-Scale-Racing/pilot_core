@@ -261,7 +261,7 @@ def main():
             frame_counter.update(1)
 
             logging_string = ''
-
+    control_model.save_recording()
     stop_processes(i2c_processor, segment_processor, state_vector_processor)
     sys.exit(0)
 

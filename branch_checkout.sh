@@ -1,6 +1,7 @@
 #chmod +x branch_checkout.sh
 
 branch="${1:-main}"
+branch="${branch:1}"
 # Switch to the main branch in each repository
 for repo in pilot_ingest pilot_vision pilot_controller; do
     if [ -d "$(pwd)/$repo/.git" ]; then

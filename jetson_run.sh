@@ -5,7 +5,7 @@ set -e  # Exit on error
 # Power Mode (Performance)
 echo "Setting performance mode..."
 sudo nvpmodel -m 0
-sudo jetson_clocks
+sudo jetson_clocks # Disables on reboot
 
 # Run L4T-Nvidia toolkit container (BASE ONLY NOT REQUIRED)
 # echo "Launching Docker container..."
@@ -14,10 +14,20 @@ sudo jetson_clocks
 
 # Function to update and reset repo
 # Retrieve updates from repos (Overwrites all uncommitted changes)
-git fetch origin && git reset --hard origin/main
-cd pilot_ingest && git fetch origin && git reset --hard origin/main && cd ..
-cd pilot_vision && git fetch origin && git reset --hard origin/main && cd ..
-cd pilot_controller && git fetch origin && git reset --hard origin/main && cd ..
+# Update and reset main repo
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+git fetch origin
+git reset --hard origin/$CURRENT_BRANCH
+
+# Update and reset submodules/repos
+for repo in pilot_ingest pilot_vision pilot_controller; do
+    cd $repo
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    git fetch origin
+    git reset --hard origin/$BRANCH
+    cd ..
+done
+
 echo "All repositories are up to date."
 
 # Read config paths from config.yaml

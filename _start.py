@@ -201,6 +201,7 @@ def main():
     logging_string = '\n'
 
     # Main processing loop
+    i = 0
 
     state_vector_processor.resume_recording()
   
@@ -223,10 +224,12 @@ def main():
             else:
                 # Get the segment depth mask
                 segments = segment_processor.segment_model.get_mask(*state_vector.frames.to_array())
-                #normalized_steering, normalized_throttle = control_model.get_action(state_vector.sensors, state_vector.frames)
+                normalized_steering, normalized_throttle = control_model.get_action(sensors, segments, state_vector.timestamp)
                 #TODO: Remove this line when the model is ready
                 normalized_throttle, normalized_steering = segment_processor.throttle_value, segment_processor.steering_value
                 control_handler.get_normalized_action_output(normalized_steering, normalized_throttle)
+                control_handler.throttle = sensors[-2]
+                control_handler.steering = sensors[-1]
 
             if not use_oakd_imu:
                 i2c_processor.write([control_handler.steering, control_handler.throttle])
@@ -261,7 +264,11 @@ def main():
             frame_counter.update(1)
 
             logging_string = ''
-    control_model.save_recording()
+            
+            i += 1
+            if i % 100 == 0:
+                control_model.save_plot()
+
     stop_processes(i2c_processor, segment_processor, state_vector_processor)
     sys.exit(0)
 

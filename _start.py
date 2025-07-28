@@ -4,16 +4,13 @@ import signal
 import sys
 import time
 import cv2
-import numpy
-import yaml
-import importlib
 from tqdm import tqdm
 
 from pilot_ingest import I2CDataProcessor, SegmentProcessor, StateVectorProcessor
 from pilot_controller.control_output import Controller
 from pilot_controller.models import *
 from pilot_vision.models import *
-from torch import Tensor
+from utils import load_model_from_config, overlay_depth_mask
 
 # Global variable used to store the function that stops all running processes
 process_stop_func = None
@@ -124,37 +121,6 @@ def parse_args():
 
     return args
 
-def load_model_from_config(yaml_path):
-    """
-    Load a model class from a YAML configuration file.
-    Expects each model folder to contain config.yaml and model.py
-    """
-    import os
-    with open(yaml_path, "r") as f:
-        config = yaml.safe_load(f)
-    seg_class_name = config.get("class")
-    seg_kwargs = config.get("kwargs", {})
-
-    # Build module path: assume model.py is in the same directory as config.yaml
-    config_dir = os.path.dirname(yaml_path)
-    # Get relative path from project root
-    rel_path = os.path.relpath(config_dir, os.path.dirname(__file__))
-    # Convert filesystem path to Python package path and append .model
-    package_path = rel_path.replace(os.sep, '.')
-    seg_module_path = f"{package_path}.model"
-
-    # Resolve relative paths in kwargs based on the config file's directory
-    for key, value in seg_kwargs.items():
-        if isinstance(value, str) and not os.path.isabs(value):
-            # Convert relative path to absolute path based on config file location
-            seg_kwargs[key] = os.path.join(config_dir, value)
-
-    module = importlib.import_module(seg_module_path)
-    ModelClass = getattr(module, seg_class_name)
-    model = ModelClass(**seg_kwargs)
-    logging.info(f"Loaded {seg_class_name} from {seg_module_path}")
-    return model
-
 def main():
     # Retrieve command-line arguments
     args = parse_args()
@@ -174,12 +140,14 @@ def main():
     # Action handler for controlling the vehicle
     control_handler = Controller()
 
-    # Load segmentation model config and class
-    segmentation_model = load_model_from_config(args.segmentation_config)
+    # Load segmentation model config
+    segmentation_model, class_name = load_model_from_config(args.segmentation_config)
+    logging.info(f"Loaded segmentation model: {class_name}")
 
     if not keyboard_controlled:
-        # Load control model config and class
-        control_model = load_model_from_config(args.control_config)
+        # Load control model config
+        control_model, class_name = load_model_from_config(args.control_config)
+        logging.info(f"Loaded control model: {class_name}")
 
     # Device-specific constants
     if use_oakd_imu:
@@ -225,11 +193,7 @@ def main():
                 # Get the segment depth mask
                 segments = segment_processor.segment_model.get_mask(*state_vector.frames.to_array())
                 normalized_steering, normalized_throttle = control_model.get_action(sensors, segments, state_vector.timestamp)
-                #TODO: Remove this line when the model is ready
-                normalized_throttle, normalized_steering = segment_processor.throttle_value, segment_processor.steering_value
                 control_handler.get_normalized_action_output(normalized_steering, normalized_throttle)
-                control_handler.throttle = sensors[-2]
-                control_handler.steering = sensors[-1]
 
             if not use_oakd_imu:
                 i2c_processor.write([control_handler.steering, control_handler.throttle])
@@ -246,18 +210,10 @@ def main():
                 logging_string += f"Delta Frames TS: {delta_frames_ts:.4f} seconds\n"
                 logging_string += f"Delta Sensors TS: {delta_sensors_ts:.4f} seconds\n"      
 
-                if segments is not None:
-                    if not isinstance(segments, numpy.ndarray):
-                        segments = Tensor.cpu(segments).numpy()
-                        segments = cv2.applyColorMap(segments, cv2.COLORMAP_HOT)
+                combined_frame = overlay_depth_mask(segments, state_vector.frames.to_array()[1])
+                cv2.imshow("Masked Disparity Frame", combined_frame)
 
-                    # Blend the two frames together.
-                    combined_frame = cv2.addWeighted(segments, 0.5, state_vector.frames.to_array()[1], 0.5, 0)
-                    cv2.imshow("Masked Disparity Frame", combined_frame)
-
-                    # Exit loop if 'q' is pressed
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                cv2.waitKey(1)
             
                 logging.debug(logging_string)
             

@@ -59,17 +59,24 @@ while row := cursor.fetchone():
     rgb_frame = rgb_frame.reshape((height, width, 3))
     depth_frame = depth_frame.reshape((height, width))  # Adjust shape as needed
 
+    frame_idx = row[0]
+    quaternion = [row[1], row[2], row[3], row[4]]
+    accel_body = [row[5], row[6], row[7]]
+    throttle = row[8]
+    steering = row[9]
+    timestamp = float(row[12])
+
     segments = segmentation_model.get_mask(depth_frame, rgb_frame)
 
-    normalized_steering, normalized_throttle = control_model.get_action(row[0:8], segments, float(row[12]))
+    normalized_steering, normalized_throttle = control_model.get_action(quaternion + accel_body, segments, float(row[12]))
 
     combined_frame = overlay_depth_mask(segments, rgb_frame)
 
     # Prepare overlay text with state information and timestamp delta
     overlay_text = [
-        f"id: {row[0]}  w: {row[1]:.2f}  x: {row[2]:.2f}  y: {row[3]:.2f}  z: {row[4]:.2f}",
-        f"ax: {row[5]:.2f} ay: {row[6]:.2f}  az: {row[7]:.2f}",
-        f"throttle: {row[8]:.2f}  steering: {row[9]:.2f}  ts: {float(row[12]):.2f}",
+        f"id: {frame_idx}  w: {quaternion[0]:.2f}  x: {quaternion[1]:.2f}  y: {quaternion[2]:.2f}  z: {quaternion[3]:.2f}",
+        f"ax: {accel_body[0]:.2f} ay: {accel_body[1]:.2f}  az: {accel_body[2]:.2f}",
+        f"throttle: {throttle:.2f}  steering: {steering:.2f}  ts: {timestamp:.2f}",
     ]
     
     # Draw the overlay text on the combined frame

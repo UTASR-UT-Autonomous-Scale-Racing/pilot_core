@@ -3,3 +3,9 @@ pilot_vision/
 pilot_controller/
 recordings/
 temp/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.db
+*.sqlite

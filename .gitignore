@@ -9,3 +9,5 @@ temp/
 *.gif
 *.db
 *.sqlite
+
+.vscode/

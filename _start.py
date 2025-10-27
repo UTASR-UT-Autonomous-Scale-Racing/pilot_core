@@ -183,25 +183,28 @@ def main():
             
             sensors = state_vector.sensors.to_array()
             segments = None
+
             # Control logic
             if passthrough_mode:
                 control_handler.throttle = sensors[-2]
                 control_handler.steering = sensors[-1]
-            elif keyboard_controlled:
+            elif keyboard_controlled: # Depreciated
                 control_handler.get_keyboard_output()
             else:
                 # Get the segment depth mask
                 segments = segment_processor.segment_model.get_mask(*state_vector.frames.to_array())
-                normalized_steering, normalized_throttle = control_model.get_action(sensors, segments, state_vector.timestamp)
+                normalized_steering, normalized_throttle = control_model.get_action(sensors, segments, state_vector.timestamp, control_handler.steering, control_handler.throttle)
                 control_handler.get_normalized_action_output(normalized_steering, normalized_throttle)
-
+    
             if not use_oakd_imu:
                 i2c_processor.write([control_handler.steering, control_handler.throttle])
 
             # Debug mode: log sensor data and show processed frame
             if debug_mode:
-                logging_string += f"Quaternion: w={sensors[0]}, x={sensors[1]}, y={sensors[2]}, z={sensors[3]}\n"
-                logging_string += f"Steering: {control_handler.steering}, Throttle: {control_handler.throttle }\n"
+                logging_string += f"\n \
+                Quaternion: w={sensors[0]}, x={sensors[1]}, y={sensors[2]}, z={sensors[3]}\n \
+                AX: {sensors[4]}, AY: {sensors[5]}, AZ: {sensors[6]}\n \
+                Steering: {control_handler.steering}, Throttle: {control_handler.throttle }\n"
                 curr_time = time.time()
                 delta_state_ts = curr_time - state_vector.timestamp
                 delta_frames_ts = curr_time - state_vector.frames.timestamp
@@ -211,7 +214,8 @@ def main():
                 logging_string += f"Delta Sensors TS: {delta_sensors_ts:.4f} seconds\n"      
 
                 combined_frame = overlay_depth_mask(segments, state_vector.frames.to_array()[1])
-                cv2.imshow("Masked Disparity Frame", combined_frame)
+
+                cv2.imshow("Segmented Frame with Depth Mask", combined_frame)
 
                 cv2.waitKey(1)
             
@@ -220,10 +224,6 @@ def main():
             frame_counter.update(1)
 
             logging_string = ''
-            
-            i += 1
-            if i % 100 == 0:
-                control_model.save_plot()
 
     stop_processes(i2c_processor, segment_processor, state_vector_processor)
     sys.exit(0)

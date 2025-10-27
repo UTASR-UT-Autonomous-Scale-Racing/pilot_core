@@ -53,10 +53,10 @@ def overlay_depth_mask(segments, rgb_frame):
     """
 
     # Convert segments to a color map for visualization
-    segments = cv2.applyColorMap(segments.astype(np.uint8), cv2.COLORMAP_HOT)
+    segments = cv2.applyColorMap(segments.astype(np.uint8), cv2.COLORMAP_JET)
 
     # Blend the two frames together.
     coloured_segments = ((segments / 6.5) * 255).astype(np.uint8)
-    combined_frame = cv2.addWeighted(coloured_segments, 1.0, rgb_frame, 1.0, 0)
+    combined_frame = cv2.addWeighted(coloured_segments, 0.1, rgb_frame, 1.0, 0)
 
     return combined_frame

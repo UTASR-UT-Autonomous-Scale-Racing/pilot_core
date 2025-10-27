@@ -48,6 +48,7 @@ delay = 0
 paused = False
 
 print("Starting playback...")
+i=0
 # Iterate over each row in the query result
 while row := cursor.fetchone():
     time.sleep(delay)  # Sleep for visualization delay
@@ -61,14 +62,14 @@ while row := cursor.fetchone():
 
     segments = segmentation_model.get_mask(depth_frame, rgb_frame)
 
-    normalized_steering, normalized_throttle = control_model.get_action(row[0:8], segments, float(row[12]))
+    normalized_steering, normalized_throttle = control_model.get_action(row[0:8], segments, float(row[12]), row[9], row[8])
 
     combined_frame = overlay_depth_mask(segments, rgb_frame)
 
     # Prepare overlay text with state information and timestamp delta
     overlay_text = [
         f"id: {row[0]}  w: {row[1]:.2f}  x: {row[2]:.2f}  y: {row[3]:.2f}  z: {row[4]:.2f}",
-        f"ax: {row[5]:.2f} ay: {row[6]:.2f}  az: {row[7]:.2f}",
+        f"ax: {row[5]:.5f} ay: {row[6]:.5f}  az: {row[7]:.5f}",
         f"throttle: {row[8]:.2f}  steering: {row[9]:.2f}  ts: {float(row[12]):.2f}",
     ]
     
@@ -80,13 +81,14 @@ while row := cursor.fetchone():
             (10, 30 + overlay_text.index(text) * 20),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
-            (255, 255, 255),
+            (255, 0, 0),
             1,
             cv2.LINE_AA
         )
  
     # Display the combined frame in a window
     cv2.imshow("Combined Frame", combined_frame)
+    cv2.waitKey(400)
 
     # Handle key presses
     key = cv2.waitKey(1) & 0xFF
@@ -114,6 +116,9 @@ while row := cursor.fetchone():
     if key == ord('q'):
         break
     last_ts = row[9]
+    if i == 10:
+        break
+    i+=1
 
 # Clean up: close OpenCV windows and database connection
 cv2.destroyAllWindows()

@@ -5,8 +5,10 @@ import sys
 import time
 import cv2
 from tqdm import tqdm
+from multiprocessing import Process, Queue
 
 from pilot_ingest import I2CDataProcessor, SegmentProcessor, StateVectorProcessor
+from pilot_ingest.recording_process import recording_worker # Will be present if code is merged in pilot_ingest
 from pilot_controller.control_output import Controller
 from pilot_controller.models import *
 from pilot_vision.models import *
@@ -157,10 +159,24 @@ def main():
         I2C_SLAVE_ADDR = 0x08
         I2C_BUS = 1
 
+    recording_queue = None
+    recording_process = None
+
+    if recording:
+        recording_queue = Queue(maxsize=50) # Size can be modified
+        recording_process = Process(
+            target=recording_worker,
+            args=(recording_queue,)
+        )
+        recording_process.start()
+
     # Initialize system components
     i2c_processor, segment_processor, state_vector_processor = system_setup(
         I2C_SLAVE_ADDR, I2C_BUS, recording, segmentation_model
     )
+
+    if recording:
+        state_vector_processor.recording_queue = recording_queue
 
     # Set the global stop function for the signal handler
     global process_stop_func
@@ -171,7 +187,7 @@ def main():
     # Main processing loop
     i = 0
 
-    state_vector_processor.resume_recording()
+    # state_vector_processor.resume_recording()
   
     with tqdm(total=None, desc="Processing frames") as frame_counter:
         
@@ -224,6 +240,11 @@ def main():
             i += 1
             if i % 100 == 0:
                 control_model.save_plot()
+
+    # Send shutdown signal to recording process
+    if recording and recording_queue is not None and recording_process is not None:
+        recording_queue.put(None) # in def recording_worker from recordin_process, the loop gets shut down once a state_vector of None gets passed through
+        recording_process.join()
 
     stop_processes(i2c_processor, segment_processor, state_vector_processor)
     sys.exit(0)

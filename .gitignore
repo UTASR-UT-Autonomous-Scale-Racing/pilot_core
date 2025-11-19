@@ -1,6 +1,4 @@
-piot_ingest/
-pilot_vision/
-pilot_controller/
+
 recordings/
 temp/
 *.png
@@ -11,3 +9,6 @@ temp/
 *.sqlite
 
 .vscode/
+venv/
+__pycache__/
+build/

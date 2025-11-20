@@ -24,6 +24,16 @@ endif()
 find_package(Eigen3 3.1.0 REQUIRED)
 find_package(Pangolin REQUIRED)
 
+# Find Python for embedding
+find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+
+# Get numpy include path
+execute_process(
+    COMMAND ${Python3_EXECUTABLE} -c "import numpy; print(numpy.get_include())"
+    OUTPUT_VARIABLE NUMPY_INCLUDE_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
 find_library(ORB_SLAM3_LIBS ORB_SLAM3 HINTS "${ORB_SLAM3_DIR}/lib")
 
 include_directories(
@@ -36,6 +46,8 @@ include_directories(
     ${OpenCV_INCLUDE_DIRS}
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/utility
+    ${Python3_INCLUDE_DIRS}
+    ${NUMPY_INCLUDE_DIR}
 )
 
 # Output dirs
@@ -50,6 +62,7 @@ set(TARGET_NAME oakd_orbslam3)
 add_executable(${TARGET_NAME}
     src/main.cpp
     src/util.cpp
+    src/python_controller.cpp
     utility/utility.cpp
 )
 target_link_libraries(${TARGET_NAME} PUBLIC
@@ -59,6 +72,7 @@ target_link_libraries(${TARGET_NAME} PUBLIC
     ${EIGEN3_LIBS}
     ${Pangolin_LIBRARIES}
     ${ORB_SLAM3_LIBS}
+    ${Python3_LIBRARIES}
     -lboost_serialization
     -lcrypto
 )

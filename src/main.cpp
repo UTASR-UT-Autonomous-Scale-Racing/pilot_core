@@ -8,12 +8,14 @@
 #include <iomanip>
 #include <string>
 #include <getopt.h>
+#include <memory>
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/ximgproc/disparity_filter.hpp>
 
 #include "System.h"
 #include "util.h"
+#include "python_controller.h"
 
 #include "utility.hpp"
 #include "depthai/depthai.hpp"
@@ -34,25 +36,23 @@ static constexpr auto monoRes = dai::MonoCameraProperties::SensorResolution::THE
 static std::string recordPath;
 
 // Save RGBD frame to binary file: CV_32FC4 (R,G,B,D)
-void saveRgbdFrame(const cv::Mat rgbFrame, cv::Mat depthFrame, long long ns, const std::string path) {
-
-    cv::Mat depthF;
+void saveRgbdFrame(const cv::Mat rgbFrame, cv::Mat depthFrame, long long ms, const std::string path) {
+    // Convert to float types properly (create new matrices)
+    cv::Mat rgbF, depthF;
+    rgbFrame.convertTo(rgbF, CV_32F, 1.0/255.0); // Normalize RGB to 0-1 range
     depthFrame.convertTo(depthF, CV_32F);
 
-    cv::Mat rgbF;
-    rgbFrame.convertTo(rgbF, CV_32F);
-
-    std::vector<cv::Mat> rgbSplit;
-    cv::split(rgbF, rgbSplit);
-
-    std::vector<cv::Mat> ch;
-    ch.insert(ch.end(), rgbSplit.begin(), rgbSplit.end());
-    ch.push_back(depthF);
-
+    // Split RGB into channels
+    std::vector<cv::Mat> rgbChannels;
+    cv::split(rgbF, rgbChannels);
+    
+    // Add depth channel directly
+    rgbChannels.push_back(depthF);
+    
+    // Merge into RGBD
     cv::Mat rgbd;
-    cv::merge(ch, rgbd); // CV_32FC4
-
-    std::string file = path + "/frame_" + std::to_string(ns) + ".bin";
+    cv::merge(rgbChannels, rgbd); // CV_32FC4
+    std::string file = path + "/frame_" + std::to_string(ms) + ".bin";
 
     std::ofstream ofs(file, std::ios::binary);
     if(!ofs) {
@@ -100,13 +100,18 @@ int main(int argc, char** argv) {
 
     string vocabulary_path;
     string settings_path;
+    string segmentation_config_path;
+    string control_config_path;
     string file_name;
     bool bFileName = false;
+    bool use_python_models = false;
 
     // Parse command line arguments
     static struct option long_options[] = {
         {"display", no_argument, 0, 'd'},
         {"record", required_argument, 0, 'r'},
+        {"segmentation-config", required_argument, 0, 's'},
+        {"control-config", required_argument, 0, 'c'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -114,7 +119,7 @@ int main(int argc, char** argv) {
     int option_index = 0;
     int c;
     
-    while ((c = getopt_long(argc, argv, "dr:h", long_options, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "dr:s:c:h", long_options, &option_index)) != -1) {
         switch (c) {
             case 'd':
                 display = true;
@@ -125,12 +130,23 @@ int main(int argc, char** argv) {
                 recordPath = string(optarg);
                 cout << "Recording enabled, path: " << recordPath << endl;
                 break;
+            case 's':
+                segmentation_config_path = string(optarg);
+                use_python_models = true;
+                cout << "Segmentation config: " << segmentation_config_path << endl;
+                break;
+            case 'c':
+                control_config_path = string(optarg);
+                cout << "Control config: " << control_config_path << endl;
+                break;
             case 'h':
                 cout << "Usage: " << argv[0] << " [OPTIONS] VOCAB_PATH SETTINGS_PATH [OUTPUT_FILE]" << endl;
                 cout << "Options:" << endl;
-                cout << "  --display, -d          Enable frame display" << endl;
-                cout << "  --record PATH, -r PATH Enable recording to specified directory" << endl;
-                cout << "  --help, -h             Show this help message" << endl;
+                cout << "  --display, -d                    Enable frame display" << endl;
+                cout << "  --record PATH, -r PATH           Enable recording to specified directory" << endl;
+                cout << "  --segmentation-config, -s PATH   Path to segmentation model config" << endl;
+                cout << "  --control-config, -c PATH        Path to control model config" << endl;
+                cout << "  --help, -h                       Show this help message" << endl;
                 cout << endl;
                 cout << "Arguments:" << endl;
                 cout << "  VOCAB_PATH            Path to ORB vocabulary file" << endl;
@@ -160,6 +176,17 @@ int main(int argc, char** argv) {
     if (remaining_args >= 3) {
         file_name = string(argv[optind + 2]);
         bFileName = true;
+    }
+
+    // Validate Python model configurations if using them
+    if (use_python_models) {
+        if (segmentation_config_path.empty() || control_config_path.empty()) {
+            cerr << "Error: Both segmentation and control config paths are required when using Python models." << endl;
+            return 1;
+        }
+        cout << "Python models enabled" << endl;
+        cout << "Segmentation config: " << segmentation_config_path << endl;
+        cout << "Control config: " << control_config_path << endl;
     }
 
     // Verify recording directory exists if recording was enabled
@@ -247,6 +274,36 @@ int main(int argc, char** argv) {
 
     cv::Mat R1, R2, P1, P2, Q;
 
+    // Initialize Python controller if enabled
+    std::unique_ptr<PythonController> python_controller;
+    std::atomic<bool> python_thread_running{false};
+    std::thread python_thread;
+    
+    if (use_python_models) {
+        python_controller = std::make_unique<PythonController>(segmentation_config_path, control_config_path);
+        if (!python_controller->initialize()) {
+            std::cerr << "Failed to initialize Python controller" << std::endl;
+            return 1;
+        }
+        python_controller->start();
+        
+        // Start Python controller thread for processing
+        python_thread_running = true;
+        python_thread = std::thread([&python_controller, &python_thread_running]() {
+            while (python_thread_running) {
+                // Get latest control output periodically
+                ControlOutput control = python_controller->getLatestControl();
+                if (control.valid) {
+                    std::cout << "Control output - Steering: " << control.steering 
+                              << ", Throttle: " << control.throttle << std::endl;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // 100Hz control output rate
+            }
+        });
+        
+        std::cout << "Python controller started successfully" << std::endl;
+    }
+
     ORB_SLAM3::System SLAM(
         vocabulary_path.c_str(), settings_path.c_str(), 
         ORB_SLAM3::System::RGBD, 
@@ -313,17 +370,22 @@ int main(int argc, char** argv) {
 
         if(!latestRgbFrame.empty() && !latestDepthFrame.empty()) {
 
-            auto elapsed_time = std::chrono::steady_clock::now() - slam_epoch;
-            double frame_timestamp_s = elapsed_time.count() / 1000000000.0;
+            //auto elapsed_time = std::chrono::steady_clock::now() - slam_epoch;
+            //double frame_timestamp_s = elapsed_time.count() / 1000000000.0;
 
-            std::cout << std::setprecision(4) << frame_timestamp_s << ": ";
+            // Get current Unix timestamp in nanoseconds
+            auto now = std::chrono::system_clock::now();
+            auto unix_timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+            // Submit frames to Python controller if enabled (non-blocking)
+            if (use_python_models && python_controller) {
+                // Submit frame asynchronously - the python controller thread handles processing
+                python_controller->submitFrame(latestRgbFrame, latestDepthFrame, unix_timestamp_ms);
+            }
 
             // Record if enabled
-            if(record) {
-                cv::Mat latestDepthFrameCopy = latestDepthFrame.clone();
-                cv::Mat latestRgbFrameCopy = latestRgbFrame.clone();
-
-                std::thread saverThread(saveRgbdFrame, latestDepthFrameCopy, latestRgbFrameCopy, frame_timestamp_s, recordPath);
+            if(record) {            
+                std::thread saverThread(saveRgbdFrame, latestRgbFrame.clone(), latestDepthFrame.clone(), unix_timestamp_ms, recordPath);
                 saverThread.detach();
             }
 
@@ -344,8 +406,12 @@ int main(int argc, char** argv) {
             Sophus::SE3f pose_sophus = SLAM.TrackRGBD(
                 latestRgbFrame,
                 latestDepthFrame,
-                frame_timestamp_s
+                unix_timestamp_ms
             );
+
+            // Clear frame buffers after SLAM processing
+            latestRgbFrame.release();
+            latestDepthFrame.release();
 
             // Convert Sophus SE3f to cv::Mat (4x4 transformation matrix)
             cv::Mat raw_pose;
@@ -391,6 +457,18 @@ int main(int argc, char** argv) {
 
     // Stop all SLAM threads
     SLAM.Shutdown();
+
+    // Stop Python controller if running
+    if (use_python_models && python_controller) {
+        // Stop the Python controller thread
+        python_thread_running = false;
+        if (python_thread.joinable()) {
+            python_thread.join();
+        }
+        
+        python_controller->stop();
+        std::cout << "Python controller stopped" << std::endl;
+    }
 
     return EXIT_SUCCESS;
 }

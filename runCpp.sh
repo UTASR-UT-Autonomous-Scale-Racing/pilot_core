@@ -5,4 +5,4 @@ CONTROL_CONFIG=$(grep '^control_config_path:' "$CONFIG_FILE" | awk '{print $2}')
 
 # Start Pilot
 echo "Starting Pilot..."
-sudo -E $(which python3) _start.py --segmentation_config "$SEGMENTATION_CONFIG" --control_config "$CONTROL_CONFIG" "$@" 
+./build/bin/oakd_orbslam3 --display --segmentation-config "$SEGMENTATION_CONFIG" --control-config "$CONTROL_CONFIG" ORB_SLAM3/Vocabulary/ORBvoc.txt oak_d_orbslam_settings.yaml

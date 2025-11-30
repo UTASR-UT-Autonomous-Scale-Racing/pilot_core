@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <chrono>
 #include <thread>
+#include <limits>
 
 #include <opencv2/opencv.hpp>
 
@@ -19,6 +20,122 @@ static void printUsage(const char* prog) {
 	std::cout << "Usage:\n  " << prog << " --folder <path> [--display] [--help]\n\n"
 			  << "Options:\n  --folder <path>   Directory containing frame_*.bin files produced by rgb_depth_aligned\n"
 			  << "  --help            Show this help message\n";
+}
+
+static bool extractTimestamp(const std::string& filename, const std::string& prefix, long long& timestamp) {
+	const std::string suffix = ".bin";
+	if(filename.rfind(prefix, 0) != 0) {
+		return false;
+	}
+	if(filename.size() <= prefix.size() + suffix.size()) {
+		return false;
+	}
+	std::string tsStr = filename.substr(prefix.size(), filename.size() - prefix.size() - suffix.size());
+	try {
+		timestamp = std::stoll(tsStr);
+		return true;
+	} catch(const std::exception&) {
+		return false;
+	}
+}
+
+struct KeyPointRecord {
+	float x;
+	float y;
+	float size;
+	float angle;
+	float response;
+	int32_t octave;
+	int32_t class_id;
+};
+
+struct MapRow {
+	long long timestamp = 0;
+	int32_t poseRows = 0;
+	int32_t poseCols = 0;
+	int32_t poseType = 0;
+	std::vector<float> pose;
+	std::vector<float> mapPoints;
+	std::vector<KeyPointRecord> keypoints;
+};
+
+static bool readNextMapRow(std::ifstream& ifs, MapRow& row) {
+	if(!ifs.read(reinterpret_cast<char*>(&row.timestamp), sizeof(row.timestamp))) {
+		return false;
+	}
+	if(!ifs.read(reinterpret_cast<char*>(&row.poseRows), sizeof(row.poseRows))) {
+		return false;
+	}
+	if(!ifs.read(reinterpret_cast<char*>(&row.poseCols), sizeof(row.poseCols))) {
+		return false;
+	}
+	if(!ifs.read(reinterpret_cast<char*>(&row.poseType), sizeof(row.poseType))) {
+		return false;
+	}
+	size_t poseCount = static_cast<size_t>(row.poseRows) * static_cast<size_t>(row.poseCols);
+	row.pose.resize(poseCount);
+	if(poseCount > 0) {
+		if(!ifs.read(reinterpret_cast<char*>(row.pose.data()), poseCount * sizeof(float))) {
+			return false;
+		}
+	}
+
+	int32_t mapPointCount = 0;
+	if(!ifs.read(reinterpret_cast<char*>(&mapPointCount), sizeof(mapPointCount))) {
+		return false;
+	}
+	row.mapPoints.resize(static_cast<size_t>(mapPointCount) * 3);
+	if(mapPointCount > 0) {
+		if(!ifs.read(reinterpret_cast<char*>(row.mapPoints.data()), row.mapPoints.size() * sizeof(float))) {
+			return false;
+		}
+	}
+
+	int32_t keypointCount = 0;
+	if(!ifs.read(reinterpret_cast<char*>(&keypointCount), sizeof(keypointCount))) {
+		return false;
+	}
+	row.keypoints.resize(static_cast<size_t>(keypointCount));
+	if(keypointCount > 0) {
+		if(!ifs.read(reinterpret_cast<char*>(row.keypoints.data()), row.keypoints.size() * sizeof(KeyPointRecord))) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static void printMapRow(const MapRow& row) {
+	std::cout << "[map] ts=" << row.timestamp
+			  << " pose(" << row.poseRows << "x" << row.poseCols << ", type=" << row.poseType << ")" << std::endl;
+	if(!row.pose.empty()) {
+		std::cout << "  pose values:";
+		for(size_t idx = 0; idx < row.pose.size(); ++idx) {
+			if(idx % row.poseCols == 0) {
+				std::cout << "\n    ";
+			}
+			std::cout << row.pose[idx] << ' ';
+		}
+		std::cout << std::endl;
+	}
+
+	size_t mapPointTriples = row.mapPoints.size() / 3;
+	std::cout << "  map points delta (" << mapPointTriples << "):";
+	for(size_t i = 0; i < row.mapPoints.size(); i += 3) {
+		std::cout << " [" << row.mapPoints[i] << ", " << row.mapPoints[i+1] << ", " << row.mapPoints[i+2] << "]";
+	}
+	std::cout << std::endl;
+
+	std::cout << "  keypoints (" << row.keypoints.size() << "):";
+	for(const auto& kp : row.keypoints) {
+		std::cout << " (pt=" << kp.x << "," << kp.y
+				  << " size=" << kp.size
+				  << " angle=" << kp.angle
+				  << " resp=" << kp.response
+				  << " oct=" << kp.octave
+				  << " cls=" << kp.class_id << ")";
+	}
+	std::cout << std::endl;
 }
 
 int main(int argc, char** argv) {
@@ -53,13 +170,19 @@ int main(int argc, char** argv) {
 
 	// Collect matching files
 	std::vector<fs::path> files;
+	fs::path mapPointsFile;
 	for(auto &ent : fs::directory_iterator(folder)) {
 		if(!ent.is_regular_file()) continue;
 		auto p = ent.path();
 		auto name = p.filename().string();
 		// match prefix frame_ and .bin suffix
-		if(name.rfind("frame_", 0) == 0) {
-			if(p.extension() == ".bin") files.push_back(p);
+		if(name.rfind("rgbd_frame_", 0) == 0 && p.extension() == ".bin") {
+			files.push_back(p);
+		}
+		if(name.rfind("map_points_", 0) == 0) {
+			if(mapPointsFile.empty() || name < mapPointsFile.filename().string()) {
+				mapPointsFile = p;
+			}
 		}
 	}
 
@@ -74,6 +197,23 @@ int main(int argc, char** argv) {
 	});
 
 	std::cout << "Found " << files.size() << " frames in " << folder << std::endl;
+
+	std::ifstream mapIfs;
+	bool hasMapRows = false;
+	MapRow currentMapRow;
+	if(!mapPointsFile.empty()) {
+		mapIfs.open(mapPointsFile, std::ios::binary);
+		if(!mapIfs) {
+			std::cerr << "Failed to open map points file: " << mapPointsFile << std::endl;
+		} else {
+			hasMapRows = readNextMapRow(mapIfs, currentMapRow);
+			if(!hasMapRows) {
+				std::cerr << "Map points file appears empty: " << mapPointsFile << std::endl;
+			}
+		}
+	} else {
+		std::cout << "No map_points_* file found alongside frames." << std::endl;
+	}
 
 	cv::namedWindow("replay", cv::WINDOW_AUTOSIZE);
 
@@ -112,6 +252,28 @@ int main(int argc, char** argv) {
 		}
 
 		std::cout << "Loaded frame " << frameIdx << ": " << p.filename() << " (" << width << "x" << height << ", type=" << type << ")\n";
+
+		long long frameTimestamp = 0;
+		if(!extractTimestamp(p.filename().string(), "rgbd_frame_", frameTimestamp)) {
+			std::cerr << "Warning: Unable to parse timestamp from filename " << p.filename() << std::endl;
+		}
+		long long nextFrameTimestamp = std::numeric_limits<long long>::max();
+		if(frameIdx < static_cast<int>(files.size())) {
+			long long tmpTs = 0;
+			if(frameIdx < static_cast<int>(files.size())) {
+				const auto& nextPath = files[frameIdx];
+				if(extractTimestamp(nextPath.filename().string(), "rgbd_frame_", tmpTs)) {
+					nextFrameTimestamp = tmpTs;
+				}
+			}
+		}
+
+		if(hasMapRows) {
+			while(hasMapRows && currentMapRow.timestamp >= frameTimestamp && currentMapRow.timestamp < nextFrameTimestamp) {
+				printMapRow(currentMapRow);
+				hasMapRows = readNextMapRow(mapIfs, currentMapRow);
+			}
+		}
 
 		if(display) {
 			// Expect CV_32FC4: B,G,R,Depth (all float)

@@ -4,6 +4,9 @@
 #include <thread>
 #include <fstream>
 #include <atomic>
+#include <mutex>
+#include <cstdint>
+#include <cmath>
 #include <sys/stat.h>
 #include <iomanip>
 #include <string>
@@ -14,6 +17,7 @@
 #include <opencv2/ximgproc/disparity_filter.hpp>
 
 #include "System.h"
+#include "MapPoint.h"
 #include "util.h"
 #include "python_controller.h"
 
@@ -52,7 +56,7 @@ void saveRgbdFrame(const cv::Mat rgbFrame, cv::Mat depthFrame, long long ms, con
     // Merge into RGBD
     cv::Mat rgbd;
     cv::merge(rgbChannels, rgbd); // CV_32FC4
-    std::string file = path + "/frame_" + std::to_string(ms) + ".bin";
+    std::string file = path + "/rgbd_frame_" + std::to_string(ms) + ".bin";
 
     std::ofstream ofs(file, std::ios::binary);
     if(!ofs) {
@@ -81,6 +85,108 @@ void saveRgbdFrame(const cv::Mat rgbFrame, cv::Mat depthFrame, long long ms, con
     }
 }
 
+// Append pose together with newly observed map/key points for a timestamp.
+void savePoseAndPoints(
+    std::vector<cv::Point3f> mapPoints,
+    std::vector<cv::KeyPoint> keypoints,
+    cv::Mat currPose,
+    long long unix_timestamp_ms,
+    std::string path
+) {
+    if(currPose.empty()) {
+        return;
+    }
+
+    cv::Mat poseFloat;
+    currPose.convertTo(poseFloat, CV_32F);
+    if(!poseFloat.isContinuous()) {
+        poseFloat = poseFloat.clone();
+    }
+
+    const size_t poseValueCount = poseFloat.total() * poseFloat.channels();
+    std::vector<float> poseBuffer;
+    poseBuffer.assign(poseFloat.ptr<float>(0), poseFloat.ptr<float>(0) + poseValueCount);
+
+    std::vector<float> mapPointBuffer;
+    mapPointBuffer.reserve(mapPoints.size() * 3);
+    for(const auto& mapPoint : mapPoints) {
+        mapPointBuffer.push_back(mapPoint.x);
+        mapPointBuffer.push_back(mapPoint.y);
+        mapPointBuffer.push_back(mapPoint.z);
+    }
+    const int32_t validMapPointCount = static_cast<int32_t>(mapPointBuffer.size() / 3);
+
+    struct KeyPointRecord {
+        float x;
+        float y;
+        float size;
+        float angle;
+        float response;
+        int32_t octave;
+        int32_t class_id;
+    };
+
+    std::vector<KeyPointRecord> keypointBuffer;
+    keypointBuffer.reserve(keypoints.size());
+    for(const auto& kp : keypoints) {
+        keypointBuffer.push_back(
+            KeyPointRecord{kp.pt.x, kp.pt.y, kp.size, kp.angle, kp.response, kp.octave, kp.class_id}
+        );
+    }
+    const int32_t keypointCount = static_cast<int32_t>(keypointBuffer.size());
+
+    static std::mutex fileMutex;
+    static std::string activeRecordRoot;
+    static std::string mapPointsFilePath;
+    static bool fileInitialized = false;
+    static long long fileEpochMs = 0;
+
+    std::lock_guard<std::mutex> guard(fileMutex);
+
+    if(!fileInitialized || activeRecordRoot != path) {
+        fileEpochMs = unix_timestamp_ms;
+        mapPointsFilePath = path + "/map_points_" + std::to_string(fileEpochMs);
+        std::ofstream resetStream(mapPointsFilePath, std::ios::binary | std::ios::trunc);
+        if(!resetStream) {
+            std::cerr << "Failed to create map points file: " << mapPointsFilePath << std::endl;
+            fileInitialized = false;
+            return;
+        }
+        activeRecordRoot = path;
+        fileInitialized = true;
+    }
+
+    std::ofstream ofs(mapPointsFilePath, std::ios::binary | std::ios::app);
+    if(!ofs) {
+        std::cerr << "Failed to open map points file for appending: " << mapPointsFilePath << std::endl;
+        return;
+    }
+
+    const int32_t poseRows = poseFloat.rows;
+    const int32_t poseCols = poseFloat.cols;
+    const int32_t poseType = poseFloat.type();
+
+    ofs.write(reinterpret_cast<const char*>(&unix_timestamp_ms), sizeof(unix_timestamp_ms));
+    ofs.write(reinterpret_cast<const char*>(&poseRows), sizeof(poseRows));
+    ofs.write(reinterpret_cast<const char*>(&poseCols), sizeof(poseCols));
+    ofs.write(reinterpret_cast<const char*>(&poseType), sizeof(poseType));
+    ofs.write(reinterpret_cast<const char*>(poseBuffer.data()), poseBuffer.size() * sizeof(float));
+
+    ofs.write(reinterpret_cast<const char*>(&validMapPointCount), sizeof(validMapPointCount));
+    if(validMapPointCount > 0) {
+        ofs.write(reinterpret_cast<const char*>(mapPointBuffer.data()), mapPointBuffer.size() * sizeof(float));
+    }
+
+    ofs.write(reinterpret_cast<const char*>(&keypointCount), sizeof(keypointCount));
+    if(keypointCount > 0) {
+        ofs.write(reinterpret_cast<const char*>(keypointBuffer.data()), keypointBuffer.size() * sizeof(KeyPointRecord));
+    }
+
+    if(!ofs.good()) {
+        std::cerr << "Error writing pose/map data: " << mapPointsFilePath << std::endl;
+    }
+}
+
 // Optional display blend weights
 static float rgbWeight = 0.4f;
 static float depthWeight = 0.6f;
@@ -89,11 +195,6 @@ static void updateBlendWeights(int percentRgb, void* ctx) {
     rgbWeight = float(percentRgb) / 100.f;
     depthWeight = 1.f - rgbWeight;
 }
-
-typedef struct _Pose {
-    cv::Mat position;
-    cv::Mat rotation;
-} Pose;
 
 int main(int argc, char** argv) {
     using namespace std;
@@ -272,8 +373,6 @@ int main(int argc, char** argv) {
     wls_filter->setSigmaColor(WLS_SIGMA);
 
 
-    cv::Mat R1, R2, P1, P2, Q;
-
     // Initialize Python controller if enabled
     std::unique_ptr<PythonController> python_controller;
     std::atomic<bool> python_thread_running{false};
@@ -314,9 +413,6 @@ int main(int argc, char** argv) {
     cv::Ptr<cv::Formatter> fmt = cv::Formatter::get(cv::Formatter::FMT_DEFAULT);
     fmt->set64fPrecision(3);
     fmt->set32fPrecision(3);
-
-    // We also want somewhere to store our pose data
-    Pose pose;
 
     // The time of each frame is required for SLAM, so we take an epoch time
     // (i.e. our start time) now
@@ -402,8 +498,8 @@ int main(int argc, char** argv) {
                 cv::imshow("rgb-depth", blended);
             }
 
-            // Pass the images into the SLAM system. This produces a Sophus pose
-            Sophus::SE3f pose_sophus = SLAM.TrackRGBD(
+            // Pass the images into the SLAM system.
+            SLAM.TrackRGBD(
                 latestRgbFrame,
                 latestDepthFrame,
                 unix_timestamp_ms
@@ -413,45 +509,43 @@ int main(int argc, char** argv) {
             latestRgbFrame.release();
             latestDepthFrame.release();
 
-            // Convert Sophus SE3f to cv::Mat (4x4 transformation matrix)
-            cv::Mat raw_pose;
-            if (!pose_sophus.matrix().isZero()) {
-                // Convert Sophus SE3f matrix to cv::Mat
-                Eigen::Matrix4f eigen_mat = pose_sophus.matrix();
-                raw_pose = cv::Mat(4, 4, CV_32F);
+            ORB_SLAM3::System::TrajectorySample trajectorySample;
+            bool trajectoryAvailable = SLAM.getCurrentTrajectory(trajectorySample);
+            ORB_SLAM3::System::KeyFrameTrajectorySample keyframeSample;
+            SLAM.getCurrentKeyFrameTrajectory(keyframeSample);
+
+            if(record && trajectoryAvailable) {
+                cv::Mat poseMat(4, 4, CV_32F);
+                Eigen::Matrix4f eigen_mat = trajectorySample.pose.matrix();
                 for (int i = 0; i < 4; ++i) {
                     for (int j = 0; j < 4; ++j) {
-                        raw_pose.at<float>(i, j) = eigen_mat(i, j);
+                        poseMat.at<float>(i, j) = eigen_mat(i, j);
                     }
                 }
+
+                std::vector<cv::Point3f> mapPointPositions;
+                mapPointPositions.reserve(trajectorySample.newMapPoints.size());
+                for(auto* mapPoint : trajectorySample.newMapPoints) {
+                    if(!mapPoint || mapPoint->isBad()) {
+                        continue;
+                    }
+                    const auto worldPos = mapPoint->GetWorldPos();
+                    mapPointPositions.emplace_back(worldPos.x(), worldPos.y(), worldPos.z());
+                }
+
+                long long poseTimestamp = static_cast<long long>(std::llround(trajectorySample.timestamp));
+
+                std::thread saverThread(
+                    savePoseAndPoints,
+                    mapPointPositions,
+                    trajectorySample.keypoints,
+                    poseMat,
+                    poseTimestamp,
+                    recordPath
+                );
+                saverThread.detach();
             }
 
-            // The output pose may be empty if the system was unable to track the
-            // movement, so only get position and rotation if pose isn't empty. We
-            // also put this info an a localisation fix available flag for later
-            // use. 
-            bool loc_fix_available = !raw_pose.empty();
-            if (loc_fix_available) {
-                // The pose matrix is a 4x4 extrinsic matrix, with the form:
-                // [R_3x3 T_3x1; [0 0 0 1]], we can find the camera position with 
-                // C = -R'T (R' = R transpose).
-                pose.rotation = raw_pose(cv::Rect(0, 0, 3, 3));
-                cv::Mat T = raw_pose(cv::Rect(3, 0, 1, 3));
-                pose.position = -pose.rotation.t()*T;
-
-                // Print the updated position, but transpose it so that instead of
-                // a column vector we have a row vector, which is easier to read.
-                std::cout << 
-                    "position: " << 
-                    fmt->format(pose.position.t()) << 
-                    std::endl;
-            }
-            else {
-                // If we didn't get a pose update log it.
-                std::cout << "no pose update" << std::endl;
-            }
-
-            // Continue processing frames (removed display code for headless operation)
         }
     }
 

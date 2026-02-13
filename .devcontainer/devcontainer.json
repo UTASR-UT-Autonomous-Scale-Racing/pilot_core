@@ -1,0 +1,64 @@
+{
+  "name": "pilot_core - Jetson Dev",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+
+  //  Runtime: NVIDIA GPU + USB device passthrough
+  "runArgs": [
+    "--runtime=nvidia",
+    "--privileged",
+    "--network=host",
+    "--ipc=host"
+  ],
+
+  // Forward OAK-D (Movidius) and Arduino/I2C devices into container
+  "mounts": [
+    "type=bind,source=/dev/bus/usb,target=/dev/bus/usb",
+    "type=bind,source=/dev/i2c-1,target=/dev/i2c-1",
+    "type=bind,source=/tmp,target=/tmp"
+  ],
+
+  //  Container environment
+  "containerEnv": {
+    "NVIDIA_VISIBLE_DEVICES": "all",
+    "NVIDIA_DRIVER_CAPABILITIES": "all",
+    "LD_LIBRARY_PATH": "/workspaces/pilot_core/ORB_SLAM3/lib:/usr/local/lib:${containerEnv:LD_LIBRARY_PATH}",
+    "PYTHONUNBUFFERED": "1",
+    "DISPLAY": "${localEnv:DISPLAY}"
+  },
+
+  //  Post-create: submodules, venv, C++ builds
+  "postCreateCommand": "bash .devcontainer/post-create.sh && echo 'source /workspaces/pilot_core/venv/bin/activate' >> ~/.bashrc",
+
+  //  VS Code settings
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/workspaces/pilot_core/venv/bin/python3",
+        "python.terminal.activateEnvironment": true,
+        "python.testing.pytestEnabled": true,
+        "python.testing.pytestArgs": ["tests"],
+        "cmake.configureOnOpen": false,
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "terminal.integrated.env.linux": {
+          "LD_LIBRARY_PATH": "/workspaces/pilot_core/ORB_SLAM3/lib:/usr/local/lib"
+        }
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "ms-azuretools.vscode-docker",
+        "github.copilot"
+      ]
+    }
+  },
+
+  //  Workspace folder inside container
+  "workspaceFolder": "/workspaces/pilot_core",
+
+  "remoteUser": "developer"
+}

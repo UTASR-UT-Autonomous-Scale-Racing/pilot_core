@@ -41,7 +41,7 @@ from shared_buffer import (
     TrackBoundaryBuffer,
 )
 
-#  Workers ─
+# Workers 
 from workers import (
     ActuatorWorker,
     BaseWorker,
@@ -251,7 +251,9 @@ def main() -> None:
     if isinstance(i2c_address, str):
         i2c_address = int(i2c_address, 0)
 
-    #  4. Define workers ─
+    #  4. Define workers   
+      
+    use_webcam = config.get("use_webcam", False)
     global _workers
     _workers = [
         CameraWorker(

@@ -214,7 +214,7 @@ class MappingWorker(BaseWorker):
                     f"(total batches: {len(self._bev_wall_pts)})"
                 )
 
-        #  Check loop closure → extract boundaries ─
+        #  Check loop closure → extract boundaries         
         if (
             self._loop_event is not None
             and self._loop_event.is_set()

@@ -52,8 +52,8 @@ from .base_worker import BaseWorker
 from shared_buffer.ring_buffer import SharedRingBuffer
 from shared_buffer.schema import HEADER_SIZE, SlotHeader, SCHEMA_VERSION
 
-# ── Binary protocol constants ──────────────────────────────────────────────
-FILE_MAGIC = b"PLTREC\x00\x01"            # 8 bytes
+#  Binary protocol constants 
+FILE_MAGIC = b"PLTREC\x00\x01"             # 8 bytes
 FILE_HEADER_FMT = "<8sHHIId30s"            # magic(8) schema(2) dtype(2) sample_k(4) top_n(4) session_ts(8) reserved(30) = 58 → padded to 64
 FILE_HEADER_SIZE = 64                      # fixed on-disk size (struct is 58, we pad 6 extra)
 

@@ -4,7 +4,6 @@
     "dockerfile": "Dockerfile",
     "context": ".."
   },
-
   //  Runtime: NVIDIA GPU + USB device passthrough
   "runArgs": [
     "--runtime=nvidia",
@@ -12,14 +11,12 @@
     "--network=host",
     "--ipc=host"
   ],
-
   // Forward OAK-D (Movidius) and Arduino/I2C devices into container
   "mounts": [
     "type=bind,source=/dev/bus/usb,target=/dev/bus/usb",
     "type=bind,source=/dev/i2c-1,target=/dev/i2c-1",
     "type=bind,source=/tmp,target=/tmp"
   ],
-
   //  Container environment
   "containerEnv": {
     "NVIDIA_VISIBLE_DEVICES": "all",
@@ -28,10 +25,8 @@
     "PYTHONUNBUFFERED": "1",
     "DISPLAY": "${localEnv:DISPLAY}"
   },
-
   //  Post-create: submodules, venv, C++ builds
   "postCreateCommand": "bash .devcontainer/post-create.sh && echo 'source /workspaces/pilot_core/venv/bin/activate' >> ~/.bashrc",
-
   //  VS Code settings
   "customizations": {
     "vscode": {
@@ -39,7 +34,9 @@
         "python.defaultInterpreterPath": "/workspaces/pilot_core/venv/bin/python3",
         "python.terminal.activateEnvironment": true,
         "python.testing.pytestEnabled": true,
-        "python.testing.pytestArgs": ["tests"],
+        "python.testing.pytestArgs": [
+          "tests"
+        ],
         "cmake.configureOnOpen": false,
         "terminal.integrated.defaultProfile.linux": "bash",
         "terminal.integrated.env.linux": {
@@ -56,9 +53,7 @@
       ]
     }
   },
-
   //  Workspace folder inside container
   "workspaceFolder": "/workspaces/pilot_core",
-
   "remoteUser": "developer"
 }

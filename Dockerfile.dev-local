@@ -1,0 +1,34 @@
+# Dockerfile.dev-local — lightweight dev container for running pytests locally
+# Does NOT require an NVIDIA GPU, OAK-D camera, or any special hardware.
+# Uses synthetic frame/depth/IMU data instead.
+
+FROM python:3.10-slim
+
+# System deps (OpenCV headless needs libgl)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps — no depthai, no smbus2, no onnxruntime-gpu, no torch
+RUN pip install --no-cache-dir \
+    PyYAML \
+    numpy \
+    opencv-python-headless \
+    scipy \
+    pytest \
+    pytest-timeout \
+    matplotlib \
+    pandas \
+    tqdm
+
+WORKDIR /app/pilot_core
+COPY . /app/pilot_core
+
+# Mark as synthetic-only environment
+ENV PILOT_SYNTHETIC=1
+ENV PYTHONUNBUFFERED=1
+
+# Default: run pytest
+CMD ["pytest", "tests/", "-v", "--timeout=60", "-x"]

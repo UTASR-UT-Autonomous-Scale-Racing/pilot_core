@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  dev-local:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev-local
+    container_name: pilot_core_dev_local
+    environment:
+      - PILOT_SYNTHETIC=1
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Bind-mount source for iterative dev (optional — rebuild image otherwise)
+      - .:/app/pilot_core
+    working_dir: /app/pilot_core
+    command: >
+      pytest tests/ -v --timeout=60 -x

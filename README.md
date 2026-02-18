@@ -67,7 +67,73 @@ python3 -m venv venv && source venv/bin/activate
 pip install PyYAML numpy opencv-python-headless scipy pytest pytest-timeout matplotlib pandas tqdm
 ```
 
-### 4. C++ build (Jetson container only)
+### 4. Building ORB-SLAM3 + pybind11 wrapper
+
+ORB-SLAM3 is included as a git submodule. The Python wrapper (`orbslam3_python`) uses pybind11 to expose SLAM functionality to the Python pipeline.
+
+**Prerequisites** (install inside the container if not already present):
+
+```bash
+apt-get update && apt-get install -y \
+    build-essential cmake git pkg-config \
+    libeigen3-dev libglew-dev libgl1-mesa-dev libwayland-dev \
+    libopencv-dev libboost-serialization-dev libssl-dev
+```
+
+**Step 1 — Install Pangolin** (3D visualization library required by ORB-SLAM3):
+
+```bash
+cd /tmp && git clone --depth 1 https://github.com/stevenlovegrove/Pangolin.git
+cd Pangolin && mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF
+make -j3 && make install && ldconfig
+```
+
+**Step 2 — Build ORB-SLAM3** (thirdparty libs + main library):
+
+```bash
+cd ORB_SLAM3
+
+# Build DBoW2
+cd Thirdparty/DBoW2 && mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release && make -j3 && cd ../../..
+
+# Build g2o
+cd Thirdparty/g2o && mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release && make -j3 && cd ../../..
+
+# Uncompress vocabulary
+cd Vocabulary && tar xf ORBvoc.txt.tar.gz && cd ..
+
+# Build ORB-SLAM3
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release && make -j3
+```
+
+This produces `ORB_SLAM3/lib/libORB_SLAM3.so`.
+
+**Step 3 — Build the pybind11 Python wrapper:**
+
+```bash
+pip install pybind11
+
+cd orbslam3_wrapper && mkdir -p build && cd build
+cmake .. -Dpybind11_DIR=$(pybind11-config --cmakedir) -DCMAKE_BUILD_TYPE=Release
+make -j3
+```
+
+This produces `orbslam3_python.cpython-*.so` in the project root, importable as `import orbslam3_python`.
+
+**Step 4 — Verify:**
+
+```bash
+export LD_LIBRARY_PATH=$PWD/ORB_SLAM3/lib:/usr/local/lib:$LD_LIBRARY_PATH
+python3 -c "import orbslam3_python; print('OK')"
+```
+
+### 5. C++ main build (Jetson container only)
+
+Builds the full C++ pipeline (OAK-D + ORB-SLAM3 + DepthAI):
 
 ```bash
 bash scripts/build.sh   # mkdir build && cmake .. && make
@@ -80,6 +146,15 @@ PILOT_SYNTHETIC=1 python -m pytest tests/ -v --timeout=60
 ```
 
 189 tests pass in the dev-local container; 7 hardware-dependent tests are auto-skipped.
+
+**SLAM synthetic pipeline tests** (requires ORB-SLAM3 built — step 4 above):
+
+```bash
+export LD_LIBRARY_PATH=$PWD/ORB_SLAM3/lib:/usr/local/lib:$LD_LIBRARY_PATH
+PILOT_SYNTHETIC=1 timeout 200 python3 -m pytest tests/test_slam_synthetic_pipeline.py -v -s --log-cli-level=INFO
+```
+
+Runs a full 2-lap closed-loop test: Phase A (mapping, 300 frames) → Phase B (localization, 300 frames with loop closure detection).
 
 ## Usage
 

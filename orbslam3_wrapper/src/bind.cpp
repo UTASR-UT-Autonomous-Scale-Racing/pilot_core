@@ -114,7 +114,7 @@ public:
      * @return (N, 3) float32 numpy array of world-frame XYZ positions.
      */
     py::array_t<float> get_all_map_points() {
-        ORB_SLAM3::Atlas *atlas = sys_.GetAtlas();
+        ORB_SLAM3::Atlas *atlas = sys_.mpAtlas;
         if (!atlas) return py::array_t<float>(std::vector<py::ssize_t>{0, 3});
 
         std::vector<ORB_SLAM3::MapPoint*> points = atlas->GetAllMapPoints();
@@ -144,7 +144,7 @@ public:
      * Get poses for all keyframes as (K, 4, 4) float32 numpy array.
      */
     py::array_t<float> get_all_keyframe_poses() {
-        ORB_SLAM3::Atlas *atlas = sys_.GetAtlas();
+        ORB_SLAM3::Atlas *atlas = sys_.mpAtlas;
         if (!atlas) return py::array_t<float>(std::vector<py::ssize_t>{0, 4, 4});
 
         std::vector<ORB_SLAM3::KeyFrame*> kfs = atlas->GetAllKeyFrames();

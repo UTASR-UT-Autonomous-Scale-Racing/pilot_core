@@ -1,0 +1,68 @@
+%YAML:1.0
+
+#--
+# Synthetic camera settings for ORB-SLAM3 RGBD mode
+# Matches the intrinsics used by synthetic/closed_loop_generator.py
+#--
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+# Synthetic camera intrinsics (640x480)
+Camera.fx: 456.99
+Camera.fy: 456.99
+Camera.cx: 320.0
+Camera.cy: 240.0
+
+# RGBD mode requires Camera1 (same as Camera for mono setup)
+Camera1.fx: 456.99
+Camera1.fy: 456.99
+Camera1.cx: 320.0
+Camera1.cy: 240.0
+
+# No distortion (synthetic pinhole)
+Camera.k1: 0.0
+Camera.k2: 0.0
+Camera.p1: 0.0
+Camera.p2: 0.0
+Camera.k3: 0.0
+
+Camera.width: 640
+Camera.height: 480
+Camera.fps: 25
+
+# Depth is float32 in metres — factor 1.0 means no conversion
+RGBD.DepthMapFactor: 1.0
+
+# Color order (0: BGR)
+Camera.RGB: 0
+
+# Close/Far threshold. Baseline times.
+ThDepth: 40.0
+Stereo.ThDepth: 40.0
+
+# Approximate stereo baseline (not used for RGBD but required)
+Stereo.b: 0.075
+
+#--
+# ORB Parameters — keep iniThFAST low to detect features on synthetic textures
+#--
+ORBextractor.nFeatures: 1500
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 15
+ORBextractor.minThFAST: 5
+
+#--
+# Viewer Parameters (viewer disabled, but required by parser)
+#--
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0

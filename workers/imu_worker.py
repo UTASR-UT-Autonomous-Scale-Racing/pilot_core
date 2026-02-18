@@ -49,11 +49,24 @@ class IMUWorker(BaseWorker):
         self._bus = None
         self._use_oakd = False
         self._dummy = False
+        self._synthetic = False
+        self._synth_gen = None
         self._device = None
         self._queue = None
 
     def setup(self) -> None:
+        import os
+
         self._imu_buf = self.config["output_buffer"]
+
+        use_synthetic = (
+            self.config.get("synthetic", False)
+            or os.environ.get("PILOT_SYNTHETIC", "") == "1"
+        )
+
+        if use_synthetic:
+            self._setup_synthetic()
+            return
 
         i2c_address = self.config.get("i2c_address")
         i2c_bus = self.config.get("i2c_bus")
@@ -61,7 +74,13 @@ class IMUWorker(BaseWorker):
 
         if self._use_oakd or i2c_address is None or i2c_bus is None:
             self._use_oakd = True
-            self._setup_oakd_imu()
+            try:
+                self._setup_oakd_imu()
+            except (ImportError, Exception) as exc:
+                self.logger.warning(
+                    f"OAK-D IMU unavailable ({exc}) — falling back to synthetic IMU"
+                )
+                self._setup_synthetic()
         else:
             self._setup_i2c(i2c_address, i2c_bus)
 
@@ -131,9 +150,28 @@ class IMUWorker(BaseWorker):
             )[:9]
             self._imu_buf.write(vec)
 
+    # ── synthetic IMU ──────────────────────────────────────────────
+
+    def _setup_synthetic(self) -> None:
+        from synthetic import SyntheticIMUGenerator
+
+        self._synth_gen = SyntheticIMUGenerator()
+        self._synthetic = True
+        self._dummy = False
+        self._use_oakd = False
+        self.logger.info("Synthetic IMU ready")
+
+    def _step_synthetic(self) -> None:
+        vec = self._synth_gen.next()
+        self._imu_buf.write(vec)
+        time.sleep(0.005)  # ~200 Hz
+
     #  dispatch 
 
     def step(self) -> None:
+        if getattr(self, '_synthetic', False):
+            self._step_synthetic()
+            return
         if self._dummy:
             time.sleep(0.1)
             return

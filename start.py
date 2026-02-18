@@ -254,6 +254,7 @@ def main() -> None:
     #  4. Define workers   
       
     use_webcam = config.get("use_webcam", False)
+    use_synthetic = config.get("synthetic", False)
     global _workers
     _workers = [
         CameraWorker(
@@ -261,6 +262,7 @@ def main() -> None:
             output_buffer=frame_buf,
             fps=fps,
             resolution=resolution,
+            synthetic=use_synthetic,
         ),
         IMUWorker(
             name="imu",
@@ -268,6 +270,7 @@ def main() -> None:
             i2c_address=i2c_address,
             i2c_bus=i2c_bus,
             use_oakd_imu=use_oakd_imu,
+            synthetic=use_synthetic,
         ),
         VisionWorker(
             name="vision",

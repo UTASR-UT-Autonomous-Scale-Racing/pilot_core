@@ -32,6 +32,9 @@ except ImportError:
 class CameraWorker(BaseWorker):
     """Worker process that captures OAK-D RGB+Depth frames via DepthAI v3.
 
+    Falls back to synthetic FPV frames when depthai is unavailable or
+    ``synthetic=True`` is passed in config (dev-local mode).
+
     Config kwargs (passed via ``start.py``)
     ----------------------------------------
     output_buffer : FrameBuffer
@@ -40,6 +43,8 @@ class CameraWorker(BaseWorker):
         Target camera FPS (default 30).
     resolution : list[int]
         ``[width, height]`` for RGB and depth output (default [640, 400]).
+    synthetic : bool
+        Force synthetic frame generation (default False).
     """
 
     def __init__(self, name: str = "camera", **kwargs: Any) -> None:
@@ -48,10 +53,22 @@ class CameraWorker(BaseWorker):
         self._pipeline = None
         self._sync_q = None
         self._frame_count: int = 0
+        self._synthetic = False
+        self._synth_gen = None
 
     #  lifecycle ─
 
     def setup(self) -> None:
+        import os
+        use_synthetic = (
+            self.config.get("synthetic", False)
+            or os.environ.get("PILOT_SYNTHETIC", "") == "1"
+            or dai is None
+        )
+        if use_synthetic:
+            self._setup_synthetic()
+            return
+
         if dai is None:
             raise ImportError("depthai >= 3.0 is required for CameraWorker")
 
@@ -114,6 +131,10 @@ class CameraWorker(BaseWorker):
         )
 
     def step(self) -> None:
+        if self._synthetic:
+            self._step_synthetic()
+            return
+
         msg_group = self._sync_q.tryGet()
         if msg_group is None:
             time.sleep(0.001)
@@ -135,7 +156,37 @@ class CameraWorker(BaseWorker):
                 f"depth={depth.shape} range=[{depth.min():.2f}, {depth.max():.2f}]m"
             )
 
+    # ── synthetic mode ─────────────────────────────────────────────
+
+    def _setup_synthetic(self) -> None:
+        """Init synthetic FPV frame generator (no hardware needed)."""
+        from synthetic import SyntheticFrameGenerator
+
+        fps = self.config.get("fps", 30)
+        width, height = self.config.get("resolution", [640, 400])
+        self._frame_buf = self.config["output_buffer"]
+        self._synthetic = True
+        self._synth_gen = SyntheticFrameGenerator(width=width, height=height)
+        self._target_dt = 1.0 / fps
+        self.logger.info(
+            f"Synthetic camera ready @ {fps} FPS, {width}×{height}"
+        )
+
+    def _step_synthetic(self) -> None:
+        rgb, depth = self._synth_gen.next_fast()
+        self._frame_buf.write(rgb, depth)
+        self._frame_count += 1
+        if self._frame_count % 100 == 1:
+            self.logger.debug(
+                f"synth frame #{self._frame_count}  rgb={rgb.shape}  "
+                f"depth range=[{depth.min():.2f}, {depth.max():.2f}]m"
+            )
+        time.sleep(self._target_dt)
+
     def teardown(self) -> None:
+        if self._synthetic:
+            self.logger.info("Synthetic camera stopped")
+            return
         if self._pipeline is not None:
             try:
                 self._pipeline.stop()

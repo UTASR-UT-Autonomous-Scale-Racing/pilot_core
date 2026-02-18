@@ -15,3 +15,6 @@ act*
 venv/
 __pycache__/
 build/
+*.mp4
+/test_output
+*.ipynb

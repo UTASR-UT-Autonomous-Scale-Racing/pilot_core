@@ -1,0 +1,262 @@
+"""
+ZMQSensorWorker — Subscribe to sensor data from autodrive_bridge via ZMQ
+and populate multiple shared ring buffers (frame, imu, pose).
+
+This worker replaces CameraWorker + IMUWorker when running in simulator mode.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import time
+from typing import Any
+
+import numpy as np
+
+from .base_worker import BaseWorker
+from shared_buffer import FrameBuffer, IMUBuffer, PoseBuffer
+
+try:
+    import zmq
+except ImportError:
+    zmq = None
+
+
+class ZMQSensorWorker(BaseWorker):
+    """Worker that subscribes to ZMQ sensor feed and fills multiple buffers.
+
+    Config kwargs
+    -------------
+    host : str
+        Hostname of autodrive_bridge (default: localhost)
+    port : int
+        Port number for sensor data (default: 5555)
+    frame_buffer : FrameBuffer
+        Shared FrameBuffer to write RGB+Depth frames
+    imu_buffer : IMUBuffer
+        Shared IMUBuffer to write IMU data
+    pose_buffer : PoseBuffer, optional
+        Shared PoseBuffer to write ground truth poses from simulator
+    """
+
+    def __init__(self, name: str = "zmq_sensor", **kwargs: Any) -> None:
+        super().__init__(name, **kwargs)
+        self._socket = None
+        self._context = None
+        self._frame_buf: FrameBuffer | None = None
+        self._imu_buf: IMUBuffer | None = None
+        self._pose_buf: PoseBuffer | None = None
+        self._frame_count = 0
+        self._last_report_time = 0
+
+    def setup(self) -> None:
+        if zmq is None:
+            raise ImportError("pyzmq is required for ZMQSensorWorker")
+
+        host = self.config.get("host", "localhost")
+        port = self.config.get("port", 5555)
+
+        # Initialize ZMQ subscriber
+        self._context = zmq.Context()
+        self._socket = self._context.socket(zmq.SUB)
+        self._socket.setsockopt(zmq.RCVHWM, 10)
+        self._socket.setsockopt(zmq.RCVTIMEO, 100)  # 100ms timeout
+        self._socket.setsockopt(zmq.CONFLATE, 1)  # Keep only latest message
+
+        try:
+            self._socket.connect(f"tcp://{host}:{port}")
+            self._socket.setsockopt_string(zmq.SUBSCRIBE, "")
+            self.logger.info(f"Connected to ZMQ sensor publisher at {host}:{port}")
+        except Exception as e:
+            self.logger.error(f"Failed to connect to {host}:{port}: {e}")
+            raise
+
+        # Get buffer references
+        self._frame_buf = self.config["frame_buffer"]
+        self._imu_buf = self.config["imu_buffer"]
+        self._pose_buf = self.config.get("pose_buffer")
+
+        self._last_report_time = time.time()
+        self.logger.info("ZMQSensorWorker ready")
+
+    def step(self) -> None:
+        try:
+            # Receive sensor data (non-blocking)
+            msg_json = self._socket.recv_string(zmq.NOBLOCK)
+            data = json.loads(msg_json)
+
+            print(f"Received sensor data: keys={list(data.keys())}, front_camera_shape={data.get('front_camera', {}).get('shape')}, depth_camera_shape={data.get('depth_camera', {}).get('shape')}")
+            print(f"IMU data: orientation_quat={data.get('orientation_quat')}, linear_acceleration={data.get('linear_acceleration')}, throttle={data.get('throttle')}, steering={data.get('steering')}")
+            print(f"Pose data: position={data.get('position')}, orientation_quat={data.get('orientation_quat')}")
+            # Process and write to buffers
+            self._process_frame_data(data)
+            self._process_imu_data(data)
+            self._process_pose_data(data)
+
+            self._frame_count += 1
+
+            # Report stats every second
+            now = time.time()
+            if now - self._last_report_time >= 1.0:
+                elapsed = now - self._last_report_time
+                fps = self._frame_count / elapsed if elapsed > 0 else 0
+                self.logger.debug(f"ZMQ sensor FPS: {fps:.1f}")
+                self._frame_count = 0
+                self._last_report_time = now
+
+        except zmq.Again:
+            # No data available, continue
+            time.sleep(0.001)
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"Failed to decode JSON: {e}")
+            time.sleep(0.001)
+        except Exception as e:
+            self.logger.error(f"Error processing sensor data: {e}")
+            time.sleep(0.01)
+
+    def _process_frame_data(self, data: dict) -> None:
+        """Extract and write frame data to FrameBuffer."""
+        if 'front_camera' not in data or not data['front_camera']:
+            return
+
+        try:
+            front_cam = data['front_camera']
+            # Decode base64 RGB image
+            img_bytes = base64.b64decode(front_cam['data'])
+            rgb = np.frombuffer(img_bytes, dtype=np.uint8).reshape(front_cam['shape'])
+
+            # Ensure RGB format
+            if len(rgb.shape) == 2:
+                rgb = np.stack([rgb, rgb, rgb], axis=-1)
+
+            # Get depth frame if available
+            depth = None
+            if 'depth_camera' in data and data['depth_camera']:
+                try:
+                    depth_cam = data['depth_camera']
+                    depth_bytes = base64.b64decode(depth_cam['data'])
+                    depth_flat = np.frombuffer(depth_bytes, dtype=np.uint16)
+                    
+                    # Try to reshape using declared shape first
+                    try:
+                        depth = depth_flat.reshape(depth_cam['shape'][:2])  # Take only first 2 dims
+                    except ValueError:
+                        # Shape mismatch - try common resolutions
+                        # 614400 = 800 × 768
+                        h, w = 800, 768
+                        if len(depth_flat) == h * w:
+                            depth = depth_flat.reshape((h, w))
+                        else:
+                            # Try to guess dimensions (assume landscape orientation)
+                            total_pixels = len(depth_flat)
+                            for h in [480, 576, 720, 768, 800]:
+                                if total_pixels % h == 0:
+                                    w = total_pixels // h
+                                    depth = depth_flat.reshape((h, w))
+                                    break
+                            if depth is None:
+                                # Fallback: reshape to nearest square
+                                side = int(np.sqrt(total_pixels))
+                                depth = depth_flat[:side*side].reshape((side, side))
+                    
+                    # Resize to match RGB resolution using OpenCV for better interpolation
+                    try:
+                        import cv2
+                        if depth.shape != rgb.shape[:2]:
+                            depth = cv2.resize(depth, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
+                    except ImportError:
+                        # Fallback to scipy if cv2 not available
+                        from scipy.ndimage import zoom
+                        if depth.shape != rgb.shape[:2]:
+                            scale = (rgb.shape[0] / depth.shape[0], rgb.shape[1] / depth.shape[1])
+                            depth = zoom(depth, scale, order=1)
+                    
+                    depth = depth.astype(np.float32)
+                except Exception as e:
+                    self.logger.debug(f"Depth decode/resize failed, using zeros: {e}")
+                    depth = np.zeros(rgb.shape[:2], dtype=np.float32)
+            else:
+                depth = np.zeros(rgb.shape[:2], dtype=np.float32)
+
+            # Write to frame buffer
+            self._frame_buf.write(rgb, depth)
+
+        except Exception as e:
+            self.logger.warning(f"Frame processing failed: {e}")
+
+    def _process_imu_data(self, data: dict) -> None:
+        """Extract and write IMU data to IMUBuffer."""
+        try:
+            # Get quaternion orientation
+            if 'orientation_quat' in data:
+                quat = np.array(data['orientation_quat'], dtype=np.float32)
+            else:
+                quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+            # Get linear acceleration
+            if 'linear_acceleration' in data:
+                lin_acc = np.array(data['linear_acceleration'], dtype=np.float32)
+            else:
+                lin_acc = np.zeros(3, dtype=np.float32)
+
+            # Get throttle and steering (normalized to [0, 1])
+            throttle = float(data.get('throttle', 0.0))
+            steering = float(data.get('steering', 0.0))
+
+            # Convert from [-1, 1] to [0, 1]
+            throttle_norm = (throttle + 1.0) / 2.0
+            steering_norm = (steering + 1.0) / 2.0
+            throttle_norm = np.clip(throttle_norm, 0.0, 1.0)
+            steering_norm = np.clip(steering_norm, 0.0, 1.0)
+
+            # Construct IMU vector: [w, x, y, z, ax, ay, az, throttle, steering]
+            imu_vector = np.concatenate([
+                quat,      # Orientation quaternion (4 floats)
+                lin_acc,   # Linear acceleration (3 floats)
+                [throttle_norm, steering_norm]  # Control inputs (2 floats)
+            ]).astype(np.float32)
+
+            self._imu_buf.write(imu_vector)
+
+        except Exception as e:
+            self.logger.warning(f"IMU processing failed: {e}")
+
+    def _process_pose_data(self, data: dict) -> None:
+        """Extract and write ground truth pose to PoseBuffer (optional)."""
+        if self._pose_buf is None:
+            return
+
+        if 'position' not in data or 'orientation_quat' not in data:
+            return
+
+        try:
+            pos = np.array(data['position'], dtype=np.float32)
+            quat = np.array(data['orientation_quat'], dtype=np.float32)
+
+            # Create 4x4 pose matrix
+            pose = np.eye(4, dtype=np.float32)
+            pose[0:3, 3] = pos
+
+            # Convert quaternion (w, x, y, z) to rotation matrix
+            w, x, y, z = quat[0], quat[1], quat[2], quat[3]
+
+            R = np.array([
+                [1 - 2*(y*y + z*z),     2*(x*y - w*z),     2*(x*z + w*y)],
+                [    2*(x*y + w*z), 1 - 2*(x*x + z*z),     2*(y*z - w*x)],
+                [    2*(x*z - w*y),     2*(y*z + w*x), 1 - 2*(x*x + y*y)]
+            ], dtype=np.float32)
+
+            pose[0:3, 0:3] = R
+
+            self._pose_buf.write(pose, None)
+
+        except Exception as e:
+            self.logger.warning(f"Pose processing failed: {e}")
+
+    def teardown(self) -> None:
+        if self._socket is not None:
+            self._socket.close()
+        if self._context is not None:
+            self._context.term()
+        self.logger.info("ZMQSensorWorker shut down")

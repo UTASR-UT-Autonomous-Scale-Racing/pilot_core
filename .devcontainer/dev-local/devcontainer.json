@@ -4,6 +4,11 @@
     "dockerfile": "../../Dockerfile.dev-local",
     "context": "../.."
   },
+  "runArgs": [
+    "--privileged",
+    "--network=host",
+    "--ipc=host"
+  ],
   // Container environment
   "containerEnv": {
     "PILOT_SYNTHETIC": "1",

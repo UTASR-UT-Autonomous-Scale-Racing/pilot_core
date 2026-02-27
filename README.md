@@ -64,7 +64,7 @@ Requires NVIDIA runtime, OAK-D camera, and ORB_SLAM3 built in `ORB_SLAM3/lib/`.
 
 ```bash
 python3 -m venv venv && source venv/bin/activate
-pip install PyYAML numpy opencv-python-headless scipy pytest pytest-timeout matplotlib pandas tqdm
+pip install PyYAML numpy opencv-python-headless scipy pytest pytest-timeout matplotlib pandas tqdm zmq
 ```
 
 ### 4. Building ORB-SLAM3 + pybind11 wrapper

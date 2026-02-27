@@ -15,6 +15,8 @@ from .mapping_worker import MappingWorker
 from .track_pid_controller import TrackPIDController
 from .track_ftg_controller import TrackFTGController
 from .web_publish_worker import WebPublishWorker
+from .zmq_sensor_worker import ZMQSensorWorker
+from .zmq_publish_worker import ZMQPublishWorker
 
 __all__ = [
     "BaseWorker",
@@ -30,4 +32,6 @@ __all__ = [
     "TrackPIDController",
     "TrackFTGController",
     "WebPublishWorker",
+    "ZMQSensorWorker",
+    "ZMQPublishWorker",
 ]

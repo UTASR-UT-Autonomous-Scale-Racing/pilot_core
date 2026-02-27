@@ -1,0 +1,102 @@
+# Configuration for ZMQ simulator mode
+# Use this config when running with Unity simulator via autodrive_bridge
+
+# ======================================================================
+# ZMQ Communication Settings
+# ======================================================================
+use_zmq: true
+zmq_host: "localhost"           # or "autodrive_bridge" if in separate container
+zmq_sensor_port: 5555           # Subscribe to sensor data from simulator
+zmq_control_port: 5556          # Publish control commands to simulator
+zmq_telemetry_port: 5557        # Publish telemetry/visualization data
+
+# Use ground truth poses from simulator (bypasses SLAM)
+use_zmq_pose: false             # Set to true to use simulator pose instead of SLAM
+
+# ======================================================================
+# Hardware Settings (disabled in ZMQ mode)
+# ======================================================================
+i2c_address: null               # No I2C hardware
+i2c_bus: null
+use_oakd_imu: false
+synthetic: false                # Not needed - using ZMQ
+
+# ======================================================================
+# Camera & Processing Settings
+# ======================================================================
+resolution: [640, 400]          # Must match Unity camera resolution
+fps: 30                         # Target FPS
+device: "cuda:0"                # or "cpu" if no GPU
+
+# ======================================================================
+# Model Configurations
+# ======================================================================
+segmentation_config_path: "pilot_vision/models/default/config.yaml"
+control_config_path: "pilot_controller/models/default/config.yaml"
+
+# Control mode: "neural" or "pid"
+control_mode: "pid"
+
+# ======================================================================
+# SLAM & Mapping (optional in ZMQ mode)
+# ======================================================================
+enable_slam: true              # Set to true if you want SLAM (slower)
+
+slam:
+  vocabulary: "ORB_SLAM3/Vocabulary/ORBvoc.txt"
+  settings: "oak_d_orbslam_settings.yaml"
+
+mapping:
+  alpha_shape: 25.0
+  boundary_min_points: 50
+
+pid:
+  kp_steer: 1.0
+  ki_steer: 0.0
+  kd_steer: 0.1
+  target_throttle: 0.3
+  noise_std: 0.05
+
+# ======================================================================
+# Shared Buffer Configuration
+# ======================================================================
+buffers:
+  frame:
+    slots: 8
+  imu:
+    slots: 32
+  segmentation:
+    slots: 4
+  pose:
+    slots: 8
+  control:
+    slots: 8
+  pointcloud:
+    slots: 4
+  boundary:
+    slots: 2
+
+# ======================================================================
+# ZMQ Telemetry Publishing (optional)
+# ======================================================================
+zmq_publish:
+  enabled: true                 # Enable telemetry back to simulator
+  control: false                # Echo control commands
+  pose: false                    # Publish trajectory
+  segmentation: false            # Publish segmentation masks
+  boundary: false               # Publish track boundaries (only if SLAM enabled)
+
+# ======================================================================
+# Recording (optional)
+# ======================================================================
+recording: true
+recording_path: "/tmp/pilot_recordings"
+recording_config:
+  sample_k: 1                   # Record every frame
+  top_n: 1000                   # Max 1000 samples per buffer
+
+# ======================================================================
+# Web Publishing (disabled in ZMQ mode)
+# ======================================================================
+web_publish:
+  enabled: false

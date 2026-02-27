@@ -54,6 +54,8 @@ from workers import (
     SLAMWorker,
     VisionWorker,
     WebPublishWorker,
+    ZMQPublishWorker,
+    ZMQSensorWorker,
 )
 
 # 
@@ -255,23 +257,52 @@ def main() -> None:
       
     use_webcam = config.get("use_webcam", False)
     use_synthetic = config.get("synthetic", False)
+    use_zmq = config.get("use_zmq", False)
+    zmq_host = config.get("zmq_host", "localhost")
+    zmq_sensor_port = config.get("zmq_sensor_port", 5555)
+    zmq_control_port = config.get("zmq_control_port", 5556)
+    zmq_telemetry_port = config.get("zmq_telemetry_port", 5557)
+    use_zmq_pose = config.get("use_zmq_pose", False)  # Use ground truth pose from simulator
+    
     global _workers
-    _workers = [
-        CameraWorker(
-            name="camera",
-            output_buffer=frame_buf,
-            fps=fps,
-            resolution=resolution,
-            synthetic=use_synthetic,
-        ),
-        IMUWorker(
-            name="imu",
-            output_buffer=imu_buf,
-            i2c_address=i2c_address,
-            i2c_bus=i2c_bus,
-            use_oakd_imu=use_oakd_imu,
-            synthetic=use_synthetic,
-        ),
+    _workers = []
+    
+    # Sensor input workers
+    if use_zmq:
+        # ZMQ mode: Replace hardware sensors with ZMQ subscriber
+        _workers.append(
+            ZMQSensorWorker(
+                name="zmq_sensor",
+                host=zmq_host,
+                port=zmq_sensor_port,
+                frame_buffer=frame_buf,
+                imu_buffer=imu_buf,
+                pose_buffer=pose_buf if use_zmq_pose else None,
+            )
+        )
+        logger.info(f"ZMQ sensor mode enabled (host={zmq_host}, port={zmq_sensor_port})")
+    else:
+        # Hardware mode: Use OAK-D camera and I2C IMU
+        _workers.extend([
+            CameraWorker(
+                name="camera",
+                output_buffer=frame_buf,
+                fps=fps,
+                resolution=resolution,
+                synthetic=use_synthetic,
+            ),
+            IMUWorker(
+                name="imu",
+                output_buffer=imu_buf,
+                i2c_address=i2c_address,
+                i2c_bus=i2c_bus,
+                use_oakd_imu=use_oakd_imu,
+                synthetic=use_synthetic,
+            ),
+        ])
+    
+    # Processing workers (always included, regardless of input source)
+    _workers.append(
         VisionWorker(
             name="vision",
             input_buffer=frame_buf,
@@ -280,10 +311,12 @@ def main() -> None:
             device=device,
             use_tensorrt=config.get("use_tensorrt", False),
         ),
-    ]
+    )
 
     # Control worker — mode depends on config
-    if control_mode == "pid" and enable_slam:
+    # PID mode can use either SLAM or ZMQ ground truth pose
+    has_pose_source = enable_slam or use_zmq_pose
+    if control_mode == "pid" and has_pose_source:
         _workers.append(
             ControlWorker(
                 name="control",
@@ -311,17 +344,20 @@ def main() -> None:
             )
         )
 
+    # Actuator worker (hardware I2C and/or ZMQ control publisher)
     _workers.append(
         ActuatorWorker(
             name="actuator",
             input_buffer=ctrl_buf,
             i2c_address=i2c_address,
             i2c_bus=i2c_bus,
+            zmq_enabled=use_zmq,
+            zmq_port=zmq_control_port,
         )
     )
 
-    # SLAM + Mapping workers
-    if enable_slam:
+    # SLAM + Mapping workers (skip SLAM if using ZMQ ground truth pose)
+    if enable_slam and not use_zmq_pose:
         _workers.append(
             SLAMWorker(
                 name="slam",
@@ -338,6 +374,10 @@ def main() -> None:
                 localize_event=localize_event,
             )
         )
+    elif use_zmq_pose:
+        logger.info("Using ZMQ ground truth poses (SLAM disabled)")
+    
+    if enable_slam:
         _workers.append(
             MappingWorker(
                 name="mapping",
@@ -408,6 +448,22 @@ def main() -> None:
             )
         )
         logger.info("Web publish worker enabled → %s", web_cfg.get("endpoint"))
+
+    # Optional: ZMQ telemetry publisher (for simulator visualization)
+    zmq_publish_cfg = config.get("zmq_publish", {})
+    if use_zmq and zmq_publish_cfg.get("enabled", False):
+        _workers.append(
+            ZMQPublishWorker(
+                name="zmq_publish",
+                port=zmq_telemetry_port,
+                control_buffer=ctrl_buf,
+                pose_buffer=pose_buf if zmq_publish_cfg.get("pose", False) else None,
+                seg_buffer=seg_buf if zmq_publish_cfg.get("segmentation", False) else None,
+                boundary_buffer=boundary_buf if zmq_publish_cfg.get("boundary", False) else None,
+                publish=zmq_publish_cfg,
+            )
+        )
+        logger.info(f"ZMQ telemetry publisher enabled on port {zmq_telemetry_port}")
 
     #  5. Register signal handlers ─
     signal.signal(signal.SIGINT, _shutdown)

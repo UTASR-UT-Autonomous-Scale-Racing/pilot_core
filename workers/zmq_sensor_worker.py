@@ -22,6 +22,11 @@ try:
 except ImportError:
     zmq = None
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
 
 class ZMQSensorWorker(BaseWorker):
     """Worker that subscribes to ZMQ sensor feed and fills multiple buffers.
@@ -86,9 +91,32 @@ class ZMQSensorWorker(BaseWorker):
             msg_json = self._socket.recv_string(zmq.NOBLOCK)
             data = json.loads(msg_json)
 
-            print(f"Received sensor data: keys={list(data.keys())}, front_camera_shape={data.get('front_camera', {}).get('shape')}, depth_camera_shape={data.get('depth_camera', {}).get('shape')}")
-            print(f"IMU data: orientation_quat={data.get('orientation_quat')}, linear_acceleration={data.get('linear_acceleration')}, throttle={data.get('throttle')}, steering={data.get('steering')}")
-            print(f"Pose data: position={data.get('position')}, orientation_quat={data.get('orientation_quat')}")
+            _fc = data.get('front_camera')
+            _dc = data.get('depth_camera')
+            if _fc and cv2 is not None:
+                try:
+                    _fc_arr = np.frombuffer(base64.b64decode(_fc['data']), dtype=np.uint8)
+                    _fc_img = cv2.imdecode(_fc_arr, cv2.IMREAD_COLOR)
+                    _fc_info = f"shape={_fc_img.shape}" if _fc_img is not None else "decode_failed"
+                except Exception as _e:
+                    _fc_info = f"decode_error={_e}"
+            elif _fc:
+                _fc_info = f"PRESENT (cv2 unavailable)"
+            else:
+                _fc_info = 'NONE'
+            if _dc and cv2 is not None:
+                try:
+                    _dc_arr = np.frombuffer(base64.b64decode(_dc['data']), dtype=np.uint8)
+                    _dc_img = cv2.imdecode(_dc_arr, cv2.IMREAD_GRAYSCALE)
+                    _dc_info = f"shape={_dc_img.shape}" if _dc_img is not None else "decode_failed"
+                except Exception as _e:
+                    _dc_info = f"decode_error={_e}"
+            elif _dc:
+                _dc_info = f"PRESENT (cv2 unavailable)"
+            else:
+                _dc_info = 'NONE'
+            # print(f"[ZMQ] front_camera={_fc_info} | depth_camera={_dc_info}")
+            # print(f"[ZMQ] IMU: quat={data.get('orientation_quat')} accel={data.get('linear_acceleration')} throttle={data.get('throttle')} steering={data.get('steering')}")
             # Process and write to buffers
             self._process_frame_data(data)
             self._process_imu_data(data)
@@ -121,14 +149,20 @@ class ZMQSensorWorker(BaseWorker):
             return
 
         try:
+            import cv2
             front_cam = data['front_camera']
-            # Decode base64 RGB image
             img_bytes = base64.b64decode(front_cam['data'])
-            rgb = np.frombuffer(img_bytes, dtype=np.uint8).reshape(front_cam['shape'])
 
-            # Ensure RGB format
-            if len(rgb.shape) == 2:
-                rgb = np.stack([rgb, rgb, rgb], axis=-1)
+            # Decode based on encoding field (JPEG from bridge, or raw bytes legacy)
+            encoding = front_cam.get('encoding', 'raw')
+            if encoding == 'jpeg':
+                nparr = np.frombuffer(img_bytes, dtype=np.uint8)
+                rgb = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+            else:
+                rgb = np.frombuffer(img_bytes, dtype=np.uint8).reshape(front_cam['shape'])
+                if len(rgb.shape) == 2:
+                    rgb = np.stack([rgb, rgb, rgb], axis=-1)
 
             # Get depth frame if available
             depth = None
@@ -136,43 +170,25 @@ class ZMQSensorWorker(BaseWorker):
                 try:
                     depth_cam = data['depth_camera']
                     depth_bytes = base64.b64decode(depth_cam['data'])
-                    depth_flat = np.frombuffer(depth_bytes, dtype=np.uint16)
-                    
-                    # Try to reshape using declared shape first
-                    try:
-                        depth = depth_flat.reshape(depth_cam['shape'][:2])  # Take only first 2 dims
-                    except ValueError:
-                        # Shape mismatch - try common resolutions
-                        # 614400 = 800 × 768
-                        h, w = 800, 768
-                        if len(depth_flat) == h * w:
-                            depth = depth_flat.reshape((h, w))
-                        else:
-                            # Try to guess dimensions (assume landscape orientation)
-                            total_pixels = len(depth_flat)
-                            for h in [480, 576, 720, 768, 800]:
-                                if total_pixels % h == 0:
-                                    w = total_pixels // h
-                                    depth = depth_flat.reshape((h, w))
-                                    break
-                            if depth is None:
-                                # Fallback: reshape to nearest square
-                                side = int(np.sqrt(total_pixels))
-                                depth = depth_flat[:side*side].reshape((side, side))
-                    
-                    # Resize to match RGB resolution using OpenCV for better interpolation
-                    try:
-                        import cv2
-                        if depth.shape != rgb.shape[:2]:
-                            depth = cv2.resize(depth, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
-                    except ImportError:
-                        # Fallback to scipy if cv2 not available
-                        from scipy.ndimage import zoom
-                        if depth.shape != rgb.shape[:2]:
-                            scale = (rgb.shape[0] / depth.shape[0], rgb.shape[1] / depth.shape[1])
-                            depth = zoom(depth, scale, order=1)
-                    
-                    depth = depth.astype(np.float32)
+                    depth_encoding = depth_cam.get('encoding', 'raw')
+
+                    if depth_encoding in ('jpeg', 'png'):
+                        # JPEG or grayscale PNG from bridge: uint8 [0,255] → float32 [0,10m]
+                        nparr = np.frombuffer(depth_bytes, dtype=np.uint8)
+                        depth = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE).astype(np.float32)
+                        depth = depth / 255.0 * 10.0  # scale to approximate metric range
+                    else:
+                        # Legacy raw uint16 path
+                        depth_flat = np.frombuffer(depth_bytes, dtype=np.uint16)
+                        try:
+                            depth = depth_flat.reshape(depth_cam['shape'][:2]).astype(np.float32)
+                        except ValueError:
+                            side = int(np.sqrt(len(depth_flat)))
+                            depth = depth_flat[:side*side].reshape((side, side)).astype(np.float32)
+
+                    if depth.shape != rgb.shape[:2]:
+                        depth = cv2.resize(depth, (rgb.shape[1], rgb.shape[0]),
+                                           interpolation=cv2.INTER_LINEAR)
                 except Exception as e:
                     self.logger.debug(f"Depth decode/resize failed, using zeros: {e}")
                     depth = np.zeros(rgb.shape[:2], dtype=np.float32)

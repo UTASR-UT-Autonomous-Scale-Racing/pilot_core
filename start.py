@@ -178,23 +178,32 @@ def main() -> None:
     enable_slam = config.get("enable_slam", False)
     control_mode = config.get("control_mode", "neural")
 
-    #  1. Create shared buffers 
+    #  1. Create shared buffers
     buf_cfg = config.get("buffers", {})
+    resolution = config.get("resolution", [640, 400])
 
+    # Size the frame buffer for the actual resolution: meta(16) + RGB uint8 + depth float32
+    _h, _w = resolution[0], resolution[1]
+    _frame_max_payload = 16 + _h * _w * 3 + _h * _w * 4
     frame_buf = FrameBuffer(
         slots=buf_cfg.get("frame", {}).get("slots", 8),
         name="frame_buf",
         create=True,
+        max_payload=_frame_max_payload,
     )
     imu_buf = IMUBuffer(
         slots=buf_cfg.get("imu", {}).get("slots", 32),
         name="imu_buf",
         create=True,
     )
+    # Size the seg buffer for the actual frame resolution (metadata=8 bytes + H*W*float32)
+    _seg_h, _seg_w = resolution[0], resolution[1]
+    _seg_max_payload = 8 + _seg_h * _seg_w * 4
     seg_buf = SegmentationBuffer(
         slots=buf_cfg.get("segmentation", {}).get("slots", 4),
         name="seg_buf",
         create=True,
+        max_payload=_seg_max_payload,
     )
     pose_buf = PoseBuffer(
         slots=buf_cfg.get("pose", {}).get("slots", 8),
@@ -485,7 +494,11 @@ def main() -> None:
             "then PID control"
         )
 
-    #  7. Monitor loop 
+    #  7. Monitor loop
+    # Inform user of manual loop-closure trigger when SLAM is enabled
+    if enable_slam:
+        logger.info("SLAM mapping active. Press 'L' + ENTER to manually signal loop closure if SLAM doesn't auto-detect it.")
+
     try:
         _terminal_gate_done = False
         while not _shutting_down:
@@ -508,6 +521,20 @@ def main() -> None:
                     localize_event.set()
                 _terminal_gate_done = True
                 logger.info("PID control activated — vehicle driving")
+
+            # Manual loop closure trigger: type 'L' + ENTER in the terminal
+            if (
+                enable_slam
+                and loop_event is not None
+                and not loop_event.is_set()
+                and not _terminal_gate_done
+            ):
+                import select, sys as _sys
+                if select.select([_sys.stdin], [], [], 0)[0]:
+                    line = _sys.stdin.readline().strip().upper()
+                    if line == 'L':
+                        loop_event.set()
+                        logger.info("Manual loop closure triggered — extracting boundaries …")
 
             for i, (w, p) in enumerate(zip(_workers, _processes)):
                 if not p.is_alive() and not _shutting_down:

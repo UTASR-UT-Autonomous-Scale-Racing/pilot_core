@@ -52,9 +52,9 @@ class ActuatorWorker(BaseWorker):
         self._last_seq = 0
         self._dummy = False
         # ZMQ attributes
-        # self._zmq_enabled = False
-        # self._zmq_context = None
-        # self._zmq_pub = None
+        self._zmq_enabled = False
+        self._zmq_context = None
+        self._zmq_pub = None
 
     def setup(self) -> None:
         self._ctrl_buf = self.config["input_buffer"]
@@ -76,28 +76,28 @@ class ActuatorWorker(BaseWorker):
                 self.logger.info(f"I2C actuator ready on bus {i2c_bus}, address 0x{i2c_address:02x}")
 
         # Setup ZMQ publisher for simulator
-        # self._zmq_enabled = self.config.get("zmq_enabled", False)
-        # if self._zmq_enabled:
-        #     if zmq is None:
-        #         self.logger.warning("pyzmq not installed — ZMQ disabled")
-        #         self._zmq_enabled = False
-        #     else:
-        #         zmq_port = self.config.get("zmq_port", 5556)
-        #         try:
-        #             self._zmq_context = zmq.Context()
-        #             self._zmq_pub = self._zmq_context.socket(zmq.PUB)
-        #             self._zmq_pub.setsockopt(zmq.SNDHWM, 10)
-        #             self._zmq_pub.setsockopt(zmq.LINGER, 1000)
-        #             self._zmq_pub.bind(f"tcp://*:{zmq_port}")
-        #             time.sleep(0.5)  # Allow socket to initialize
-        #             self.logger.info(f"ZMQ control publisher bound to port {zmq_port}")
-        #         except Exception as e:
-        #             self.logger.warning(f"Failed to bind ZMQ publisher: {e}")
-        #             self._zmq_enabled = False
-        #             if self._zmq_pub:
-        #                 self._zmq_pub.close()
-        #             if self._zmq_context:
-        #                 self._zmq_context.term()
+        self._zmq_enabled = self.config.get("zmq_enabled", False)
+        if self._zmq_enabled:
+            if zmq is None:
+                self.logger.warning("pyzmq not installed — ZMQ disabled")
+                self._zmq_enabled = False
+            else:
+                zmq_port = self.config.get("zmq_port", 5556)
+                try:
+                    self._zmq_context = zmq.Context()
+                    self._zmq_pub = self._zmq_context.socket(zmq.PUB)
+                    self._zmq_pub.setsockopt(zmq.SNDHWM, 10)
+                    self._zmq_pub.setsockopt(zmq.LINGER, 1000)
+                    self._zmq_pub.bind(f"tcp://*:{zmq_port}")
+                    time.sleep(0.5)  # Allow socket to initialize
+                    self.logger.info(f"ZMQ control publisher bound to port {zmq_port}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to bind ZMQ publisher: {e}")
+                    self._zmq_enabled = False
+                    if self._zmq_pub:
+                        self._zmq_pub.close()
+                    if self._zmq_context:
+                        self._zmq_context.term()
 
         # PWM mapper from pilot_controller
         from pilot_controller.control_output import Controller
@@ -118,11 +118,11 @@ class ActuatorWorker(BaseWorker):
         self._last_seq = header.seq_no
 
         # Send to ZMQ (simulator)
-        # if self._zmq_enabled:
-        #     # Convert normalized [0, 1] to simulator range [-1, 1]
-        #     steering_sim = (steering_norm * 2.0) - 1.0
-        #     throttle_sim = (throttle_norm * 2.0) - 1.0
-        #     self._publish_zmq(steering_sim, throttle_sim)
+        if self._zmq_enabled:
+            # Convert normalized [0, 1] to simulator range [-1, 1]
+            steering_sim = (steering_norm * 2.0) - 1.0
+            throttle_sim = (throttle_norm * 2.0) - 1.0
+            self._publish_zmq(steering_sim, throttle_sim)
 
         # Send to I2C (hardware)
         if not self._dummy:
@@ -157,14 +157,15 @@ class ActuatorWorker(BaseWorker):
 
     def teardown(self) -> None:
         # Send neutral commands before shutting down
-        # if self._zmq_enabled and self._zmq_pub is not None:
-            # try:
-                # self._publish_zmq(0.0, 0.0)
-            # except Exception:
-                # pass
-            # self._zmq_pub.close()
-            # self._zmq_context.term()
-            # self.logger.info("ZMQ publisher closed")
+        if self._zmq_enabled and self._zmq_pub is not None:
+            try:
+                self._publish_zmq(0.0, 0.0)
+            except Exception:
+                pass
+            self._zmq_pub.close()
+            if self._zmq_context is not None:
+                self._zmq_context.term()
+            self.logger.info("ZMQ publisher closed")
 
         if self._controller is not None and not self._dummy:
             from pilot_controller.control_output import STEER_NEURAL, THROTTLE_NEURAL

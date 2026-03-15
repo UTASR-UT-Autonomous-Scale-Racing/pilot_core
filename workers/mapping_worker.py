@@ -18,6 +18,7 @@ Phase B (boundary extraction):
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import time
 from typing import Any, Optional
 
@@ -135,6 +136,8 @@ class MappingWorker(BaseWorker):
         Alpha-shape parameter (default 25.0).
     boundary_min_points : int
         Minimum wall points before attempting extraction (default 50).
+    map_output_path : str | None
+        Optional path to save extracted boundaries for future sessions.
     """
 
     def __init__(self, name: str = "mapping", **kwargs: Any) -> None:
@@ -148,6 +151,7 @@ class MappingWorker(BaseWorker):
 
         self._alpha: float = 25.0
         self._min_points: int = 50
+        self._map_output_path: str | None = None
 
         # Accumulated data
         self._bev_wall_pts: list[np.ndarray] = []
@@ -169,6 +173,7 @@ class MappingWorker(BaseWorker):
         self._mapping_done_event = self.config.get("mapping_done_event")
         self._alpha = self.config.get("alpha_shape", 25.0)
         self._min_points = self.config.get("boundary_min_points", 50)
+        self._map_output_path = self.config.get("map_output_path")
 
         self.logger.info(
             f"MappingWorker ready (alpha={self._alpha}, "
@@ -259,6 +264,26 @@ class MappingWorker(BaseWorker):
 
         # Write to boundary buffer
         self._boundary_buf.write(outer_line, inner_line)
+
+        if self._map_output_path:
+            try:
+                parent = os.path.dirname(self._map_output_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                np.savez(
+                    self._map_output_path,
+                    outer=outer_line.astype(np.float32),
+                    inner=inner_line.astype(np.float32),
+                )
+                self.logger.info(
+                    "Saved mapped boundaries to %s",
+                    self._map_output_path,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Failed to save map file: %s",
+                    self._map_output_path,
+                )
         self._boundaries_extracted = True
 
         # Print summary

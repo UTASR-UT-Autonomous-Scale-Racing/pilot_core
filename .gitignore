@@ -1,20 +1,54 @@
+# Python cache and logs
+*.log
+*.pyc
+*.pyo
+*.pyd
+*.swp
 
-recordings/
-temp/
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.db
-*.sqlite
-lib/
-pip*
-python*
-act*
-.vscode/
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Environment and dependency folders
+.env/
+.envrc
+.env.*
+.venv/
 venv/
-__pycache__/
+env/
+
+# IDE/editor files
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Test coverage reports
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# Docker files
+*.dockerfile
+docker-compose.yml
+
+# Caches and build artifacts
+trt_cache/
+bin/
 build/
-*.mp4
-/test_output
-*.ipynb
+.pytest_cache/
+lib/
+*/__pycache__/
+_pycache__/
+
+
+# Misc
+*.bak
+*.tmp
+*.engine
+*.so
+*.profile
+scripts/temp*

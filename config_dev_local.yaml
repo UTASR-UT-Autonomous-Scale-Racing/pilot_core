@@ -38,17 +38,34 @@ slam:
 
 # --- Mapping ---
 mapping:
+  enabled: true
+  load_path: null
+  save_path: null
+  set_localize_on_load: true
   alpha_shape: 25.0
   boundary_min_points: 10
   origin_keyframe: 0
 
+# --- Runtime Map Plot ---
+map_plot:
+  enabled: false
+  record_video: false
+  fps: 10
+  save_dir: /tmp/pilot_map
+  video_filename: map_recording.mp4
+  max_trail_laps: 5
+
 # --- Recording ---
 recording: false
-recording_path: /tmp/pilot_recordings
+recording_path: ~/recordings/recording_{datetime}
 
 # --- Web Telemetry (disabled in dev) ---
 web_publish:
   enabled: false
+
+# --- Replay Video ---
+replay_video:
+  include_map_plot: true
 
 # --- Shared Buffers ---
 buffers:

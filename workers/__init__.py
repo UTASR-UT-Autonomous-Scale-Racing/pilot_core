@@ -12,6 +12,7 @@ from .slam_worker import SLAMWorker
 from .recorder_worker import RecorderWorker
 from .buffer_recorder_worker import BufferRecorderWorker
 from .mapping_worker import MappingWorker
+from .map_plot_worker import MapPlotWorker
 from .track_pid_controller import TrackPIDController
 from .track_ftg_controller import TrackFTGController
 from .web_publish_worker import WebPublishWorker
@@ -27,6 +28,7 @@ __all__ = [
     "RecorderWorker",
     "BufferRecorderWorker",
     "MappingWorker",
+    "MapPlotWorker",
     "TrackPIDController",
     "TrackFTGController",
     "WebPublishWorker",

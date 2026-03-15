@@ -20,14 +20,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import multiprocessing as mp
 import os
 import signal
 import sys
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
+import numpy as np
 import yaml
 
 #  Shared buffers 
@@ -50,6 +53,7 @@ from workers import (
     ControlWorker,
     IMUWorker,
     MappingWorker,
+    MapPlotWorker,
     RecorderWorker,
     SLAMWorker,
     VisionWorker,
@@ -95,7 +99,51 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use OAK-D on-board IMU instead of I2C Arduino IMU",
     )
+    parser.add_argument(
+        "--web-publish",
+        action="store_true",
+        help="Enable WebPublishWorker regardless of config file",
+    )
+    parser.add_argument(
+        "--web-all",
+        action="store_true",
+        help="Publish all supported web payload sections",
+    )
+    parser.add_argument("--pose", action="store_true", help="Publish pose")
+    parser.add_argument("--trajectory", action="store_true", help="Publish trajectory")
+    parser.add_argument("--control", action="store_true", help="Publish control")
+    parser.add_argument("--track", action="store_true", help="Publish track boundaries")
+    parser.add_argument("--imu", action="store_true", help="Publish IMU")
+    parser.add_argument("--pointcloud", action="store_true", help="Publish point cloud")
     return parser.parse_args()
+
+
+def _load_track_map(path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Load pre-mapped boundaries from a .npz or .json map file."""
+    lower = path.lower()
+    if lower.endswith(".npz"):
+        with np.load(path) as data:
+            outer = np.asarray(data["outer"], dtype=np.float32)
+            inner = np.asarray(data["inner"], dtype=np.float32)
+        return outer, inner
+    if lower.endswith(".json"):
+        with open(path, "r") as fp:
+            payload = json.load(fp)
+        outer = np.asarray(payload.get("outer", []), dtype=np.float32)
+        inner = np.asarray(payload.get("inner", []), dtype=np.float32)
+        return outer, inner
+    raise ValueError("Unsupported map format; use .npz or .json")
+
+
+def _resolve_recording_path(path_template: str) -> str:
+        """Resolve recording path templates and user home.
+
+        Supported placeholders:
+            - {datetime}: replaced with local timestamp YYYYmmdd_HHMMSS.
+        """
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = path_template.replace("{datetime}", ts)
+        return os.path.abspath(os.path.expanduser(path))
 
 
 # 
@@ -172,6 +220,26 @@ def main() -> None:
         config["enable_slam"] = True
     if args.oakd_imu:
         config["use_oakd_imu"] = True
+    if args.web_publish:
+        config.setdefault("web_publish", {})
+        config["web_publish"]["enabled"] = True
+
+    web_flag_map = {
+        "pose": args.pose,
+        "trajectory": args.trajectory,
+        "control": args.control,
+        "track": args.track,
+        "imu": args.imu,
+        "pointcloud": args.pointcloud,
+    }
+    selected_web = [name for name, enabled in web_flag_map.items() if enabled]
+    if args.web_all:
+        selected_web = list(web_flag_map.keys())
+
+    if selected_web:
+        config.setdefault("web_publish", {})
+        config["web_publish"]["enabled"] = True
+        config["web_publish"]["include_buffers"] = selected_web
 
     enable_slam = config.get("enable_slam", False)
     control_mode = config.get("control_mode", "neural")
@@ -226,10 +294,36 @@ def main() -> None:
 
     logger.info("Shared buffers created")
 
+    mapping_cfg = config.get("mapping", {})
+    mapping_enabled = bool(mapping_cfg.get("enabled", True))
+    loaded_prebuilt_map = False
+
     #  2. Create multiprocessing events for pipeline coordination 
     loop_event = mp.Event() if enable_slam else None
     mapping_done_event = mp.Event() if enable_slam else None
     localize_event = mp.Event() if enable_slam else None
+
+    if enable_slam and boundary_buf is not None:
+        map_load_path = mapping_cfg.get("load_path")
+        if map_load_path:
+            try:
+                outer_line, inner_line = _load_track_map(map_load_path)
+                if len(outer_line) == 0 or len(inner_line) == 0:
+                    raise ValueError("Loaded map has empty boundaries")
+                boundary_buf.write(outer_line, inner_line)
+                mapping_done_event.set()
+                if mapping_cfg.get("set_localize_on_load", True):
+                    localize_event.set()
+                mapping_enabled = False
+                loaded_prebuilt_map = True
+                logger.info(
+                    "Loaded prebuilt map from %s (outer=%d, inner=%d)",
+                    map_load_path,
+                    len(outer_line),
+                    len(inner_line),
+                )
+            except Exception as exc:
+                logger.error("Failed to load prebuilt map %s: %s", map_load_path, exc)
 
     #  3. Resolve config values 
     seg_config_path = config.get(
@@ -245,33 +339,59 @@ def main() -> None:
     i2c_address = config.get("i2c_address")
     i2c_bus = config.get("i2c_bus")
     slam_cfg = config.get("slam", {})
-    mapping_cfg = config.get("mapping", {})
+    map_plot_cfg = config.get("map_plot", {})
+    rgbd_vis_cfg = config.get("rgbd_visualization", {})
     pid_cfg = config.get("pid", {})
 
     if isinstance(i2c_address, str):
         i2c_address = int(i2c_address, 0)
+
+    effective_control_mode = control_mode
+    if control_mode == "pid" and enable_slam and not mapping_enabled and not loaded_prebuilt_map:
+        logger.warning(
+            "PID mode requested with mapping disabled and no prebuilt map. "
+            "Falling back to neural control mode."
+        )
+        effective_control_mode = "neural"
 
     #  4. Define workers   
       
     use_webcam = config.get("use_webcam", False)
     use_synthetic = config.get("synthetic", False)
     global _workers
+
+    # When use_oakd_imu is True, integrate IMU into the camera pipeline
+    # to avoid OAK-D device conflicts (only one process can own the device).
+    camera_kwargs = dict(
+        name="camera",
+        output_buffer=frame_buf,
+        fps=fps,
+        resolution=resolution,
+        synthetic=use_synthetic,
+        rgbd_visualization=rgbd_vis_cfg,
+    )
+    if use_oakd_imu:
+        camera_kwargs["imu_buffer"] = imu_buf
+        logger.info("OAK-D IMU enabled — IMU data captured via CameraWorker")
+
     _workers = [
-        CameraWorker(
-            name="camera",
-            output_buffer=frame_buf,
-            fps=fps,
-            resolution=resolution,
-            synthetic=use_synthetic,
-        ),
-        IMUWorker(
-            name="imu",
-            output_buffer=imu_buf,
-            i2c_address=i2c_address,
-            i2c_bus=i2c_bus,
-            use_oakd_imu=use_oakd_imu,
-            synthetic=use_synthetic,
-        ),
+        CameraWorker(**camera_kwargs),
+    ]
+
+    # Only add a separate IMUWorker when NOT using OAK-D IMU
+    if not use_oakd_imu:
+        _workers.append(
+            IMUWorker(
+                name="imu",
+                output_buffer=imu_buf,
+                i2c_address=i2c_address,
+                i2c_bus=i2c_bus,
+                use_oakd_imu=False,
+                synthetic=use_synthetic,
+            ),
+        )
+
+    _workers.append(
         VisionWorker(
             name="vision",
             input_buffer=frame_buf,
@@ -279,11 +399,12 @@ def main() -> None:
             model_config=seg_config_path,
             device=device,
             use_tensorrt=config.get("use_tensorrt", False),
+            debug=args.debug,
         ),
-    ]
+    )
 
     # Control worker — mode depends on config
-    if control_mode == "pid" and enable_slam:
+    if effective_control_mode == "pid" and enable_slam:
         _workers.append(
             ControlWorker(
                 name="control",
@@ -338,24 +459,47 @@ def main() -> None:
                 localize_event=localize_event,
             )
         )
-        _workers.append(
-            MappingWorker(
-                name="mapping",
-                pose_buffer=pose_buf,
-                segment_buffer=seg_buf,
-                pointcloud_buffer=pc_buf,
-                boundary_buffer=boundary_buf,
-                loop_event=loop_event,
-                mapping_done_event=mapping_done_event,
-                alpha_shape=mapping_cfg.get("alpha_shape", 25.0),
-                boundary_min_points=mapping_cfg.get("boundary_min_points", 50),
+        if mapping_enabled:
+            _workers.append(
+                MappingWorker(
+                    name="mapping",
+                    pose_buffer=pose_buf,
+                    segment_buffer=seg_buf,
+                    pointcloud_buffer=pc_buf,
+                    boundary_buffer=boundary_buf,
+                    loop_event=loop_event,
+                    mapping_done_event=mapping_done_event,
+                    alpha_shape=mapping_cfg.get("alpha_shape", 25.0),
+                    boundary_min_points=mapping_cfg.get("boundary_min_points", 50),
+                    map_output_path=mapping_cfg.get("save_path"),
+                )
             )
-        )
+
+        if map_plot_cfg.get("enabled", False):
+            _workers.append(
+                MapPlotWorker(
+                    name="map_plot",
+                    pose_buffer=pose_buf,
+                    pointcloud_buffer=pc_buf,
+                    boundary_buffer=boundary_buf,
+                    loop_event=loop_event,
+                    mapping_done_event=mapping_done_event,
+                    fps=map_plot_cfg.get("fps", 10),
+                    save_dir=map_plot_cfg.get("save_dir", "/tmp/pilot_map"),
+                    max_trail_laps=map_plot_cfg.get("max_trail_laps", 5),
+                    save_video=map_plot_cfg.get("record_video", False),
+                    video_filename=map_plot_cfg.get("video_filename", "map_recording.mp4"),
+                )
+            )
 
     # Optional: Per-buffer recorder workers
     if config.get("recording", False):
         rec_cfg = config.get("recording_config", {})
-        rec_dir = config.get("recording_path", "/tmp/pilot_recordings")
+        rec_dir_template = config.get(
+            "recording_path", "~/recordings/recording_{datetime}"
+        )
+        rec_dir = _resolve_recording_path(rec_dir_template)
+        logger.info("Recording output directory: %s", rec_dir)
         rec_sample_k = rec_cfg.get("sample_k", 1)
         rec_top_n = rec_cfg.get("top_n", 0)
 
@@ -398,6 +542,8 @@ def main() -> None:
             WebPublishWorker(
                 name="web_publish",
                 pose_buffer=pose_buf,
+                imu_buffer=imu_buf,
+                pointcloud_buffer=pc_buf,
                 boundary_buffer=boundary_buf,
                 control_buffer=ctrl_buf,
                 endpoint=web_cfg.get("endpoint", "http://localhost:8080/api/telemetry"),
@@ -405,9 +551,15 @@ def main() -> None:
                 timeout=web_cfg.get("timeout", 2.0),
                 vehicle_id=web_cfg.get("vehicle_id", "pilot_1"),
                 max_trajectory_pts=web_cfg.get("max_trajectory_pts", 500),
+                max_pointcloud_pts=web_cfg.get("max_pointcloud_pts", 2000),
+                include_buffers=web_cfg.get("include_buffers"),
             )
         )
-        logger.info("Web publish worker enabled → %s", web_cfg.get("endpoint"))
+        logger.info(
+            "Web publish worker enabled → %s (include=%s)",
+            web_cfg.get("endpoint"),
+            web_cfg.get("include_buffers", "default"),
+        )
 
     #  5. Register signal handlers ─
     signal.signal(signal.SIGINT, _shutdown)
@@ -424,14 +576,19 @@ def main() -> None:
 
     logger.info(f"All {len(_workers)} workers running.  Press Ctrl+C to stop.")
     if enable_slam:
-        logger.info(
-            "SLAM pipeline enabled — mapping until loop closure, "
-            "then PID control"
-        )
+        if loaded_prebuilt_map:
+            logger.info("SLAM pipeline enabled — using prebuilt map in localization mode")
+        elif mapping_enabled:
+            logger.info(
+                "SLAM pipeline enabled — mapping until loop closure, "
+                "then PID control"
+            )
+        else:
+            logger.info("SLAM pipeline enabled — mapping disabled by config")
 
     #  7. Monitor loop 
     try:
-        _terminal_gate_done = False
+        _terminal_gate_done = loaded_prebuilt_map or not mapping_enabled
         while not _shutting_down:
             # Check if mapping is done → prompt for terminal confirmation
             if (

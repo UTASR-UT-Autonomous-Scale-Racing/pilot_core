@@ -15,7 +15,7 @@ class DTypeTag(IntEnum):
     """Identifies the payload type stored in a buffer slot."""
     UNKNOWN = 0
     FRAME = 1          # RGB + Depth frame pair
-    IMU = 2            # 9-float IMU vector
+    IMU = 2            # 16-float IMU vector
     SEGMENTATION = 3   # Segmentation mask
     POSE = 4           # 4x4 pose + map points
     CONTROL = 5        # Normalized steering + throttle

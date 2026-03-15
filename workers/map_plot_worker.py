@@ -101,6 +101,9 @@ class MapPlotWorker(BaseWorker):
         self._video_path: str = ""
         self._video_fps = 10
         self._frame_count = 0
+        self._debug = False
+        self._debug_dir = "/tmp/pilot_debug/map"
+        self._debug_snapshot_count = 0
 
     def setup(self) -> None:
         self._pose_buf = self.config["pose_buffer"]
@@ -189,6 +192,13 @@ class MapPlotWorker(BaseWorker):
                     "cv2 not available — video recording disabled"
                 )
                 self._video_writer = None
+
+        self._debug = self.config.get("debug", False)
+        if self._debug:
+            os.makedirs(self._debug_dir, exist_ok=True)
+            self.logger.info(
+                f"Debug mode ON — exporting map snapshots to {self._debug_dir}"
+            )
 
         self.logger.info(
             f"MapPlotWorker ready "
@@ -303,6 +313,21 @@ class MapPlotWorker(BaseWorker):
             )
         else:
             self._plt.pause(0.001)
+
+        # Debug: save periodic map snapshots (~every 5 seconds)
+        if self._debug:
+            self._debug_snapshot_count += 1
+            if self._debug_snapshot_count % 50 == 1:
+                snap_path = os.path.join(
+                    self._debug_dir,
+                    f"map_{self._debug_snapshot_count:06d}.png",
+                )
+                self._fig.savefig(
+                    snap_path, dpi=100,
+                    facecolor=self._fig.get_facecolor(),
+                    bbox_inches="tight",
+                )
+                self.logger.debug(f"Debug map snapshot saved → {snap_path}")
 
     def _render_phase_a(self, ax) -> None:
         """Phase A — mapping: red scatter for projected points."""

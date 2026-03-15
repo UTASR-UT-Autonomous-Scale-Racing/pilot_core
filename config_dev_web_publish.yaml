@@ -1,0 +1,76 @@
+# config_dev_web_publish.yaml — synthetic dev config with web telemetry enabled.
+
+# --- Pipeline ---
+fps: 10
+resolution: [640, 400]
+
+# --- Sensor / Hardware ---
+use_oakd_imu: false
+i2c_address: null
+i2c_bus: null
+
+# --- Synthetic ---
+synthetic: true
+
+# --- Vision ---
+segmentation_config_path: test_segmentation_config.yaml
+use_tensorrt: false
+
+# --- Control ---
+control_config_path: test_control_config.yaml
+control_mode: "pid"
+
+# --- PID Control ---
+pid:
+  kp_steer: 1.0
+  ki_steer: 0.0
+  kd_steer: 0.1
+  target_throttle: 0.3
+  noise_std: 0.0
+
+# --- SLAM ---
+enable_slam: false
+slam:
+  vocabulary: ORB_SLAM3/Vocabulary/ORBvoc.txt
+  settings: oak_d_orbslam_settings.yaml
+  sensor: RGBD
+
+# --- Mapping ---
+mapping:
+  alpha_shape: 25.0
+  boundary_min_points: 10
+  origin_keyframe: 0
+
+# --- Recording ---
+recording: false
+recording_path: /tmp/pilot_recordings
+
+# --- Web Telemetry ---
+web_publish:
+  enabled: true
+  endpoint: "http://127.0.0.1:8080/api/telemetry"
+  interval: 0.5
+  timeout: 2.0
+  vehicle_id: "pilot_dev_local"
+  max_trajectory_pts: 200
+
+# --- Shared Buffers ---
+buffers:
+  frame:
+    slots: 4
+  imu:
+    slots: 8
+  segmentation:
+    slots: 4
+  pose:
+    slots: 4
+  control:
+    slots: 4
+  pointcloud:
+    slots: 2
+  boundary:
+    slots: 2
+
+# --- Deployment ---
+device: "cpu"
+tensorrt_workspace_mb: 0

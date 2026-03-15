@@ -10,6 +10,10 @@ Config kwargs
 -------------
 pose_buffer : PoseBuffer
     Latest SLAM pose.
+imu_buffer : IMUBuffer | None
+    Latest IMU vector (optional).
+pointcloud_buffer : PointCloudBuffer | None
+    Latest SLAM point cloud (optional).
 boundary_buffer : TrackBoundaryBuffer | None
     Extracted track boundaries (optional — omitted when SLAM disabled).
 control_buffer : ControlBuffer | None
@@ -24,6 +28,12 @@ vehicle_id : str
     Arbitrary identifier for the vehicle (default ``"pilot_1"``).
 max_trajectory_pts : int
     Cap on how many trajectory points to include per payload (default 500).
+max_pointcloud_pts : int
+    Cap on how many point-cloud points to include per payload (default 2000).
+include_buffers : list[str] | str | None
+    Optional list of payload sections to include. Supported values:
+    ``pose, trajectory, control, track, imu, pointcloud``.
+    If omitted, defaults to ``pose, trajectory, control, track``.
 """
 
 from __future__ import annotations
@@ -47,6 +57,8 @@ from .base_worker import BaseWorker
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from shared_buffer.imu_buffer import IMUBuffer
+    from shared_buffer.pointcloud_buffer import PointCloudBuffer
     from shared_buffer.pose_buffer import PoseBuffer
     from shared_buffer.track_boundary_buffer import TrackBoundaryBuffer
     from shared_buffer.control_buffer import ControlBuffer
@@ -79,6 +91,8 @@ class WebPublishWorker(BaseWorker):
 
         # Buffer handles (set in setup)
         self._pose_buf: Optional["PoseBuffer"] = None
+        self._imu_buf: Optional["IMUBuffer"] = None
+        self._pc_buf: Optional["PointCloudBuffer"] = None
         self._boundary_buf: Optional["TrackBoundaryBuffer"] = None
         self._ctrl_buf: Optional["ControlBuffer"] = None
 
@@ -88,9 +102,12 @@ class WebPublishWorker(BaseWorker):
         self._timeout: float = 2.0
         self._vehicle_id: str = "pilot_1"
         self._max_traj: int = 500
+        self._max_pc_pts: int = 2000
+        self._include: set[str] = {"pose", "trajectory", "control", "track"}
 
         # Internal state
         self._trajectory: List[List[float]] = []
+        self._latest_pose: Optional[Dict[str, float]] = None
         self._last_pose_seq: int = 0
         self._last_publish: float = 0.0
         self._consecutive_errors: int = 0
@@ -102,6 +119,8 @@ class WebPublishWorker(BaseWorker):
 
     def setup(self) -> None:
         self._pose_buf = self.config.get("pose_buffer")
+        self._imu_buf = self.config.get("imu_buffer")
+        self._pc_buf = self.config.get("pointcloud_buffer")
         self._boundary_buf = self.config.get("boundary_buffer")
         self._ctrl_buf = self.config.get("control_buffer")
         self._endpoint = self.config.get("endpoint", "http://localhost:8080/api/telemetry")
@@ -109,18 +128,39 @@ class WebPublishWorker(BaseWorker):
         self._timeout = float(self.config.get("timeout", 2.0))
         self._vehicle_id = self.config.get("vehicle_id", "pilot_1")
         self._max_traj = int(self.config.get("max_trajectory_pts", 500))
+        self._max_pc_pts = int(self.config.get("max_pointcloud_pts", 2000))
+
+        include_cfg = self.config.get("include_buffers")
+        if include_cfg is None:
+            include_set = {"pose", "trajectory", "control", "track"}
+        else:
+            if isinstance(include_cfg, str):
+                parts = [p.strip() for p in include_cfg.split(",") if p.strip()]
+            else:
+                parts = [str(p).strip() for p in include_cfg if str(p).strip()]
+            include_set = {p.lower() for p in parts}
+
+        supported = {"pose", "trajectory", "control", "track", "imu", "pointcloud"}
+        unknown = include_set - supported
+        if unknown:
+            self.logger.warning("Unknown include_buffers entries ignored: %s", sorted(unknown))
+        self._include = include_set & supported
+        if not self._include:
+            self._include = {"pose", "trajectory", "control", "track"}
 
         if not self._endpoint:
             raise ValueError("WebPublishWorker requires a non-empty 'endpoint'")
 
         self.logger.info(
             f"WebPublishWorker ready — endpoint={self._endpoint}, "
-            f"interval={self._interval}s, vehicle={self._vehicle_id}"
+            f"interval={self._interval}s, vehicle={self._vehicle_id}, "
+            f"include={sorted(self._include)}"
         )
 
     def step(self) -> None:
         # Accumulate trajectory from pose buffer every step
-        self._ingest_pose()
+        if "pose" in self._include or "trajectory" in self._include:
+            self._ingest_pose()
 
         # Only publish at the configured interval
         now = time.monotonic()
@@ -157,7 +197,10 @@ class WebPublishWorker(BaseWorker):
 
         # Extract translation from 4×4 matrix
         tx, tz = float(pose[0, 3]), float(pose[2, 3])
-        self._trajectory.append([tx, tz])
+        self._latest_pose = {"x": tx, "z": tz}
+
+        if "trajectory" in self._include:
+            self._trajectory.append([tx, tz])
 
         # Cap to the most recent N points
         if len(self._trajectory) > self._max_traj:
@@ -187,6 +230,85 @@ class WebPublishWorker(BaseWorker):
             "inner": _ndarray_to_list(inner),
         }
 
+    def _read_imu(self) -> Optional[Dict[str, Any]]:
+        """Snapshot latest IMU vector."""
+        if self._imu_buf is None:
+            return None
+        result = self._imu_buf.read_latest()
+        if result is None:
+            return None
+        _header, imu_vec = result
+        if len(imu_vec) < 9:
+            return None
+
+        # Canonical IMU layout (16 floats):
+        # [w, x, y, z, ax, ay, az, gx, gy, gz, mx, my, mz, throttle, steering, timestamp]
+        if len(imu_vec) >= 16:
+            return {
+                "quat": [
+                    round(float(imu_vec[0]), 6),
+                    round(float(imu_vec[1]), 6),
+                    round(float(imu_vec[2]), 6),
+                    round(float(imu_vec[3]), 6),
+                ],
+                "accel": [
+                    round(float(imu_vec[4]), 6),
+                    round(float(imu_vec[5]), 6),
+                    round(float(imu_vec[6]), 6),
+                ],
+                "gyro": [
+                    round(float(imu_vec[7]), 6),
+                    round(float(imu_vec[8]), 6),
+                    round(float(imu_vec[9]), 6),
+                ],
+                "mag": [
+                    round(float(imu_vec[10]), 6),
+                    round(float(imu_vec[11]), 6),
+                    round(float(imu_vec[12]), 6),
+                ],
+                "raw_control": {
+                    "throttle": round(float(imu_vec[13]), 6),
+                    "steering": round(float(imu_vec[14]), 6),
+                },
+                "sensor_timestamp": round(float(imu_vec[15]), 6),
+            }
+
+        # Backward-compatible fallback for 9-float vectors.
+        return {
+            "quat": [
+                round(float(imu_vec[0]), 6),
+                round(float(imu_vec[1]), 6),
+                round(float(imu_vec[2]), 6),
+                round(float(imu_vec[3]), 6),
+            ],
+            "accel": [
+                round(float(imu_vec[4]), 6),
+                round(float(imu_vec[5]), 6),
+                round(float(imu_vec[6]), 6),
+            ],
+            "raw_control": {
+                "throttle": round(float(imu_vec[7]), 6),
+                "steering": round(float(imu_vec[8]), 6),
+            },
+        }
+
+    def _read_pointcloud(self) -> Optional[Dict[str, Any]]:
+        """Snapshot latest point cloud, capped for network payload size."""
+        if self._pc_buf is None:
+            return None
+        result = self._pc_buf.read_latest()
+        if result is None:
+            return None
+        _header, points = result
+        count = int(len(points))
+        if count <= 0:
+            return {"count": 0, "points": []}
+        clipped = points[: self._max_pc_pts]
+        return {
+            "count": count,
+            "points": _ndarray_to_list(clipped, decimals=4),
+        }
+
     # ------------------------------------------------------------------
     # Payload construction
     # ------------------------------------------------------------------
@@ -199,22 +321,36 @@ class WebPublishWorker(BaseWorker):
         }
 
         # Current pose
-        if self._trajectory:
-            last = self._trajectory[-1]
-            payload["pose"] = {"x": last[0], "z": last[1]}
+        if "pose" in self._include and self._latest_pose is not None:
+            payload["pose"] = self._latest_pose
 
         # Trajectory
-        payload["trajectory"] = self._trajectory
+        if "trajectory" in self._include:
+            payload["trajectory"] = self._trajectory
 
         # Control
-        ctrl = self._read_control()
-        if ctrl is not None:
-            payload["control"] = ctrl
+        if "control" in self._include:
+            ctrl = self._read_control()
+            if ctrl is not None:
+                payload["control"] = ctrl
 
         # Track boundaries
-        track = self._read_boundaries()
-        if track is not None:
-            payload["track"] = track
+        if "track" in self._include:
+            track = self._read_boundaries()
+            if track is not None:
+                payload["track"] = track
+
+        # IMU
+        if "imu" in self._include:
+            imu = self._read_imu()
+            if imu is not None:
+                payload["imu"] = imu
+
+        # Point cloud
+        if "pointcloud" in self._include:
+            pc = self._read_pointcloud()
+            if pc is not None:
+                payload["pointcloud"] = pc
 
         return payload
 

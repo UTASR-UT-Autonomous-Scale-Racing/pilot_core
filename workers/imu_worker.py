@@ -1,6 +1,6 @@
 """
 IMUWorker — reads IMU data from I2C (Arduino) or OAK-D on-board IMU
-and writes 9-float vectors into an IMUBuffer.
+and writes 16-float vectors into an IMUBuffer.
 
 Replaces ``pilot_ingest.I2CDataProcessor.read()`` loop and the IMU portion
 of ``SegmentProcessor.read_stream()``.
@@ -53,6 +53,7 @@ class IMUWorker(BaseWorker):
         self._synth_gen = None
         self._device = None
         self._queue = None
+        self._sample_count: int = 0
 
     def setup(self) -> None:
         import os
@@ -92,22 +93,60 @@ class IMUWorker(BaseWorker):
             self.logger.warning("smbus2 not installed — IMU running in dummy mode (no data)")
             return
         self._i2c_address = address
-        self._bus = smbus2.SMBus(bus)
+        try:
+            self._bus = smbus2.SMBus(bus)
+        except Exception as exc:
+            self._dummy = True
+            self.logger.warning(f"Cannot open I2C bus {bus}: {exc} — IMU in dummy mode")
+            return
         self.logger.info(f"I2C IMU ready on bus {bus}, address 0x{address:02x}")
 
+        # Handshake with Arduino
+        try:
+            pass
+        except Exception as exc:
+            self._dummy = True
+            self.logger.warning(
+                f"I2C handshake failed: {exc} — IMU in dummy mode"
+            )
+
     def _step_i2c(self) -> None:
-        raw = bytes(self._bus.read_i2c_block_data(self._i2c_address, 0, 32))
-        values = struct.unpack("<fffffffHH", raw)
-        w, x, y, z, ax, ay, az, throttle, steering = values
-        # Convert accelerometer from g → m/s²
-        ax *= 0.00980665
-        ay *= 0.00980665
-        az *= 0.00980665
+        msg = smbus2.i2c_msg.read(self._i2c_address, 60)
+        self._bus.i2c_rdwr(msg)
+        data = list(msg)
+
+        raw = bytes(data)
+        values = struct.unpack('fffffffffffffIHH', raw)
+
+        w, x, y, z, ax, ay, az, gx, gy, gz, mx, my, mz, timestamp, throttle, steering = values
+        # ax, ay, az -> milli g's
+        ax *= 0.00980665  # Convert g to m/s^2
+        ay *= 0.00980665  # Convert g to m/s^2
+        az *= 0.00980665  # Convert g to m/s^2
+        # gx, gy, gz -> degrees per second
+        # mx, my, mz -> microteslas
+        # timestamp -> microseconds (Arduino boot timer)
+
+        # Create a Vector object with the processed data
+        #sensors = Vector([w, x, y, z, ax, ay, az, throttle, steering], time.time())
         vec = np.array(
-            [w, x, y, z, ax, ay, az, float(throttle), float(steering)],
+            [w, x, y, z, ax, ay, az, gx, gy, gz, mx, my, mz, float(throttle), float(steering), timestamp],
             dtype=np.float32,
         )
         self._imu_buf.write(vec)
+
+        self._sample_count += 1
+        if self._sample_count % 200 == 1:
+            self.logger.debug(
+                f"IMU #{self._sample_count}  "
+                f"quat=[{w:.3f},{x:.3f},{y:.3f},{z:.3f}]  "
+                f"accel=[{ax:.4f},{ay:.4f},{az:.4f}]  "
+                f"gyro=[{gx:.2f},{gy:.2f},{gz:.2f}]  "
+                f"mag=[{mx:.1f},{my:.1f},{mz:.1f}]  "
+                f"thr={throttle} steer={steering}  "
+                f"timestamp={timestamp}"
+                
+            )
 
     #  OAK-D IMU path ─
 
@@ -142,13 +181,24 @@ class IMUWorker(BaseWorker):
             gyro = packet.gyroscope
             vec = np.array(
                 [
-                    0.0, 0.0, 0.0, 0.0,  # placeholder quaternion (w,x,y,z)
-                    accel.x, accel.y, accel.z,
-                    gyro.x, gyro.y,  # repurpose last 2 slots for gyro x,y
+                    0.0, 0.0, 0.0, 0.0,  # quaternion placeholder (w,x,y,z)
+                    float(accel.x), float(accel.y), float(accel.z),
+                    float(gyro.x), float(gyro.y), float(gyro.z),
+                    0.0, 0.0, 0.0,  # magnetometer placeholder (mx,my,mz)
+                    0.0, 0.0,  # raw throttle, steering placeholders
+                    float(time.time()),
                 ],
                 dtype=np.float32,
-            )[:9]
+            )
             self._imu_buf.write(vec)
+
+            self._sample_count += 1
+            if self._sample_count % 200 == 1:
+                self.logger.debug(
+                    f"IMU #{self._sample_count}  "
+                    f"accel=[{accel.x:.4f},{accel.y:.4f},{accel.z:.4f}]  "
+                    f"gyro=[{gyro.x:.2f},{gyro.y:.2f},{gyro.z:.2f}]"
+                )
 
     # ── synthetic IMU ──────────────────────────────────────────────
 
@@ -164,6 +214,11 @@ class IMUWorker(BaseWorker):
     def _step_synthetic(self) -> None:
         vec = self._synth_gen.next()
         self._imu_buf.write(vec)
+        self._sample_count += 1
+        if self._sample_count % 200 == 1:
+            self.logger.debug(
+                f"synth IMU #{self._sample_count}  vec={vec[:7]}"
+            )
         time.sleep(0.005)  # ~200 Hz
 
     #  dispatch 

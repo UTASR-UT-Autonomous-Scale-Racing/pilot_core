@@ -11,7 +11,7 @@ Public API
 SyntheticFrameGenerator
     .next()  → (rgb, depth)       # uint8 (H,W,3), float32 (H,W) metres
 SyntheticIMUGenerator
-    .next()  → imu_vector          # float32 (9,)
+    .next()  → imu_vector          # float32 (16,)
 """
 
 from __future__ import annotations
@@ -267,7 +267,8 @@ class SyntheticFrameGenerator:
 class SyntheticIMUGenerator:
     """Generate synthetic IMU data simulating straight-line driving.
 
-    Produces 9-float vectors: [qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw]
+    Produces 16-float vectors:
+    [qw, qx, qy, qz, ax, ay, az, gx, gy, gz, mx, my, mz, throttle_raw, steering_raw, timestamp]
 
     For straight driving: quaternion ≈ identity, small accelerometer noise,
     throttle ≈ constant, steering ≈ centre.
@@ -294,11 +295,11 @@ class SyntheticIMUGenerator:
         self._step = 0
 
     def next(self) -> np.ndarray:
-        """Generate a single 9-float IMU vector.
+        """Generate a single 16-float IMU vector.
 
         Returns
         -------
-        np.ndarray — shape ``(9,)`` dtype ``float32``.
+        np.ndarray — shape ``(16,)`` dtype ``float32``.
         """
         self._step += 1
 
@@ -313,7 +314,24 @@ class SyntheticIMUGenerator:
         ay = np.random.normal(0, self.accel_noise)
         az = 9.81 + np.random.normal(0, self.accel_noise)
 
+        # Gyro + mag placeholders for synthetic straight driving
+        gx = np.random.normal(0, 0.02)
+        gy = np.random.normal(0, 0.02)
+        gz = np.random.normal(0, 0.02)
+        mx = np.random.normal(0, 0.1)
+        my = np.random.normal(0, 0.1)
+        mz = np.random.normal(0, 0.1)
+
+        timestamp = float(time.time())
+
         return np.array(
-            [qw, qx, qy, qz, ax, ay, az, self.throttle, self.steering],
+            [
+                qw, qx, qy, qz,
+                ax, ay, az,
+                gx, gy, gz,
+                mx, my, mz,
+                self.throttle, self.steering,
+                timestamp,
+            ],
             dtype=np.float32,
         )

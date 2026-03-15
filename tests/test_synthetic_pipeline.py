@@ -101,7 +101,7 @@ class TestSyntheticIMUGenerator:
         from synthetic import SyntheticIMUGenerator
         gen = SyntheticIMUGenerator()
         vec = gen.next()
-        assert vec.shape == (9,)
+        assert vec.shape == (16,)
         assert vec.dtype == np.float32
 
     def test_quaternion_near_identity(self):
@@ -213,7 +213,7 @@ class TestIMUWorkerSynthetic:
             result = ib.read_latest()
             assert result is not None
             _, vec = result
-            assert vec.shape == (9,)
+            assert vec.shape == (16,)
             assert vec.dtype == np.float32
         finally:
             ib.unlink()
@@ -442,7 +442,7 @@ class TestFullSyntheticPipeline:
             assert result is not None
             header, vec = result
             assert header.seq_no >= 10
-            assert vec.shape == (9,)
+            assert vec.shape == (16,)
             # Quaternion w should be near 1.0
             assert abs(vec[0] - 1.0) < 0.1
         finally:

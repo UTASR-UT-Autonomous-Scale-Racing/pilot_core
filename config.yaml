@@ -35,13 +35,33 @@ slam:
 
 # --- Mapping (BEV boundary extraction) ---
 mapping:
+  enabled: true               # Set false to skip map-building lap
+  load_path: null             # Optional .npz/.json map file to preload
+  save_path: null             # Optional .npz path to save mapped boundaries
+  set_localize_on_load: true  # Enter SLAM localization mode after load
   alpha_shape: 25.0
   boundary_min_points: 50
   origin_keyframe: 0
 
+# --- Runtime Map Plot (optional) ---
+map_plot:
+  enabled: false              # Launch MapPlotWorker for live map visualization
+  record_video: false         # Save map_plot video from MapPlotWorker
+  fps: 10
+  save_dir: /tmp/pilot_map
+  video_filename: map_recording.mp4
+  max_trail_laps: 5
+
+# --- RGBD Remote Visualization (optional) ---
+rgbd_visualization:
+  enabled: true
+  web_socket_port: 8765
+  http_port: 8082
+  depth_source: stereo        # live pipeline currently supports stereo only
+
 # --- Recording ---
 recording: false
-recording_path: /tmp/pilot_recordings
+recording_path: ~/recordings/recording_{datetime}
 
 # --- Web Telemetry Publisher (optional) ---
 web_publish:
@@ -51,6 +71,11 @@ web_publish:
   timeout: 2.0                # HTTP timeout per request
   vehicle_id: "pilot_1"
   max_trajectory_pts: 500     # Cap trajectory points per payload
+
+# --- Replay Video ---
+replay_video:
+  include_map_plot: true      # Show map panel in recordings_to_mp4 output
+
 recording_config:
   sample_k: 1                 # Global: save every k-th sample (1 = all)
   top_n: 0                    # Global: max records per buffer (0 = unlimited)

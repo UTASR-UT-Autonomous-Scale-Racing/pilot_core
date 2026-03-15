@@ -43,10 +43,16 @@ class VisionWorker(BaseWorker):
         self._seg_buf: SegmentationBuffer | None = None
         self._model = None
         self._last_seq = 0
+        self._debug = False
+        self._debug_dir = "/tmp/pilot_debug/segments"
+        self._frame_count = 0
 
     def setup(self) -> None:
+        import os
+
         self._frame_buf = self.config["input_buffer"]
         self._seg_buf = self.config["output_buffer"]
+        self._debug = self.config.get("debug", False)
 
         # Load the segmentation model from config
         model_config_path = self.config["model_config"]
@@ -56,6 +62,13 @@ class VisionWorker(BaseWorker):
         self.logger.info(f"Loaded segmentation model: {class_name}")
 
         device = self.config.get("device", "cpu")
+
+        if self._debug:
+            os.makedirs(self._debug_dir, exist_ok=True)
+            self.logger.info(
+                f"Debug mode ON — exporting segment frames to {self._debug_dir}"
+            )
+
         self.logger.info(f"VisionWorker ready (device={device})")
 
     def step(self) -> None:
@@ -78,5 +91,40 @@ class VisionWorker(BaseWorker):
         if mask is not None:
             self._seg_buf.write(mask)
 
+            self._frame_count += 1
+
+            # Debug: save segmentation overlay every 30 frames (~1/sec @ 30 fps)
+            if self._debug and self._frame_count % 30 == 1:
+                self._save_debug_frame(rgb, mask)
+
+    def _save_debug_frame(self, rgb: np.ndarray, mask: np.ndarray) -> None:
+        """Save an RGB + segmentation overlay to the debug directory."""
+        try:
+            import cv2
+
+            # Colour the mask as a semi-transparent overlay
+            overlay = rgb.copy()
+            # Map mask classes to colours (green=drivable, red=boundary, etc.)
+            colour_map = {
+                1: (0, 200, 0),     # class 1 → green
+                2: (0, 0, 200),     # class 2 → red
+                3: (200, 200, 0),   # class 3 → cyan
+            }
+            for cls_id, colour in colour_map.items():
+                overlay[mask == cls_id] = colour
+
+            blended = cv2.addWeighted(rgb, 0.5, overlay, 0.5, 0)
+
+            path = f"{self._debug_dir}/seg_{self._frame_count:06d}.jpg"
+            cv2.imwrite(path, blended)
+            self.logger.debug(f"Debug segment frame saved → {path}")
+        except Exception as exc:
+            self.logger.warning(f"Failed to save debug frame: {exc}")
+
     def teardown(self) -> None:
+        if self._debug:
+            self.logger.info(
+                f"Debug frames saved to {self._debug_dir} "
+                f"({self._frame_count} total frames processed)"
+            )
         self.logger.info("VisionWorker shutting down")

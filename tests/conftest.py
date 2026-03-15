@@ -4,7 +4,7 @@ conftest.py — Shared fixtures for pilot_core test suite.
 Provides:
     - Unique buffer names (avoid shm collisions between parallel tests)
     - Synthetic camera frames (640×400 RGB + Depth)
-    - Synthetic IMU data (9-float vector)
+    - Synthetic IMU data (16-float vector)
     - Synthetic segmentation masks (ResNet18-style)
     - Synthetic poses (4×4 float32)
     - Synthetic point clouds (N×3 float32)
@@ -49,8 +49,8 @@ def depth_frame() -> np.ndarray:
 
 @pytest.fixture()
 def imu_vector() -> np.ndarray:
-    """9-float IMU vector: [wx, wy, wz, ax, ay, az, qx, qy, qz]."""
-    return np.random.randn(9).astype(np.float32)
+    """16-float IMU vector matching IMUWorker/IMUBuffer schema."""
+    return np.random.randn(16).astype(np.float32)
 
 
 @pytest.fixture()

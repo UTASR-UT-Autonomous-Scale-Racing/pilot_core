@@ -225,18 +225,18 @@ class TestIMUBuffer:
     def test_imu_shape_and_dtype(self, imu_buffer, imu_vector):
         imu_buffer.write(imu_vector)
         _, vec = imu_buffer.read_latest()
-        assert vec.shape == (9,)
+        assert vec.shape == (16,)
         assert vec.dtype == np.float32
 
     def test_wrong_size_vector_write_succeeds(self, imu_buffer):
-        """Writing a wrong-sized vector succeeds (raw bytes), read may fail."""
+        """Writing a short vector succeeds and read returns available floats."""
         short = np.zeros(5, dtype=np.float32)
-        # Write succeeds — underlying ring buffer stores raw bytes
         header = imu_buffer.write(short)
         assert header.seq_no == 1
-        # Read will fail because it expects 9 floats but only 5 present
-        with pytest.raises(ValueError):
-            imu_buffer.read_latest()
+        result = imu_buffer.read_latest()
+        assert result is not None
+        _, vec = result
+        assert vec.shape == (5,)
 
 
 # 

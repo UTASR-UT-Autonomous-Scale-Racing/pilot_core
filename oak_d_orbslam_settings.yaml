@@ -46,6 +46,41 @@ Stereo.ThDepth: 40.0
 Stereo.b: 0.075
 
 #--------------------------------------------------------------------------------------------
+# IMU Parameters (required for IMU_RGBD mode)
+#--------------------------------------------------------------------------------------------
+# OAK-D reports IMU at high rate; keep this aligned with the pipeline configuration.
+IMU.Frequency: 200.0
+
+# White-noise density (rad/s/sqrt(Hz), m/s^2/sqrt(Hz)).
+IMU.NoiseGyro: 0.000282
+IMU.NoiseAcc: 0.00243
+
+# Random walk (rad/s^2/sqrt(Hz), m/s^3/sqrt(Hz)).
+IMU.GyroWalk: 1.9e-05
+IMU.AccWalk: 0.00014
+
+# Transform from body (IMU) to camera coordinates.
+# TODO: Replace with calibrated OAK-D IMU-to-camera extrinsics.
+IMU.Tbc: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: f
+  data: [1, 0, 0, 0,
+         0, 1, 0, 0,
+         0, 0, 1, 0,
+         0, 0, 0, 1]
+
+# Some ORB-SLAM3 builds expect this alternate key name.
+IMU.T_b_c1: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: f
+  data: [1, 0, 0, 0,
+         0, 1, 0, 0,
+         0, 0, 1, 0,
+         0, 0, 0, 1]
+
+#--------------------------------------------------------------------------------------------
 # ORB Parameters
 #--------------------------------------------------------------------------------------------
 

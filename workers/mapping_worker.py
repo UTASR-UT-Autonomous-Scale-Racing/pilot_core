@@ -152,6 +152,9 @@ class MappingWorker(BaseWorker):
         self._alpha: float = 25.0
         self._min_points: int = 50
         self._map_output_path: str | None = None
+        self._extract_on_loop_only: bool = False
+        self._auto_extract_timeout_s: float = 20.0
+        self._mapping_start_ts: float = 0.0
 
         # Accumulated data
         self._bev_wall_pts: list[np.ndarray] = []
@@ -174,6 +177,9 @@ class MappingWorker(BaseWorker):
         self._alpha = self.config.get("alpha_shape", 25.0)
         self._min_points = self.config.get("boundary_min_points", 50)
         self._map_output_path = self.config.get("map_output_path")
+        self._extract_on_loop_only = bool(self.config.get("extract_on_loop_only", False))
+        self._auto_extract_timeout_s = float(self.config.get("auto_extract_timeout_s", 20.0))
+        self._mapping_start_ts = time.time()
 
         self.logger.info(
             f"MappingWorker ready (alpha={self._alpha}, "
@@ -226,6 +232,17 @@ class MappingWorker(BaseWorker):
             and not self._boundaries_extracted
         ):
             self._extract_boundaries()
+
+        if not self._boundaries_extracted and not self._extract_on_loop_only:
+            elapsed = time.time() - self._mapping_start_ts
+            total_wall = sum(len(b) for b in self._bev_wall_pts)
+            if elapsed >= self._auto_extract_timeout_s and total_wall >= self._min_points:
+                self.logger.info(
+                    "Auto-extracting boundaries after timeout (elapsed=%.1fs, wall_pts=%d)",
+                    elapsed,
+                    total_wall,
+                )
+                self._extract_boundaries()
 
         time.sleep(0.01)
 

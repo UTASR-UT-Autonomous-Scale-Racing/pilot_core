@@ -100,6 +100,11 @@ def parse_args() -> argparse.Namespace:
         help="Use OAK-D on-board IMU instead of I2C Arduino IMU",
     )
     parser.add_argument(
+        "--no-actuator-i2c",
+        action="store_true",
+        help="Disable actuator I2C writes (run actuator worker in dummy mode)",
+    )
+    parser.add_argument(
         "--web-publish",
         action="store_true",
         help="Enable WebPublishWorker regardless of config file",
@@ -115,7 +120,74 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--track", action="store_true", help="Publish track boundaries")
     parser.add_argument("--imu", action="store_true", help="Publish IMU")
     parser.add_argument("--pointcloud", action="store_true", help="Publish point cloud")
+    parser.add_argument(
+        "--depth-preset",
+        type=str,
+        help="Stereo preset (FAST_ACCURACY, FAST_DENSITY, DEFAULT, FACE, HIGH_DETAIL, ROBOTICS, ACCURACY, DENSITY)",
+    )
+    parser.add_argument(
+        "--stereo-resolution",
+        type=str,
+        help="Stereo mono resolution as WxH (for example 1280x800)",
+    )
+    parser.add_argument(
+        "--sync-threshold-ms",
+        type=float,
+        help="RGB/depth sync threshold in milliseconds",
+    )
+    parser.add_argument(
+        "--ir-dot-intensity",
+        type=float,
+        help="Initial IR dot projector intensity [0.0..1.0]",
+    )
+    parser.add_argument(
+        "--ir-flood-intensity",
+        type=float,
+        help="Initial IR flood intensity [0.0..1.0]",
+    )
+    parser.add_argument(
+        "--xlink-chunk-size",
+        type=int,
+        help="DepthAI XLink chunk size (0 disables chunking)",
+    )
+    parser.add_argument(
+        "--ir-update-interval-s",
+        type=float,
+        help="Adaptive IR update interval in seconds",
+    )
+    parser.add_argument(
+        "--adaptive-ir",
+        action="store_true",
+        help="Enable adaptive IR based on scene brightness",
+    )
+    parser.add_argument(
+        "--no-adaptive-ir",
+        action="store_true",
+        help="Disable adaptive IR updates",
+    )
+    parser.add_argument(
+        "--rgb-undistort",
+        action="store_true",
+        help="Enable RGB undistortion on camera output",
+    )
+    parser.add_argument(
+        "--no-rgb-undistort",
+        action="store_true",
+        help="Disable RGB undistortion on camera output",
+    )
     return parser.parse_args()
+
+
+def _parse_resolution_arg(raw: str) -> List[int]:
+    value = raw.lower().replace(" ", "")
+    if "x" not in value:
+        raise ValueError("resolution must be in WxH format")
+    w_str, h_str = value.split("x", 1)
+    w = int(w_str)
+    h = int(h_str)
+    if w <= 0 or h <= 0:
+        raise ValueError("resolution values must be positive")
+    return [w, h]
 
 
 def _load_track_map(path: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -220,9 +292,33 @@ def main() -> None:
         config["enable_slam"] = True
     if args.oakd_imu:
         config["use_oakd_imu"] = True
+    if args.no_actuator_i2c:
+        config["actuator_dummy"] = True
     if args.web_publish:
         config.setdefault("web_publish", {})
         config["web_publish"]["enabled"] = True
+    if args.depth_preset:
+        config["depth_preset"] = str(args.depth_preset).upper()
+    if args.stereo_resolution:
+        config["stereo_resolution"] = _parse_resolution_arg(args.stereo_resolution)
+    if args.sync_threshold_ms is not None:
+        config["sync_threshold_ms"] = float(args.sync_threshold_ms)
+    if args.ir_dot_intensity is not None:
+        config["ir_dot_intensity"] = float(args.ir_dot_intensity)
+    if args.ir_flood_intensity is not None:
+        config["ir_flood_intensity"] = float(args.ir_flood_intensity)
+    if args.xlink_chunk_size is not None:
+        config["xlink_chunk_size"] = int(args.xlink_chunk_size)
+    if args.ir_update_interval_s is not None:
+        config["ir_update_interval_s"] = float(args.ir_update_interval_s)
+    if args.adaptive_ir:
+        config["adaptive_ir"] = True
+    if args.no_adaptive_ir:
+        config["adaptive_ir"] = False
+    if args.rgb_undistort:
+        config["rgb_undistort"] = True
+    if args.no_rgb_undistort:
+        config["rgb_undistort"] = False
 
     web_flag_map = {
         "pose": args.pose,
@@ -243,6 +339,8 @@ def main() -> None:
 
     enable_slam = config.get("enable_slam", False)
     control_mode = config.get("control_mode", "neural")
+    mapping_cfg = config.get("mapping", {})
+    pointcloud_only_mode = bool(mapping_cfg.get("pointcloud_only", False))
 
     #  1. Create shared buffers 
     buf_cfg = config.get("buffers", {})
@@ -285,18 +383,24 @@ def main() -> None:
             name="pc_buf",
             create=True,
         )
-        boundary_buf = TrackBoundaryBuffer(
-            slots=buf_cfg.get("boundary", {}).get("slots", 2),
-            name="boundary_buf",
-            create=True,
-        )
-        _buffers.extend([pc_buf, boundary_buf])
+        _buffers.append(pc_buf)
+        if not pointcloud_only_mode:
+            boundary_buf = TrackBoundaryBuffer(
+                slots=buf_cfg.get("boundary", {}).get("slots", 2),
+                name="boundary_buf",
+                create=True,
+            )
+            _buffers.append(boundary_buf)
 
     logger.info("Shared buffers created")
 
-    mapping_cfg = config.get("mapping", {})
-    mapping_enabled = bool(mapping_cfg.get("enabled", True))
+    mapping_enabled = bool(mapping_cfg.get("enabled", True)) and not pointcloud_only_mode
     loaded_prebuilt_map = False
+
+    if enable_slam and pointcloud_only_mode:
+        logger.info(
+            "Pointcloud-only mode enabled: map/boundary generation disabled; recording pointcloud stream only"
+        )
 
     #  2. Create multiprocessing events for pipeline coordination 
     loop_event = mp.Event() if enable_slam else None
@@ -324,6 +428,8 @@ def main() -> None:
                 )
             except Exception as exc:
                 logger.error("Failed to load prebuilt map %s: %s", map_load_path, exc)
+    elif enable_slam and pointcloud_only_mode and mapping_cfg.get("load_path"):
+        logger.info("Ignoring mapping.load_path because mapping.pointcloud_only=true")
 
     #  3. Resolve config values 
     seg_config_path = config.get(
@@ -342,6 +448,10 @@ def main() -> None:
     map_plot_cfg = config.get("map_plot", {})
     rgbd_vis_cfg = config.get("rgbd_visualization", {})
     pid_cfg = config.get("pid", {})
+    startup_gate_cfg = config.get("startup_gate", {}) or {}
+    startup_gate_enabled = bool(startup_gate_cfg.get("enabled", True))
+    startup_gate_timeout_s = float(startup_gate_cfg.get("timeout_s", 25.0))
+    startup_gate_event = mp.Event() if startup_gate_enabled else None
 
     if isinstance(i2c_address, str):
         i2c_address = int(i2c_address, 0)
@@ -367,6 +477,15 @@ def main() -> None:
         output_buffer=frame_buf,
         fps=fps,
         resolution=resolution,
+        stereo_resolution=config.get("stereo_resolution", [1280, 800]),
+        depth_preset=config.get("depth_preset", "FAST_ACCURACY"),
+        sync_threshold_ms=config.get("sync_threshold_ms", 25.0),
+        ir_dot_intensity=config.get("ir_dot_intensity", 0.8),
+        ir_flood_intensity=config.get("ir_flood_intensity", 0.8),
+        adaptive_ir=config.get("adaptive_ir", True),
+        ir_update_interval_s=config.get("ir_update_interval_s", 0.5),
+        rgb_undistort=config.get("rgb_undistort", True),
+        xlink_chunk_size=config.get("xlink_chunk_size", 0),
         synthetic=use_synthetic,
         rgbd_visualization=rgbd_vis_cfg,
     )
@@ -436,6 +555,7 @@ def main() -> None:
         ActuatorWorker(
             name="actuator",
             input_buffer=ctrl_buf,
+            dummy_mode=bool(config.get("actuator_dummy", False)),
             i2c_address=i2c_address,
             i2c_bus=i2c_bus,
         )
@@ -443,12 +563,23 @@ def main() -> None:
 
     # SLAM + Mapping workers
     if enable_slam:
+        slam_use_imu = bool(use_oakd_imu and not use_synthetic)
+        if use_oakd_imu and use_synthetic:
+            logger.info(
+                "Synthetic mode active: disabling SLAM IMU tracking (RGBD-only synthetic run)"
+            )
+        elif use_oakd_imu:
+            logger.info(
+                "Real OAK-D + IMU feed detected: forcing SLAM IMU_RGBD tracking"
+            )
         _workers.append(
             SLAMWorker(
                 name="slam",
                 input_buffer=frame_buf,
                 output_buffer=pose_buf,
                 pointcloud_buffer=pc_buf,
+                imu_buffer=imu_buf if slam_use_imu else None,
+                use_imu=slam_use_imu,
                 vocab_path=slam_cfg.get(
                     "vocabulary", "ORB_SLAM3/Vocabulary/ORBvoc.txt"
                 ),
@@ -469,6 +600,8 @@ def main() -> None:
                     boundary_buffer=boundary_buf,
                     loop_event=loop_event,
                     mapping_done_event=mapping_done_event,
+                    extract_on_loop_only=mapping_cfg.get("extract_on_loop_only", False),
+                    auto_extract_timeout_s=mapping_cfg.get("auto_extract_timeout_s", 20.0),
                     alpha_shape=mapping_cfg.get("alpha_shape", 25.0),
                     boundary_min_points=mapping_cfg.get("boundary_min_points", 50),
                     map_output_path=mapping_cfg.get("save_path"),
@@ -565,6 +698,18 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
+    if startup_gate_enabled and startup_gate_event is not None:
+        gate_exempt_workers = {"camera", "imu", "slam"}
+        for w in _workers:
+            if w.name in gate_exempt_workers:
+                continue
+            w.config["startup_gate_event"] = startup_gate_event
+            w.config["startup_gate_timeout_s"] = startup_gate_timeout_s
+        logger.info(
+            "Startup gate enabled (timeout=%.1fs): non-core workers wait for camera/IMU/SLAM readiness",
+            startup_gate_timeout_s,
+        )
+
     #  6. Spawn worker processes ─
     global _processes
     _restart_counts: Dict[str, int] = {w.name: 0 for w in _workers}
@@ -583,13 +728,48 @@ def main() -> None:
                 "SLAM pipeline enabled — mapping until loop closure, "
                 "then PID control"
             )
+        elif pointcloud_only_mode:
+            logger.info("SLAM pipeline enabled — pointcloud-only mode (no map/boundaries)")
         else:
             logger.info("SLAM pipeline enabled — mapping disabled by config")
 
     #  7. Monitor loop 
     try:
         _terminal_gate_done = loaded_prebuilt_map or not mapping_enabled
+        startup_gate_last_log_ts = 0.0
         while not _shutting_down:
+            if startup_gate_enabled and startup_gate_event is not None and not startup_gate_event.is_set():
+                frame_ready = frame_buf.read_latest() is not None
+                imu_ready = imu_buf.read_latest() is not None
+                pose_ready = (not enable_slam) or (pose_buf.read_latest() is not None)
+                slam_alive = True
+                if enable_slam:
+                    slam_alive = any(
+                        w.name == "slam" and p.is_alive()
+                        for w, p in zip(_workers, _processes)
+                    )
+
+                if frame_ready and imu_ready and pose_ready and slam_alive:
+                    startup_gate_event.set()
+                    logger.info(
+                        "Startup gate opened: frame=%s imu=%s pose=%s slam_alive=%s",
+                        frame_ready,
+                        imu_ready,
+                        pose_ready,
+                        slam_alive,
+                    )
+                else:
+                    now = time.time()
+                    if now - startup_gate_last_log_ts >= 1.0:
+                        logger.info(
+                            "Startup gate waiting: frame=%s imu=%s pose=%s slam_alive=%s",
+                            frame_ready,
+                            imu_ready,
+                            pose_ready,
+                            slam_alive,
+                        )
+                        startup_gate_last_log_ts = now
+
             # Check if mapping is done → prompt for terminal confirmation
             if (
                 enable_slam
@@ -614,6 +794,7 @@ def main() -> None:
                 if not p.is_alive() and not _shutting_down:
                     exit_code = p.exitcode
                     _restart_counts[w.name] = _restart_counts.get(w.name, 0) + 1
+
                     if _restart_counts[w.name] > MAX_RESTARTS:
                         if _restart_counts[w.name] == MAX_RESTARTS + 1:
                             logger.error(

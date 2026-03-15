@@ -31,6 +31,8 @@ class ActuatorWorker(BaseWorker):
         I2C slave address of the Arduino.
     i2c_bus : int | None
         I2C bus number.
+    dummy_mode : bool
+        If True, skip I2C setup/writes (local testing mode).
     """
 
     def __init__(self, name: str = "actuator", **kwargs: Any) -> None:
@@ -44,6 +46,13 @@ class ActuatorWorker(BaseWorker):
 
     def setup(self) -> None:
         self._ctrl_buf = self.config["input_buffer"]
+        self._dummy = bool(self.config.get("dummy_mode", False))
+
+        if self._dummy:
+            self.logger.info("Actuator dummy_mode=True — skipping I2C setup/writes")
+            from pilot_controller.control_output import Controller
+            self._controller = Controller()
+            return
 
         i2c_address = self.config.get("i2c_address")
         i2c_bus = self.config.get("i2c_bus")
@@ -57,8 +66,19 @@ class ActuatorWorker(BaseWorker):
                 self.logger.warning("smbus2 not installed — running in dummy mode")
             else:
                 self._i2c_address = i2c_address
-                self._bus = smbus2.SMBus(i2c_bus)
-                self.logger.info(f"I2C actuator ready on bus {i2c_bus}, address 0x{i2c_address:02x}")
+                try:
+                    self._bus = smbus2.SMBus(i2c_bus)
+                    self.logger.info(
+                        f"I2C actuator ready on bus {i2c_bus}, address 0x{i2c_address:02x}"
+                    )
+                except Exception as exc:
+                    self._dummy = True
+                    self._bus = None
+                    self.logger.warning(
+                        "Cannot open I2C bus %s: %s — running in dummy mode (no actuator writes)",
+                        i2c_bus,
+                        exc,
+                    )
 
         # PWM mapper from pilot_controller
         from pilot_controller.control_output import Controller

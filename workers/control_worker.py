@@ -129,13 +129,38 @@ class ControlWorker(BaseWorker):
             return
         self._last_seg_seq = seg_header.seq_no
 
+        if mask is None or getattr(mask, "size", 0) == 0:
+            time.sleep(0.001)
+            return
+
         imu_result = self._imu_buf.read_latest()
-        imu_vector = (
-            imu_result[1] if imu_result is not None else np.zeros(9, dtype=np.float32)
-        )
+        if imu_result is not None:
+            imu_vector = np.asarray(imu_result[1], dtype=np.float32)
+        else:
+            imu_vector = np.zeros(16, dtype=np.float32)
+            imu_vector[0] = 1.0
+
+        if imu_vector.shape[0] < 16:
+            padded = np.zeros(16, dtype=np.float32)
+            padded[: imu_vector.shape[0]] = imu_vector
+            imu_vector = padded
+
+        # Keep quaternion valid for downstream math.
+        q = imu_vector[:4]
+        q_norm = float(np.linalg.norm(q))
+        if q_norm <= 1e-6:
+            imu_vector[0:4] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        else:
+            imu_vector[0:4] = q / q_norm
 
         state = imu_vector.tolist()
-        result = self._model.get_action(state, mask)
+        timestamp = float(seg_header.produced_ts)
+        try:
+            result = self._model.get_action(state, mask, timestamp)
+        except TypeError:
+            # Backward compatibility with older models that only accept
+            # (state, mask).
+            result = self._model.get_action(state, mask)
 
         if result is not None:
             if isinstance(result, (tuple, list)) and len(result) >= 2:

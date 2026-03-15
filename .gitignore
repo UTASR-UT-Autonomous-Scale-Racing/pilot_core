@@ -52,3 +52,16 @@ _pycache__/
 *.so
 *.profile
 scripts/temp*
+*.mp4
+*.csv
+*.dat
+*.data
+*.json
+*.yml
+*.xml
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*_output/
+temp/

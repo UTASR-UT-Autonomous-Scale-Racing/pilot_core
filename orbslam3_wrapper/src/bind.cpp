@@ -4,7 +4,7 @@
  *
  * Exposed API:
  *   orbslam3_python.System(vocab, settings, sensor_type)
- *       .track_rgbd(rgb, depth, timestamp) -> np.ndarray (4x4 float32)
+ *       .track_rgbd(rgb, depth, timestamp, imu_points=None) -> np.ndarray (4x4 float32)
  *       .map_changed()                     -> bool
  *       .get_all_map_points()              -> np.ndarray (N x 3 float32)
  *       .get_all_keyframe_poses()          -> np.ndarray (K x 4 x 4 float32)
@@ -64,11 +64,14 @@ public:
      * @param rgb   uint8 numpy array (H, W, 3)  — BGR or RGB
      * @param depth float32 numpy array (H, W)   — depth in metres
      * @param ts    timestamp (seconds)
-     * @return 4×4 float32 camera-to-world SE3 pose (identity on failure)
+    * @param imu_points Optional float array (N,7):
+    *                   [ax, ay, az, gx, gy, gz, t] per IMU sample.
+    * @return 4×4 float32 camera-to-world SE3 pose (identity on failure)
      */
     py::array_t<float> track_rgbd(py::array_t<uint8_t, py::array::c_style> rgb,
                                    py::array_t<float, py::array::c_style> depth,
-                                   double ts) {
+                            double ts,
+                            py::object imu_points = py::none()) {
         auto r = rgb.request();
         auto d = depth.request();
 
@@ -83,7 +86,34 @@ public:
                         static_cast<int>(d.shape[1]),
                         CV_32FC1, d.ptr);
 
-        Sophus::SE3f pose = sys_.TrackRGBD(rgb_mat, dep_mat, ts);
+        std::vector<ORB_SLAM3::IMU::Point> imu_meas;
+        if (!imu_points.is_none()) {
+            py::array_t<double, py::array::c_style | py::array::forcecast> imu_arr(imu_points);
+            auto imu = imu_arr.request();
+
+            if (imu.ndim != 2 || imu.shape[1] != 7) {
+                throw std::runtime_error(
+                    "imu_points must be a 2D array with shape (N,7): "
+                    "[ax, ay, az, gx, gy, gz, t]"
+                );
+            }
+
+            const auto n = static_cast<size_t>(imu.shape[0]);
+            imu_meas.reserve(n);
+            auto imu_view = imu_arr.unchecked<2>();
+            for (size_t i = 0; i < n; ++i) {
+                const float ax = static_cast<float>(imu_view(i, 0));
+                const float ay = static_cast<float>(imu_view(i, 1));
+                const float az = static_cast<float>(imu_view(i, 2));
+                const float gx = static_cast<float>(imu_view(i, 3));
+                const float gy = static_cast<float>(imu_view(i, 4));
+                const float gz = static_cast<float>(imu_view(i, 5));
+                const double t = static_cast<double>(imu_view(i, 6));
+                imu_meas.emplace_back(ax, ay, az, gx, gy, gz, t);
+            }
+        }
+
+        Sophus::SE3f pose = sys_.TrackRGBD(rgb_mat, dep_mat, ts, imu_meas);
 
         // Store trajectory
         Eigen::Matrix4f mat = pose.matrix();
@@ -230,8 +260,9 @@ PYBIND11_MODULE(orbslam3_python, m) {
         .def(py::init<const std::string &, const std::string &, int>(),
              py::arg("vocab"), py::arg("settings"), py::arg("sensor_type"))
         .def("track_rgbd", &SLAM::track_rgbd,
-             py::arg("rgb"), py::arg("depth"), py::arg("timestamp"),
-             "Run one RGBD tracking step, returns 4x4 SE3 pose as float32 numpy array")
+               py::arg("rgb"), py::arg("depth"), py::arg("timestamp"),
+               py::arg("imu_points") = py::none(),
+               "Run one RGBD(+optional IMU) tracking step, returns 4x4 SE3 pose as float32 numpy array")
         .def("map_changed", &SLAM::map_changed,
              "Returns True once after each loop closure or global BA")
         .def("get_all_map_points", &SLAM::get_all_map_points,

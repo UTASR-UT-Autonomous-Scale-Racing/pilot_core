@@ -84,6 +84,28 @@ class BaseWorker:
         self._logger.info("Starting up …")
         try:
             self.setup()
+            gate_event = self.config.get("startup_gate_event")
+            gate_timeout_s = float(self.config.get("startup_gate_timeout_s", 60.0))
+            if gate_event is not None:
+                self._logger.info("Setup complete — waiting for startup gate")
+                wait_start = time.time()
+                last_log = 0.0
+                while not self._stop_event.is_set() and not gate_event.is_set():
+                    now = time.time()
+                    if now - last_log >= 1.0:
+                        self._logger.info(
+                            "Waiting for startup gate (elapsed=%.1fs)",
+                            now - wait_start,
+                        )
+                        last_log = now
+                    if gate_timeout_s > 0 and (now - wait_start) >= gate_timeout_s:
+                        self._logger.warning(
+                            "Startup gate timeout reached (%.1fs) — continuing",
+                            gate_timeout_s,
+                        )
+                        break
+                    time.sleep(0.05)
+
             self._logger.info("Setup complete — entering run loop")
             while not self._stop_event.is_set():
                 try:

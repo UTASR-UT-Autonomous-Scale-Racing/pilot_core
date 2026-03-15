@@ -4,11 +4,21 @@
 # --- Pipeline ---
 fps: 30
 resolution: [640, 400]
+stereo_resolution: [1280, 800]
+depth_preset: FAST_ACCURACY
+sync_threshold_ms: 25.0
+xlink_chunk_size: 0
+rgb_undistort: true
+ir_dot_intensity: 0.8
+ir_flood_intensity: 0.8
+adaptive_ir: true
+ir_update_interval_s: 0.5
 
 # --- Sensor / Hardware ---
-use_oakd_imu: false
+use_oakd_imu: true
 i2c_address: 0x08
 i2c_bus: 1
+actuator_dummy: true         # Local testing: skip actuator I2C writes
 
 # --- Vision ---
 segmentation_config_path: pilot_vision/models/default/config.yaml
@@ -16,7 +26,7 @@ use_tensorrt: false           # Set true on Jetson to load TensorRT engines
 
 # --- Control ---
 control_config_path: pilot_controller/models/default/config.yaml
-control_mode: "pid"           # "neural" or "pid"
+control_mode: "neural"        # "neural" or "pid"
 
 # --- PID Control (used when control_mode = "pid") ---
 pid:
@@ -35,10 +45,13 @@ slam:
 
 # --- Mapping (BEV boundary extraction) ---
 mapping:
-  enabled: true               # Set false to skip map-building lap
+  enabled: true              # Set false to skip map-building lap
+  pointcloud_only: false     # If true, disable map/boundary generation and only keep SLAM pointcloud flow
   load_path: null             # Optional .npz/.json map file to preload
   save_path: null             # Optional .npz path to save mapped boundaries
   set_localize_on_load: true  # Enter SLAM localization mode after load
+  extract_on_loop_only: false # If false, allow timeout-based extraction without loop closure
+  auto_extract_timeout_s: 20.0
   alpha_shape: 25.0
   boundary_min_points: 50
   origin_keyframe: 0
@@ -54,13 +67,13 @@ map_plot:
 
 # --- RGBD Remote Visualization (optional) ---
 rgbd_visualization:
-  enabled: true
+  enabled: false
   web_socket_port: 8765
   http_port: 8082
   depth_source: stereo        # live pipeline currently supports stereo only
 
 # --- Recording ---
-recording: false
+recording: true
 recording_path: ~/recordings/recording_{datetime}
 
 # --- Web Telemetry Publisher (optional) ---

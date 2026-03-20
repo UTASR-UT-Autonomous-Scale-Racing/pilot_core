@@ -355,6 +355,11 @@ def main() -> None:
         name="imu_buf",
         create=True,
     )
+    imu_aux_buf = IMUBuffer(
+        slots=buf_cfg.get("imu_aux", {}).get("slots", buf_cfg.get("imu", {}).get("slots", 32)),
+        name="imu_aux_buf",
+        create=True,
+    )
     seg_buf = SegmentationBuffer(
         slots=buf_cfg.get("segmentation", {}).get("slots", 4),
         name="seg_buf",
@@ -372,7 +377,7 @@ def main() -> None:
     )
 
     global _buffers
-    _buffers = [frame_buf, imu_buf, seg_buf, pose_buf, ctrl_buf]
+    _buffers = [frame_buf, imu_buf, imu_aux_buf, seg_buf, pose_buf, ctrl_buf]
 
     # SLAM-specific buffers
     pc_buf = None
@@ -497,7 +502,7 @@ def main() -> None:
         CameraWorker(**camera_kwargs),
     ]
 
-    # Only add a separate IMUWorker when NOT using OAK-D IMU
+    # Primary IMU worker when OAK-D IMU is not used.
     if not use_oakd_imu:
         _workers.append(
             IMUWorker(
@@ -509,6 +514,28 @@ def main() -> None:
                 synthetic=use_synthetic,
             ),
         )
+    else:
+        # With OAK-D IMU active, keep a second IMU stream from I2C when
+        # available so throttle/steering packets are still recorded.
+        if i2c_address is not None and i2c_bus is not None:
+            _workers.append(
+                IMUWorker(
+                    name="imu_aux",
+                    output_buffer=imu_aux_buf,
+                    i2c_address=i2c_address,
+                    i2c_bus=i2c_bus,
+                    use_oakd_imu=False,
+                    synthetic=use_synthetic,
+                ),
+            )
+            logger.info(
+                "Secondary I2C IMU enabled for throttle/steering recording "
+                "(buffer=imu_aux)"
+            )
+        else:
+            logger.info(
+                "Secondary I2C IMU disabled: i2c_address/i2c_bus not configured"
+            )
 
     _workers.append(
         VisionWorker(
@@ -643,6 +670,7 @@ def main() -> None:
         rec_buffers: Dict[str, Any] = {
             "frame": frame_buf,
             "imu": imu_buf,
+            "imu_aux": imu_aux_buf,
             "segmentation": seg_buf,
             "pose": pose_buf,
             "control": ctrl_buf,
@@ -699,7 +727,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown)
 
     if startup_gate_enabled and startup_gate_event is not None:
-        gate_exempt_workers = {"camera", "imu", "slam"}
+        gate_exempt_workers = {"camera", "imu", "imu_aux", "slam"}
         for w in _workers:
             if w.name in gate_exempt_workers:
                 continue

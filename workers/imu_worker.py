@@ -54,6 +54,8 @@ class IMUWorker(BaseWorker):
         self._device = None
         self._queue = None
         self._sample_count: int = 0
+        self._i2c_error_count: int = 0
+        self._last_i2c_error_log_ts: float = 0.0
 
     def setup(self) -> None:
         import os
@@ -103,17 +105,57 @@ class IMUWorker(BaseWorker):
 
         # Handshake with Arduino
         try:
-            pass
+            # Keep this handshake aligned with the legacy ingestion path.
+            bytes_to_send = bytearray("10101001", encoding="utf-8")
+            self._bus.write_block_data(self._i2c_address, 0, bytes_to_send)
+            time.sleep(1.0)
+            received = struct.unpack(
+                "<HH",
+                bytes(self._bus.read_i2c_block_data(self._i2c_address, 0, 4)),
+            )
+            idx_0, idx_1 = received
+            if not (idx_0 == 1461 and idx_1 == 1397):
+                raise RuntimeError(
+                    f"Unexpected handshake response: idx_0={idx_0}, idx_1={idx_1}"
+                )
+            self.logger.info(
+                "I2C handshake successful (idx_0=%s, idx_1=%s)",
+                idx_0,
+                idx_1,
+            )
         except Exception as exc:
             self._dummy = True
+            if self._bus is not None:
+                try:
+                    self._bus.close()
+                except Exception:
+                    pass
+                self._bus = None
             self.logger.warning(
                 f"I2C handshake failed: {exc} — IMU in dummy mode"
             )
 
     def _step_i2c(self) -> None:
-        msg = smbus2.i2c_msg.read(self._i2c_address, 60)
-        self._bus.i2c_rdwr(msg)
-        data = list(msg)
+        try:
+            msg = smbus2.i2c_msg.read(self._i2c_address, 60)
+            self._bus.i2c_rdwr(msg)
+            data = list(msg)
+            self._i2c_error_count = 0
+        except OSError as exc:
+            self._i2c_error_count += 1
+            now = time.time()
+            if (
+                self._i2c_error_count <= 3
+                or (now - self._last_i2c_error_log_ts) >= 1.0
+            ):
+                self.logger.warning(
+                    "I2C read error #%d: %s",
+                    self._i2c_error_count,
+                    exc,
+                )
+                self._last_i2c_error_log_ts = now
+            time.sleep(0.01)
+            return
 
         raw = bytes(data)
         values = struct.unpack('fffffffffffffIHH', raw)

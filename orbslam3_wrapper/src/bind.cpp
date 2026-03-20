@@ -144,10 +144,10 @@ public:
      * @return (N, 3) float32 numpy array of world-frame XYZ positions.
      */
     py::array_t<float> get_all_map_points() {
-        ORB_SLAM3::Atlas *atlas = sys_.mpAtlas;
-        if (!atlas) return py::array_t<float>(std::vector<py::ssize_t>{0, 3});
-
-        std::vector<ORB_SLAM3::MapPoint*> points = atlas->GetAllMapPoints();
+        std::vector<ORB_SLAM3::MapPoint*> points = sys_.GetTrackedMapPoints();
+        if (points.empty()) {
+            return py::array_t<float>(std::vector<py::ssize_t>{0, 3});
+        }
 
         // Filter out bad / null points
         std::vector<Eigen::Vector3f> valid;
@@ -174,22 +174,9 @@ public:
      * Get poses for all keyframes as (K, 4, 4) float32 numpy array.
      */
     py::array_t<float> get_all_keyframe_poses() {
-        ORB_SLAM3::Atlas *atlas = sys_.mpAtlas;
-        if (!atlas) return py::array_t<float>(std::vector<py::ssize_t>{0, 4, 4});
-
-        std::vector<ORB_SLAM3::KeyFrame*> kfs = atlas->GetAllKeyFrames();
-
-        // Filter bad keyframes
-        std::vector<Eigen::Matrix4f> poses;
-        poses.reserve(kfs.size());
-        for (auto *kf : kfs) {
-            if (kf && !kf->isBad()) {
-                Sophus::SE3f se3 = kf->GetPose().inverse();  // cam-to-world
-                poses.push_back(se3.matrix());
-            }
-        }
-
-        size_t k = poses.size();
+        // Current ORB_SLAM3 headers keep Atlas private, so expose the
+        // accumulated track poses as a best-effort keyframe-like sequence.
+        size_t k = trajectory_.size();
         auto out = py::array_t<float>(std::vector<py::ssize_t>{static_cast<py::ssize_t>(k),
                                        static_cast<py::ssize_t>(4),
                                        static_cast<py::ssize_t>(4)});
@@ -197,7 +184,7 @@ public:
         for (size_t i = 0; i < k; ++i)
             for (int r = 0; r < 4; ++r)
                 for (int c = 0; c < 4; ++c)
-                    buf(i, r, c) = poses[i](r, c);
+                    buf(i, r, c) = trajectory_[i](r, c);
 
         return out;
     }

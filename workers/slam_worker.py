@@ -69,6 +69,7 @@ class SLAMWorker(BaseWorker):
         self._imu_wait_frames: int = 0
         self._imu_valid_samples: int = 0
         self._imu_min_samples_before_tracking: int = 30
+        self._imu_track_overload_supported: bool | None = None
         self._init_phase_start_ts: float | None = None
         self._init_phase_last_log_ts: float = 0.0
         self._init_ready_logged: bool = False
@@ -102,6 +103,13 @@ class SLAMWorker(BaseWorker):
 
         try:
             import orbslam3_python as _slam_mod
+
+            if self._use_imu and not self._track_rgbd_supports_imu_overload(_slam_mod):
+                self.logger.warning(
+                    "orbslam3_python track_rgbd exposes RGBD-only signature in this build; "
+                    "disabling IMU SLAM mode"
+                )
+                self._use_imu = False
 
             sensor_type = _slam_mod.RGBD
             imu_ready = self._use_imu and self._settings_support_imu(settings_path)
@@ -211,7 +219,7 @@ class SLAMWorker(BaseWorker):
                 self._imu_wait_last_log_ts = 0.0
 
             #  Real SLAM tracking 
-            pose_4x4 = self._slam.track_rgbd(rgb, depth, header.produced_ts, imu_points)
+            pose_4x4 = self._track_rgbd_compat(rgb, depth, header.produced_ts, imu_points)
             self._pose_buf.write(np.asarray(pose_4x4, dtype=np.float32))
             self._maybe_publish_pointcloud(force=False)
 
@@ -274,6 +282,32 @@ class SLAMWorker(BaseWorker):
         except Exception:
             return False
 
+    @staticmethod
+    def _track_rgbd_supports_imu_overload(slam_mod: Any) -> bool:
+        """Best-effort detection of IMU overload support in pybind docs."""
+        try:
+            doc = str(getattr(slam_mod.System.track_rgbd, "__doc__", ""))
+        except Exception:
+            return True
+
+        if not doc:
+            return True
+
+        sig_count = doc.count("track_rgbd(")
+        if sig_count >= 2:
+            return True
+
+        # Newer wrappers may expose a single signature with optional imu_points.
+        if "imu_points" in doc:
+            return True
+
+        # Known RGBD-only doc format in older wrappers.
+        rgbd_only_sig = "timestamp: typing.SupportsFloat)"
+        if sig_count == 1 and rgbd_only_sig in doc:
+            return False
+
+        return True
+
     def _collect_imu_points(self, frame_ts: float) -> np.ndarray | None:
         """Collect latest IMU sample and format as (N,7) for the pybind wrapper.
 
@@ -333,6 +367,44 @@ class SLAMWorker(BaseWorker):
         self._last_imu_point = imu_np
         self._imu_valid_samples += 1
         return imu_np
+
+    def _track_rgbd_compat(
+        self,
+        rgb: np.ndarray,
+        depth: np.ndarray,
+        timestamp: float,
+        imu_points: np.ndarray | None,
+    ) -> np.ndarray:
+        """Call track_rgbd with best effort compatibility across pybind builds.
+
+        Some orbslam3_python builds expose only the 4-argument RGBD signature,
+        while others include the IMU overload. If the IMU overload is missing,
+        automatically fall back to RGBD tracking and disable IMU mode to avoid
+        repeated exception spam.
+        """
+        if (
+            self._use_imu
+            and imu_points is not None
+            and self._imu_track_overload_supported is not False
+        ):
+            try:
+                pose = self._slam.track_rgbd(rgb, depth, timestamp, imu_points)
+                self._imu_track_overload_supported = True
+                return pose
+            except TypeError as exc:
+                msg = str(exc)
+                if "track_rgbd" not in msg or "incompatible function arguments" not in msg:
+                    raise
+
+                # Wrapper doesn't support IMU overload: switch to RGBD-only API.
+                self._imu_track_overload_supported = False
+                self._use_imu = False
+                self.logger.warning(
+                    "orbslam3_python track_rgbd IMU overload unavailable; "
+                    "falling back to RGBD-only tracking in this process"
+                )
+
+        return self._slam.track_rgbd(rgb, depth, timestamp)
 
     def _maybe_publish_pointcloud(self, force: bool = False) -> None:
         """Publish map points at a controlled cadence to avoid empty recordings."""

@@ -4,6 +4,7 @@
 *.pyo
 *.pyd
 *.swp
+logs/
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
@@ -51,7 +52,7 @@ _pycache__/
 *.engine
 *.so
 *.profile
-scripts/temp*
+
 *.mp4
 *.csv
 *.dat
@@ -64,4 +65,3 @@ scripts/temp*
 *.pkl
 *.pickle
 *_output/
-temp/

@@ -2,10 +2,10 @@
 
 
 # --- Pipeline ---
-fps: 30
+fps: 60
 resolution: [640, 400]
 stereo_resolution: [1280, 800]
-depth_preset: FAST_ACCURACY
+depth_preset: FAST_DENSITY
 sync_threshold_ms: 25.0
 xlink_chunk_size: 0
 rgb_undistort: true
@@ -99,6 +99,9 @@ recording_config:
   imu:
     sample_k: 1               # IMU is tiny — save everything
     top_n: 0
+  imu_aux:
+    sample_k: 1               # Secondary I2C IMU (includes throttle/steering)
+    top_n: 0
   segmentation:
     sample_k: 2
     top_n: 5000
@@ -120,6 +123,8 @@ buffers:
   frame:
     slots: 8
   imu:
+    slots: 32
+  imu_aux:
     slots: 32
   segmentation:
     slots: 4

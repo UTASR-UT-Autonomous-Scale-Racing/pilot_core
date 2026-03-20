@@ -147,6 +147,18 @@ class CameraWorker(BaseWorker):
             or dai is None
         )
         if use_synthetic:
+            reasons: list[str] = []
+            if self.config.get("synthetic", False):
+                reasons.append("config.synthetic=true")
+            if os.environ.get("PILOT_SYNTHETIC", "") == "1":
+                reasons.append("PILOT_SYNTHETIC=1")
+            if dai is None:
+                reasons.append("depthai import unavailable")
+            if reasons:
+                self.logger.warning(
+                    "Using synthetic camera mode (%s)",
+                    ", ".join(reasons),
+                )
             if self._rgbd_vis_requested:
                 # Keep the setup path observable when visualization is enabled,
                 # even if the worker falls back to synthetic mode.

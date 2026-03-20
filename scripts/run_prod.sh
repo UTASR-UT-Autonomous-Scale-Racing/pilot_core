@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+if command -v nvpmodel &> /dev/null; then
+    sudo nvpmodel -m 0
+    sudo jetson_clocks
+    echo "Set Jetson performance mode to MAX-N."
+fi
+
+
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,7 +40,11 @@ if [[ -f "${PID_FILE}" ]]; then
 fi
 
 export PYTHONUNBUFFERED=1
-export PYTHONNOUSERSITE=1
+if [[ "${PILOT_PYTHONNOUSERSITE:-0}" == "1" ]]; then
+  export PYTHONNOUSERSITE=1
+else
+  unset PYTHONNOUSERSITE || true
+fi
 export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
 export LD_LIBRARY_PATH="${ROOT_DIR}/ORB_SLAM3/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 

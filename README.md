@@ -76,7 +76,7 @@ ORB-SLAM3 is included as a git submodule. The Python wrapper (`orbslam3_python`)
 ```bash
 apt-get update && apt-get install -y \
     build-essential cmake git pkg-config \
-    libeigen3-dev libglew-dev libgl1-mesa-dev libwayland-dev \
+    libeigen3-dev libepoxy-dev libglew-dev libgl1-mesa-dev libwayland-dev \
     libopencv-dev libboost-serialization-dev libssl-dev
 ```
 
@@ -159,11 +159,13 @@ Runs a full 2-lap closed-loop test: Phase A (mapping, 300 frames) → Phase B (l
 ## Usage
 
 **Synthetic / dev mode:**
+
 ```bash
 python start.py
 ```
 
 **Jetson (hardware):**
+
 ```bash
 bash scripts/jetson_run.sh
 ```
@@ -172,13 +174,13 @@ bash scripts/jetson_run.sh
 
 Helper scripts live in `scripts/` — see [scripts/READMECPP.md](scripts/READMECPP.md) for C++ build details.
 
-| Script | Purpose |
-|--------|---------|
-| `build.sh` | CMake + make C++ build |
-| `jetson_run.sh` | Full Jetson deploy (power mode, git pull, build, launch) |
-| `start.sh` | Git pull + validate config + launch |
-| `run.sh` / `runCpp.sh` | Quick-launch Python / C++ entry points |
-| `replay.sh` | Replay recorded data |
-| `setup.sh` | Init git submodules |
-| `branch_checkout.sh` | Switch all submodules to a branch |
-| `dev_run.sh` | Dev launch with config auto-read |
+| Script                 | Purpose                                                  |
+| ---------------------- | -------------------------------------------------------- |
+| `build.sh`             | CMake + make C++ build                                   |
+| `jetson_run.sh`        | Full Jetson deploy (power mode, git pull, build, launch) |
+| `start.sh`             | Git pull + validate config + launch                      |
+| `run.sh` / `runCpp.sh` | Quick-launch Python / C++ entry points                   |
+| `replay.sh`            | Replay recorded data                                     |
+| `setup.sh`             | Init git submodules                                      |
+| `branch_checkout.sh`   | Switch all submodules to a branch                        |
+| `dev_run.sh`           | Dev launch with config auto-read                         |

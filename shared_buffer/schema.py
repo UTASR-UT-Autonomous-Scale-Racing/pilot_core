@@ -19,6 +19,7 @@ class DTypeTag(IntEnum):
     SEGMENTATION = 3   # Segmentation mask
     POSE = 4           # 4x4 pose + map points
     CONTROL = 5        # Normalized steering + throttle
+    LIDAR = 6          # 1080-float32 range scan
 
 
 #  Header layout ─

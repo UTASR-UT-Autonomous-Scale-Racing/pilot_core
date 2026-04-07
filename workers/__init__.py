@@ -17,6 +17,9 @@ from .track_ftg_controller import TrackFTGController
 from .web_publish_worker import WebPublishWorker
 from .zmq_sensor_worker import ZMQSensorWorker
 from .zmq_publish_worker import ZMQPublishWorker
+from .depth_projection_worker import DepthProjectionWorker
+from .lidar_projection_worker import LidarProjectionWorker
+from .lidar_wall_controller import LidarWallController
 
 __all__ = [
     "BaseWorker",
@@ -34,4 +37,7 @@ __all__ = [
     "WebPublishWorker",
     "ZMQSensorWorker",
     "ZMQPublishWorker",
+    "DepthProjectionWorker",
+    "LidarProjectionWorker",
+    "LidarWallController",
 ]

@@ -55,9 +55,11 @@ class SLAMWorker(BaseWorker):
         self._pc_buf: Optional[Any] = None
         self._slam = None
         self._last_seq = 0
+        self._frame_count = 0
         self._loop_event: Optional[mp.Event] = None
         self._localize_event: Optional[mp.Event] = None
         self._localization_activated = False
+        self._PC_PUBLISH_INTERVAL = 30  # also publish point cloud every N frames
 
     def setup(self) -> None:
         self._frame_buf = self.config["input_buffer"]
@@ -114,27 +116,69 @@ class SLAMWorker(BaseWorker):
             return
         self._last_seq = header.seq_no
 
+        self._frame_count += 1
+
+        # One-time depth sanity check — print actual values SLAMWorker receives
+        if self._frame_count == 1:
+            nonzero = depth[depth > 0]
+            self.logger.info(
+                f"[SLAM depth check] shape={depth.shape} dtype={depth.dtype} "
+                f"min={float(depth.min()):.4f} max={float(depth.max()):.4f} "
+                f"mean_nonzero={float(nonzero.mean()) if len(nonzero) else 0:.4f}m "
+                f"nonzero_pct={100*len(nonzero)/(depth.size):.1f}%"
+            )
+
         if self._slam is not None:
-            #  Real SLAM tracking 
+            #  Real SLAM tracking
             pose_4x4 = self._slam.track_rgbd(rgb, depth, header.produced_ts)
             self._pose_buf.write(np.asarray(pose_4x4, dtype=np.float32))
 
-            # Check for map change (loop closure / global BA)
-            if self._slam.map_changed():
-                self.logger.info("Map changed (loop closure / global BA)")
-
-                # Publish updated point cloud
-                if self._pc_buf is not None:
-                    all_pts = self._slam.get_all_map_points()
-                    all_pts = np.asarray(all_pts, dtype=np.float32)
-                    self._pc_buf.write(all_pts)
-                    self.logger.info(
-                        f"Published point cloud: {len(all_pts)} points"
+            # Log tracking state + position every 30 frames for diagnostics
+            if self._frame_count % 30 == 0:
+                _STATE_NAMES = {
+                    0: "NO_IMAGES_YET", 1: "NOT_INITIALIZED",
+                    2: "OK", 3: "RECENTLY_LOST", 4: "LOST",
+                }
+                state = self._slam.get_tracking_state()
+                tx, ty, tz = float(pose_4x4[0, 3]), float(pose_4x4[1, 3]), float(pose_4x4[2, 3])
+                import math
+                dist = math.sqrt(tx*tx + ty*ty + tz*tz)
+                all_pts = np.asarray(self._slam.get_all_map_points(), dtype=np.float32)
+                n_pts = len(all_pts)
+                if n_pts > 0:
+                    pt_range = (
+                        f"X=[{all_pts[:,0].min():.3f},{all_pts[:,0].max():.3f}] "
+                        f"Y=[{all_pts[:,1].min():.3f},{all_pts[:,1].max():.3f}] "
+                        f"Z=[{all_pts[:,2].min():.3f},{all_pts[:,2].max():.3f}]"
                     )
+                else:
+                    pt_range = "no pts"
+                self.logger.info(
+                    f"SLAM state={_STATE_NAMES.get(state, state)} "
+                    f"pose_t=({tx:.4f},{ty:.4f},{tz:.4f}) dist={dist:.4f}m "
+                    f"map_pts={n_pts} frames={self._frame_count}"
+                )
+                self.logger.info(f"  map_pt_range: {pt_range}")
 
-                # Signal loop closure
-                if self._loop_event is not None:
-                    self._loop_event.set()
+            # Publish point cloud on loop closure AND periodically so
+            # MappingWorker has wall points even without a detected loop.
+            map_changed = self._slam.map_changed()
+            publish_pc = map_changed or (
+                self._pc_buf is not None
+                and self._frame_count % self._PC_PUBLISH_INTERVAL == 0
+            )
+            if publish_pc and self._pc_buf is not None:
+                all_pts = np.asarray(self._slam.get_all_map_points(), dtype=np.float32)
+                if len(all_pts) > 0:
+                    self._pc_buf.write(all_pts)
+                    if map_changed:
+                        self.logger.info(f"Map changed — published {len(all_pts)} pts")
+                    else:
+                        self.logger.debug(f"Periodic PC publish: {len(all_pts)} pts")
+
+            # Signal loop closure on actual SLAM loop closure event
+            if map_changed and self._loop_event is not None:
+                self._loop_event.set()
         else:
             #  Stub mode — identity pose ─
             identity = np.eye(4, dtype=np.float32)

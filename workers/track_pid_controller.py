@@ -79,14 +79,23 @@ class TrackPIDController:
         d_inner = np.linalg.norm(inner_line - current_bev, axis=1)
         closest_outer = outer_line[d_outer.argmin()]
         closest_inner = inner_line[d_inner.argmin()]
+        print(f"Closest Outer Point: {closest_outer}")
+        print(f"Closest Inner Point: {closest_inner}")
 
-        # 2. Target = midpoint (centre-line)
-        target = (closest_outer + closest_inner) / 2.0
+        # 2. Normal vector to the desired heading
+        n_dir = closest_outer - closest_inner
+        heading_vec = np.array([np.cos(heading_rad), np.sin(heading_rad)])
+        target_heading = np.array([-n_dir[1], n_dir[0]])
+
+        if np.dot(target_heading, heading_vec) < 0:
+            target_heading = -target_heading
 
         # 3. Cross-track error (signed angular offset)
-        to_target = target - current_bev
-        target_angle = np.arctan2(to_target[1], to_target[0])
+        target_angle = np.arctan2(target_heading[1], target_heading[0])
         error = _angle_diff(target_angle, heading_rad)
+
+        print(f"Target Angle: {target_angle}")
+        print(f"Current Angle: {heading_rad}")
 
         # 4. PID
         self._integral += error

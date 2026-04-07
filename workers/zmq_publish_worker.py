@@ -23,6 +23,11 @@ except ImportError:
     TrackBoundaryBuffer = None
 
 try:
+    from shared_buffer import PointCloudBuffer
+except ImportError:
+    PointCloudBuffer = None
+
+try:
     import zmq
 except ImportError:
     zmq = None
@@ -59,12 +64,14 @@ class ZMQPublishWorker(BaseWorker):
         self._pose_buf: Optional[PoseBuffer] = None
         self._seg_buf: Optional[SegmentationBuffer] = None
         self._boundary_buf: Optional[Any] = None
+        self._pc_buf: Optional[Any] = None
         self._publish_config: dict = {}
         self._last_seq = {
             'control': 0,
             'pose': 0,
             'segmentation': 0,
             'boundary': 0,
+            'pointcloud': 0,
         }
         self._frame_count = 0
 
@@ -92,6 +99,7 @@ class ZMQPublishWorker(BaseWorker):
         self._pose_buf = self.config.get("pose_buffer")
         self._seg_buf = self.config.get("seg_buffer")
         self._boundary_buf = self.config.get("boundary_buffer")
+        self._pc_buf = self.config.get("pointcloud_buffer")
 
         # Get publish configuration
         self._publish_config = self.config.get("publish", {
@@ -120,10 +128,12 @@ class ZMQPublishWorker(BaseWorker):
             if self._publish_config.get("segmentation", False) and self._seg_buf:
                 self._publish_segmentation()
 
-        # Low-frequency data (once per second)
+        # Low-frequency data (every few frames)
         if self._frame_count % 2 == 0:
             if self._publish_config.get("boundary", False) and self._boundary_buf:
                 self._publish_boundary()
+            if self._publish_config.get("pointcloud", False) and self._pc_buf:
+                self._publish_pointcloud()
         
         time.sleep(0.01)  # Small delay to avoid busy loop
 
@@ -131,7 +141,7 @@ class ZMQPublishWorker(BaseWorker):
         """Publish control commands (for logging/echo)."""
         try:
             result = self._ctrl_buf.read_latest()
-            print(f"Read control buffer: {result is not None}")
+            # print(f"Read control buffer: {result is not None}")
             if result is None:
                 return
 
@@ -151,7 +161,7 @@ class ZMQPublishWorker(BaseWorker):
                 'throttle': float(throttle),
             })
             
-            print(f"Publishing control: {message}")
+            # print(f"Publishing control: {message}")
 
             self._socket.send_string(f"control {message}", zmq.NOBLOCK)
 
@@ -162,11 +172,11 @@ class ZMQPublishWorker(BaseWorker):
         """Publish vehicle pose and trajectory."""
         try:
             result = self._pose_buf.read_latest()
-            print(f"Read pose buffer: {result is not None}")
+            # print(f"Read pose buffer: {result is not None}")
             if result is None:
                 return
 
-            header, pose, _ = result
+            header, pose, _, _ = result
             if header.seq_no <= self._last_seq['pose']:
                 return
             self._last_seq['pose'] = header.seq_no
@@ -181,7 +191,7 @@ class ZMQPublishWorker(BaseWorker):
                 'pose_matrix': pose.flatten().tolist(),
             })
 
-            print(f"Publishing pose: {message}")
+            # print(f"Publishing pose: {message}")
 
             self._socket.send_string(f"telemetry {message}", zmq.NOBLOCK)
 
@@ -192,7 +202,7 @@ class ZMQPublishWorker(BaseWorker):
         """Publish segmentation masks."""
         try:
             result = self._seg_buf.read_latest()
-            print(f"Read segmentation buffer: {result is not None}")
+            # print(f"[seg] buf read: {result is not None}")
             if result is None:
                 return
 
@@ -213,18 +223,20 @@ class ZMQPublishWorker(BaseWorker):
                 'dtype': 'uint8',
             })
 
-            print(f"Publishing segmentation: seq={header.seq_no}, shape={mask.shape}")
+            # print(f"Publishing segmentation: seq={header.seq_no}, shape={mask.shape}")
 
             self._socket.send_string(f"segmentation {message}", zmq.NOBLOCK)
 
         except Exception as e:
-            self.logger.debug(f"Segmentation publish failed: {e}")
+            import traceback
+            self.logger.error(f"Segmentation publish failed: {e}")
+            traceback.print_exc()
 
     def _publish_boundary(self) -> None:
         """Publish track boundaries."""
         try:
             result = self._boundary_buf.read_latest()
-            print(f"Read boundary buffer: {result is not None}")
+            # print(f"Read boundary buffer: {result is not None}")
             if result is None:
                 return
 
@@ -249,6 +261,32 @@ class ZMQPublishWorker(BaseWorker):
 
         except Exception as e:
             self.logger.debug(f"Boundary publish failed: {e}")
+
+    def _publish_pointcloud(self) -> None:
+        """Publish SLAM point cloud as base64-encoded float32 XYZ array."""
+        try:
+            result = self._pc_buf.read_latest()
+            if result is None:
+                return
+
+            header, pts = result
+            if header.seq_no <= self._last_seq['pointcloud']:
+                return
+            self._last_seq['pointcloud'] = header.seq_no
+
+            pts_b64 = base64.b64encode(pts.astype(np.float32).tobytes()).decode('utf-8')
+
+            message = json.dumps({
+                'seq': header.seq_no,
+                'timestamp': header.produced_ts,
+                'points': pts_b64,
+                'count': len(pts),
+            })
+
+            self._socket.send_string(f"pointcloud {message}", zmq.NOBLOCK)
+
+        except Exception as e:
+            self.logger.debug(f"Pointcloud publish failed: {e}")
 
     def teardown(self) -> None:
         if self._socket is not None:

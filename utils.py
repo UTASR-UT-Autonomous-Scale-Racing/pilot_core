@@ -29,10 +29,14 @@ def load_model_from_config(yaml_path):
     package_path = rel_path.replace(os.sep, '.')
     seg_module_path = f"{package_path}.model"
 
-    # Resolve relative paths in kwargs based on the config file's directory
+    # Resolve relative paths in kwargs — only for keys that look like file paths
+    _PATH_SUFFIXES = ("_path", "_file", "_dir", "_weights", "_vocab", "_config")
     for key, value in seg_kwargs.items():
-        if isinstance(value, str) and not os.path.isabs(value):
-            # Convert relative path to absolute path based on config file location
+        if (
+            isinstance(value, str)
+            and not os.path.isabs(value)
+            and key.lower().endswith(_PATH_SUFFIXES)
+        ):
             seg_kwargs[key] = os.path.join(config_dir, value)
 
     module = importlib.import_module(seg_module_path)

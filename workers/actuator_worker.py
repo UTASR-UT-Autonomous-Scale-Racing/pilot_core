@@ -55,6 +55,8 @@ class ActuatorWorker(BaseWorker):
         self._zmq_enabled = False
         self._zmq_context = None
         self._zmq_pub = None
+        # Reset signal — set this mp.Event to send reset:true on the next ZMQ publish
+        self._reset_event = None
 
     def setup(self) -> None:
         self._ctrl_buf = self.config["input_buffer"]
@@ -74,6 +76,8 @@ class ActuatorWorker(BaseWorker):
                 self._i2c_address = i2c_address
                 self._bus = smbus2.SMBus(i2c_bus)
                 self.logger.info(f"I2C actuator ready on bus {i2c_bus}, address 0x{i2c_address:02x}")
+
+        self._reset_event = self.config.get("reset_event")
 
         # Setup ZMQ publisher for simulator
         self._zmq_enabled = self.config.get("zmq_enabled", False)
@@ -122,7 +126,11 @@ class ActuatorWorker(BaseWorker):
             # Convert normalized [0, 1] to simulator range [-1, 1]
             steering_sim = (steering_norm * 2.0) - 1.0
             throttle_sim = (throttle_norm * 2.0) - 1.0
-            self._publish_zmq(steering_sim, throttle_sim)
+            reset = False
+            if self._reset_event is not None and self._reset_event.is_set():
+                reset = True
+                self._reset_event.clear()
+            self._publish_zmq(steering_sim, throttle_sim, reset)
 
         # Send to I2C (hardware)
         if not self._dummy:
@@ -141,12 +149,12 @@ class ActuatorWorker(BaseWorker):
         except Exception:
             self.logger.exception("I2C write failed")
 
-    def _publish_zmq(self, steering: float, throttle: float) -> None:
+    def _publish_zmq(self, steering: float, throttle: float, reset: bool = False) -> None:
         """Publish control commands to simulator via ZMQ."""
         command = {
             'throttle': float(throttle),
             'steering': float(steering),
-            'reset': False
+            'reset': reset,
         }
 
         try:

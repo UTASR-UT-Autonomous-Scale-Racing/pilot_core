@@ -1,6 +1,10 @@
 
 recordings/
 temp/
+
+# RL training outputs
+rl/checkpoints/
+rl/logs/
 *.png
 *.jpg
 *.jpeg

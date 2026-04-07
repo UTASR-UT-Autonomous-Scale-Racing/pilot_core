@@ -51,10 +51,10 @@ export LD_LIBRARY_PATH="${ROOT_DIR}/ORB_SLAM3/lib:/usr/local/lib:${LD_LIBRARY_PA
 cd "${ROOT_DIR}"
 
 START_ARGS=(
-  --config "${ROOT_DIR}/config.yaml"
+  --config "${ROOT_DIR}/config_prod.yaml"
   --enable-slam
   --oakd-imu
-  --recording
+  
 )
 
 # Optional camera tuning passthrough (maps env vars to start.py flags).

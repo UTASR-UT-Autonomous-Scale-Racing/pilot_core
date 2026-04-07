@@ -8,16 +8,20 @@ the vehicle's position on the mapped track in near-real-time.
 
 Config kwargs
 -------------
+buffers : dict[str, Any] | None
+    Optional canonical buffer map (same naming as BufferRecorderWorker):
+    ``pose``, ``imu``, ``control``, ``pointcloud``, ``boundary``.
+    If present, values are used first.
 pose_buffer : PoseBuffer
-    Latest SLAM pose.
+    Legacy pose buffer kwarg (used when ``buffers['pose']`` is absent).
 imu_buffer : IMUBuffer | None
-    Latest IMU vector (optional).
+    Legacy IMU buffer kwarg (used when ``buffers['imu']`` is absent).
 pointcloud_buffer : PointCloudBuffer | None
-    Latest SLAM point cloud (optional).
+    Legacy pointcloud buffer kwarg (used when ``buffers['pointcloud']`` is absent).
 boundary_buffer : TrackBoundaryBuffer | None
-    Extracted track boundaries (optional — omitted when SLAM disabled).
+    Legacy boundary buffer kwarg (used when ``buffers['boundary']`` is absent).
 control_buffer : ControlBuffer | None
-    Latest steering / throttle (optional).
+    Legacy control buffer kwarg (used when ``buffers['control']`` is absent).
 endpoint : str
     Full URL to POST JSON payloads to (e.g. ``http://10.0.0.1:8080/api/telemetry``).
 publish_interval : float
@@ -32,8 +36,9 @@ max_pointcloud_pts : int
     Cap on how many point-cloud points to include per payload (default 2000).
 include_buffers : list[str] | str | None
     Optional list of payload sections to include. Supported values:
-    ``pose, trajectory, control, track, imu, pointcloud``.
-    If omitted, defaults to ``pose, trajectory, control, track``.
+    ``pose, trajectory, control, boundary, imu, pointcloud``.
+    ``track`` is accepted as a legacy alias for ``boundary``.
+    If omitted, defaults to ``pose, trajectory, control, boundary``.
 """
 
 from __future__ import annotations
@@ -86,6 +91,8 @@ class WebPublishWorker(BaseWorker):
     Parameters are documented at module level.
     """
 
+    _payload_number: int = 0
+
     def __init__(self, name: str = "web_publish", **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
 
@@ -103,7 +110,7 @@ class WebPublishWorker(BaseWorker):
         self._vehicle_id: str = "pilot_1"
         self._max_traj: int = 500
         self._max_pc_pts: int = 2000
-        self._include: set[str] = {"pose", "trajectory", "control", "track"}
+        self._include: set[str] = {"control", "imu"}
 
         # Internal state
         self._trajectory: List[List[float]] = []
@@ -118,11 +125,13 @@ class WebPublishWorker(BaseWorker):
     # ------------------------------------------------------------------
 
     def setup(self) -> None:
-        self._pose_buf = self.config.get("pose_buffer")
-        self._imu_buf = self.config.get("imu_buffer")
-        self._pc_buf = self.config.get("pointcloud_buffer")
-        self._boundary_buf = self.config.get("boundary_buffer")
-        self._ctrl_buf = self.config.get("control_buffer")
+        buffers_cfg = self.config.get("buffers") or {}
+
+        self._pose_buf = buffers_cfg.get("pose", self.config.get("pose_buffer"))
+        self._imu_buf = buffers_cfg.get("imu", self.config.get("imu_buffer"))
+        self._pc_buf = buffers_cfg.get("pointcloud", self.config.get("pointcloud_buffer"))
+        self._boundary_buf = buffers_cfg.get("boundary", self.config.get("boundary_buffer"))
+        self._ctrl_buf = buffers_cfg.get("control", self.config.get("control_buffer"))
         self._endpoint = self.config.get("endpoint", "http://localhost:8080/api/telemetry")
         self._interval = float(self.config.get("publish_interval", 1.0))
         self._timeout = float(self.config.get("timeout", 2.0))
@@ -132,7 +141,7 @@ class WebPublishWorker(BaseWorker):
 
         include_cfg = self.config.get("include_buffers")
         if include_cfg is None:
-            include_set = {"pose", "trajectory", "control", "track"}
+            include_set = {"pose", "trajectory", "control", "boundary", "imu", "pointcloud"}#TODO: Abstract default include set to a class-level constant or config default
         else:
             if isinstance(include_cfg, str):
                 parts = [p.strip() for p in include_cfg.split(",") if p.strip()]
@@ -140,13 +149,20 @@ class WebPublishWorker(BaseWorker):
                 parts = [str(p).strip() for p in include_cfg if str(p).strip()]
             include_set = {p.lower() for p in parts}
 
-        supported = {"pose", "trajectory", "control", "track", "imu", "pointcloud"}
+        # Backward compatibility for older include names.
+        include_aliases = {
+            "track": "boundary",
+            "boundaries": "boundary",
+        }
+        include_set = {include_aliases.get(p, p) for p in include_set}
+
+        supported = {"pose", "trajectory", "control", "boundary", "imu", "pointcloud"}
         unknown = include_set - supported
         if unknown:
             self.logger.warning("Unknown include_buffers entries ignored: %s", sorted(unknown))
         self._include = include_set & supported
         if not self._include:
-            self._include = {"pose", "trajectory", "control", "track"}
+            self._include = {"control", "imu"}
 
         if not self._endpoint:
             raise ValueError("WebPublishWorker requires a non-empty 'endpoint'")
@@ -315,11 +331,13 @@ class WebPublishWorker(BaseWorker):
 
     def _build_payload(self) -> Dict[str, Any]:
         """Assemble the JSON-serialisable telemetry dict."""
+        WebPublishWorker._payload_number += 1
         payload: Dict[str, Any] = {
             "vehicle_id": self._vehicle_id,
             "timestamp": time.time(),
+            "payload_number": WebPublishWorker._payload_number,
         }
-
+            
         # Current pose
         if "pose" in self._include and self._latest_pose is not None:
             payload["pose"] = self._latest_pose
@@ -334,11 +352,13 @@ class WebPublishWorker(BaseWorker):
             if ctrl is not None:
                 payload["control"] = ctrl
 
-        # Track boundaries
-        if "track" in self._include:
-            track = self._read_boundaries()
-            if track is not None:
-                payload["track"] = track
+        # Track boundaries (canonical key is "boundary").
+        if "boundary" in self._include:
+            boundary = self._read_boundaries()
+            if boundary is not None:
+                payload["boundary"] = boundary
+                # Keep legacy key for existing consumers.
+                payload["track"] = boundary
 
         # IMU
         if "imu" in self._include:
@@ -369,7 +389,7 @@ class WebPublishWorker(BaseWorker):
         req = Request(
             self._endpoint,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "x-api-key": "dev-secret"}, #TODO Set Env var for password
             method="POST",
         )
 

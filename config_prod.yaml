@@ -18,7 +18,7 @@ ir_update_interval_s: 0.5
 use_oakd_imu: true
 i2c_address: 0x08
 i2c_bus: 1
-actuator_dummy: true         # Local testing: skip actuator I2C writes
+actuator_dummy: false         # Local testing: skip actuator I2C writes
 
 # --- Vision ---
 segmentation_config_path: pilot_vision/models/default/config.yaml
@@ -46,7 +46,7 @@ slam:
 # --- Mapping (BEV boundary extraction) ---
 mapping:
   enabled: true              # Set false to skip map-building lap
-  pointcloud_only: false     # If true, disable map/boundary generation and only keep SLAM pointcloud flow
+  pointcloud_only: true     # If true, disable map/boundary generation and only keep SLAM pointcloud flow
   load_path: null             # Optional .npz/.json map file to preload
   save_path: null             # Optional .npz path to save mapped boundaries
   set_localize_on_load: true  # Enter SLAM localization mode after load
@@ -73,21 +73,21 @@ rgbd_visualization:
   depth_source: stereo        # live pipeline currently supports stereo only
 
 # --- Recording ---
-recording: true
+recording: false
 recording_path: ~/recordings/recording_{datetime}
 
 # --- Web Telemetry Publisher (optional) ---
 web_publish:
-  enabled: false
-  endpoint: "http://localhost:8080/api/telemetry"
-  interval: 1.0               # Seconds between POSTs
+  enabled: true
+  endpoint: "http://localhost:8080/api/v1/telemetry"
+  interval: 0.01              # Seconds between POSTs
   timeout: 2.0                # HTTP timeout per request
   vehicle_id: "pilot_1"
   max_trajectory_pts: 500     # Cap trajectory points per payload
 
 # --- Replay Video ---
 replay_video:
-  include_map_plot: true      # Show map panel in recordings_to_mp4 output
+  include_map_plot: false      # Show map panel in recordings_to_mp4 output
 
 recording_config:
   sample_k: 1                 # Global: save every k-th sample (1 = all)

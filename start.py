@@ -699,9 +699,20 @@ def main() -> None:
     # Optional: Web telemetry publisher
     web_cfg = config.get("web_publish", {})
     if web_cfg.get("enabled", False):
+        web_buffers: Dict[str, Any] = {
+            "pose": pose_buf,
+            "imu": imu_buf,
+            "control": ctrl_buf,
+        }
+        if pc_buf is not None:
+            web_buffers["pointcloud"] = pc_buf
+        if boundary_buf is not None:
+            web_buffers["boundary"] = boundary_buf
+
         _workers.append(
             WebPublishWorker(
                 name="web_publish",
+                buffers=web_buffers,
                 pose_buffer=pose_buf,
                 imu_buffer=imu_buf,
                 pointcloud_buffer=pc_buf,

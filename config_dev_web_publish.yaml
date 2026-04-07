@@ -10,7 +10,7 @@ i2c_address: null
 i2c_bus: null
 
 # --- Synthetic ---
-synthetic: true
+synthetic: false
 
 # --- Vision ---
 segmentation_config_path: test_segmentation_config.yaml

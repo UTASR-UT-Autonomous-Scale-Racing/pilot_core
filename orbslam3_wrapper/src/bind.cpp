@@ -64,7 +64,8 @@ public:
      * @param rgb   uint8 numpy array (H, W, 3)  — BGR or RGB
      * @param depth float32 numpy array (H, W)   — depth in metres
      * @param ts    timestamp (seconds)
-     * @return 4×4 float32 camera-to-world SE3 pose (identity on failure)
+     * @return 4×4 float32 world-to-camera SE3 pose Tcw (identity/stale when
+     *         tracking is not OK — check get_tracking_state())
      */
     py::array_t<float> track_rgbd(py::array_t<uint8_t, py::array::c_style> rgb,
                                    py::array_t<float, py::array::c_style> depth,

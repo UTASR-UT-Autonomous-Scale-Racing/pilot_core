@@ -35,7 +35,6 @@ track_length : float – expected track length for lap detection heuristic
 
 from __future__ import annotations
 
-import math
 import multiprocessing as mp
 import os
 import time
@@ -193,11 +192,11 @@ class MapPlotWorker(BaseWorker):
         self.logger.info(
             f"MapPlotWorker ready "
             f"(backend={matplotlib.get_backend()}, "
-            f"headless={self._headless})"  
+            f"headless={self._headless})"
         )
 
     def step(self) -> None:
-        #  Read point cloud         
+        # --- Read point cloud ---
         if self._pc_buf is not None:
             pc_result = self._pc_buf.read_latest()
             if pc_result is not None:
@@ -207,7 +206,7 @@ class MapPlotWorker(BaseWorker):
                     self._cloud_pts.append(bev)
                     self._last_pc_seq = pc_header.seq_no
 
-        #  Read pose; 
+        # --- Read pose ---
         pose_result = self._pose_buf.read_latest()
         if pose_result is not None:
             pose_header, pose, _ = pose_result
@@ -221,7 +220,7 @@ class MapPlotWorker(BaseWorker):
                     self._lap_trails[self._current_lap].append(pos)
                     self._detect_lap(pos)
 
-        #  Detect phase transition         
+        # --- Detect phase transition ---
         if (
             not self._phase_b
             and self._loop_event is not None
@@ -243,7 +242,7 @@ class MapPlotWorker(BaseWorker):
                         f"inner={len(self._inner_line)}"
                     )
 
-        #  Render 
+        # --- Render ---
         now = time.monotonic()
         if now - self._last_render_time >= self._target_dt:
             self._render()

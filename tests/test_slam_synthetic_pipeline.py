@@ -38,7 +38,7 @@ import cv2
 import numpy as np
 import pytest
 
-# ── skip if orbslam3_python is not available ──────────────────────────────
+# --- skip if orbslam3_python is not available ---
 orbslam3 = pytest.importorskip(
     "orbslam3_python",
     reason="orbslam3_python wrapper not built or not on sys.path",
@@ -51,7 +51,7 @@ if ROOT not in sys.path:
 
 from synthetic.closed_loop_generator import ClosedLoopFrameGenerator
 
-# ── Paths ─────────────────────────────────────────────────────────────────
+# --- Paths ---
 VOCAB_PATH = os.path.join(ROOT, "ORB_SLAM3", "Vocabulary", "ORBvoc.txt")
 SETTINGS_PATH = os.path.join(ROOT, "synthetic_slam_settings.yaml")
 VIDEO_DIR = os.path.join(ROOT, "test_output")
@@ -59,7 +59,7 @@ VIDEO_DIR = os.path.join(ROOT, "test_output")
 logger = logging.getLogger(__name__)
 
 
-# ── Frame Logger ──────────────────────────────────────────────────────────
+# --- Frame Logger ---
 
 class FrameLogger:
     """Records a four-panel 2x2 video:
@@ -340,7 +340,7 @@ class FrameLogger:
         )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────
+# --- Helpers ---
 
 def _is_valid_pose(pose: np.ndarray) -> bool:
     """Return True if *pose* is a plausible SE3 matrix (not identity/zero)."""
@@ -370,7 +370,7 @@ def _tracking_state_name(state: int) -> str:
     return _names.get(state, f"UNKNOWN({state})")
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────
+# --- Fixtures ---
 
 @pytest.fixture(scope="module")
 def synthetic_frames():
@@ -423,7 +423,7 @@ def frame_logger():
     logger.info(f"Video saved to {path}")
 
 
-# ── Tests ─────────────────────────────────────────────────────────────────
+# --- Tests ---
 
 class TestSLAMSyntheticPipeline:
     """Phase A (mapping) + Phase B (localization) using real ORB-SLAM3."""
@@ -435,7 +435,7 @@ class TestSLAMSyntheticPipeline:
     _phase_a_tracking_ok_count: int = 0
     _phase_b_tracking_ok_count: int = 0
 
-    # ── Phase A: Mapping ──────────────────────────────────────────────
+    # --- Phase A: Mapping ---
 
     def test_phase_a_mapping(self, slam_system, synthetic_frames, frame_logger):
         """Feed the first lap to ORB-SLAM3 and verify mapping."""
@@ -497,7 +497,7 @@ class TestSLAMSyntheticPipeline:
         logger.info(f"Map changes: {map_changed_count}")
         logger.info(f"Trajectory length: {slam_system.trajectory_length()}")
 
-        # ── Assertions ──
+        # --- Assertions ---
         # At least 30% of frames should be tracked successfully
         # (initialisation takes a few frames, and synthetic scenes may
         # occasionally lose tracking in turns)
@@ -511,7 +511,7 @@ class TestSLAMSyntheticPipeline:
 
         logger.info("✓ Phase A assertions passed")
 
-    # ── Phase A result inspection ─────────────────────────────────────
+    # --- Phase A result inspection ---
 
     def test_phase_a_map_points_quality(self, slam_system):
         """Verify map points are spatially distributed (not collapsed)."""
@@ -543,7 +543,7 @@ class TestSLAMSyntheticPipeline:
         assert n_kf >= 3, f"Expected ≥3 keyframes, got {n_kf}"
         logger.info("✓ Keyframe count OK")
 
-    # ── Phase B: Driving lap on the mapped track ───────────────────
+    # --- Phase B: Driving lap on the mapped track ---
 
     def test_phase_b_localization(self, slam_system, synthetic_frames, frame_logger):
         """Feed the second lap — continuous tracking on the mapped track."""
@@ -599,7 +599,7 @@ class TestSLAMSyntheticPipeline:
 
         logger.info("✓ Phase B assertions passed")
 
-    # ── Summary ───────────────────────────────────────────────────────
+    # --- Summary ---
 
     def test_summary(self, slam_system):
         """Print a final summary of both phases."""

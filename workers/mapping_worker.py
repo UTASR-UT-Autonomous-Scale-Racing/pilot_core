@@ -181,7 +181,7 @@ class MappingWorker(BaseWorker):
             time.sleep(0.5)
             return
 
-        #  Read latest wall mask ─
+        # --- Read latest wall mask ---
         seg_result = self._seg_buf.read_latest()
         if seg_result is not None:
             seg_header, mask = seg_result
@@ -189,7 +189,7 @@ class MappingWorker(BaseWorker):
                 self._latest_mask = mask
                 self._last_seg_seq = seg_header.seq_no
 
-        #  Read latest pose → accumulate trajectory 
+        # --- Read latest pose → accumulate trajectory ---
         pose_result = self._pose_buf.read_latest()
         if pose_result is not None:
             pose_header, pose, _ = pose_result
@@ -199,7 +199,7 @@ class MappingWorker(BaseWorker):
                 self._bev_trajectory.append(np.array([tx, tz], dtype=np.float32))
                 self._last_pose_seq = pose_header.seq_no
 
-        #  Read latest point cloud → label & accumulate wall pts ─
+        # --- Read latest point cloud → label & accumulate wall pts ---
         pc_result = self._pc_buf.read_latest()
         if pc_result is not None:
             pc_header, pts_3d = pc_result
@@ -214,7 +214,7 @@ class MappingWorker(BaseWorker):
                     f"(total batches: {len(self._bev_wall_pts)})"
                 )
 
-        #  Check loop closure → extract boundaries         
+        # --- Check loop closure → extract boundaries ---
         if (
             self._loop_event is not None
             and self._loop_event.is_set()

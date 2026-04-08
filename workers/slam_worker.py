@@ -3,6 +3,11 @@ SLAMWorker — reads frames from FrameBuffer, runs ORB_SLAM3 RGBD tracking
 via the pybind11 wrapper, and writes pose + point-cloud data into shared
 buffers.
 
+Pose contract: PoseBuffer carries the **camera-to-world** transform (Twc),
+so ``pose[:3, 3]`` is the camera position in the map frame.  ORB-SLAM3
+returns world-to-camera (Tcw); it is inverted here.  Frames where tracking
+is not OK are not published (ORB-SLAM3 returns an identity/stale pose).
+
 Operates in two phases:
     Phase A (mapping):  TrackRGBD per frame, accumulate trajectory, publish
                         point cloud when map changes, signal loop closure.
@@ -25,6 +30,19 @@ try:
     from shared_buffer.pointcloud_buffer import PointCloudBuffer
 except ImportError:
     PointCloudBuffer = None  # type: ignore[misc]
+
+
+# ORB_SLAM3::Tracking::eTrackingState
+_TRACKING_OK = 2
+
+
+def invert_se3(T: np.ndarray) -> np.ndarray:
+    """Closed-form inverse of a 4×4 rigid transform."""
+    R, t = T[:3, :3], T[:3, 3]
+    inv = np.eye(4, dtype=np.float32)
+    inv[:3, :3] = R.T
+    inv[:3, 3] = -R.T @ t
+    return inv
 
 
 class SLAMWorker(BaseWorker):
@@ -58,6 +76,7 @@ class SLAMWorker(BaseWorker):
         self._loop_event: Optional[mp.Event] = None
         self._localize_event: Optional[mp.Event] = None
         self._localization_activated = False
+        self._tracking_ok = True
 
     def setup(self) -> None:
         self._frame_buf = self.config["input_buffer"]
@@ -91,7 +110,7 @@ class SLAMWorker(BaseWorker):
             self._slam = None
 
     def step(self) -> None:
-        #  Check if we should switch to localization-only mode 
+        # --- Check if we should switch to localization-only mode ---
         if (
             not self._localization_activated
             and self._localize_event is not None
@@ -102,7 +121,7 @@ class SLAMWorker(BaseWorker):
                 self.logger.info("Switched to localization-only mode")
             self._localization_activated = True
 
-        #  Read a frame 
+        # --- Read a frame ---
         result = self._frame_buf.read_latest()
         if result is None:
             time.sleep(0.01)
@@ -115,9 +134,17 @@ class SLAMWorker(BaseWorker):
         self._last_seq = header.seq_no
 
         if self._slam is not None:
-            #  Real SLAM tracking 
-            pose_4x4 = self._slam.track_rgbd(rgb, depth, header.produced_ts)
-            self._pose_buf.write(np.asarray(pose_4x4, dtype=np.float32))
+            # --- Real SLAM tracking ---
+            Tcw = self._slam.track_rgbd(rgb, depth, header.produced_ts)
+            tracking_ok = self._slam.get_tracking_state() == _TRACKING_OK
+            if tracking_ok != self._tracking_ok:
+                self._tracking_ok = tracking_ok
+                if tracking_ok:
+                    self.logger.info("Tracking OK")
+                else:
+                    self.logger.warning("Tracking lost — withholding poses")
+            if tracking_ok:
+                self._pose_buf.write(invert_se3(np.asarray(Tcw, dtype=np.float32)))
 
             # Check for map change (loop closure / global BA)
             if self._slam.map_changed():
@@ -136,7 +163,7 @@ class SLAMWorker(BaseWorker):
                 if self._loop_event is not None:
                     self._loop_event.set()
         else:
-            #  Stub mode — identity pose ─
+            # --- Stub mode — identity pose ---
             identity = np.eye(4, dtype=np.float32)
             self._pose_buf.write(identity)
 

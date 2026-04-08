@@ -8,6 +8,7 @@ Replaces ``I2CDataProcessor.write()`` in the old pipeline.
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -77,6 +78,17 @@ class ActuatorWorker(BaseWorker):
             time.sleep(0.005)
             return
         self._last_seq = header.seq_no
+
+        # Last line of defence: an out-of-range command must never crash the
+        # actuator loop (the car would hold its previous PWM).  Clamp and warn.
+        if not (0.0 <= steering_norm <= 1.0 and 0.0 <= throttle_norm <= 1.0):
+            self.logger.warning(
+                f"Control command out of [0, 1] range "
+                f"(steering={steering_norm:.3f}, throttle={throttle_norm:.3f}) — clamping"
+            )
+            # NaN → neutral steering / zero throttle
+            steering_norm = min(max(steering_norm, 0.0), 1.0) if math.isfinite(steering_norm) else 0.5
+            throttle_norm = min(max(throttle_norm, 0.0), 1.0) if math.isfinite(throttle_norm) else 0.0
 
         # Map normalised → PWM
         pwm_steering, pwm_throttle = self._controller.get_normalized_action_output(

@@ -1,6 +1,10 @@
 """
-IMUWorker — reads IMU data from I2C (Arduino) or OAK-D on-board IMU
-and writes 9-float vectors into an IMUBuffer.
+IMUWorker — reads IMU data from the Arduino over I2C (or a synthetic
+generator) and writes 9-float vectors into an IMUBuffer.
+
+The OAK-D on-board IMU is *not* handled here: a DepthAI device can only be
+opened by one process, so it is streamed by :class:`CameraWorker` instead
+(``use_oakd_imu: true`` in the config wires this up in ``start.py``).
 
 Replaces ``pilot_ingest.I2CDataProcessor.read()`` loop and the IMU portion
 of ``SegmentProcessor.read_stream()``.
@@ -22,11 +26,6 @@ try:
 except ImportError:
     smbus2 = None
 
-try:
-    import depthai as dai
-except ImportError:
-    dai = None
-
 
 class IMUWorker(BaseWorker):
     """Worker process for IMU sensor data.
@@ -36,23 +35,24 @@ class IMUWorker(BaseWorker):
     output_buffer : IMUBuffer
         Shared IMUBuffer to write into.
     i2c_address : int | None
-        I2C slave address of the Arduino.  ``None`` → use OAK-D IMU.
+        I2C slave address of the Arduino.
     i2c_bus : int | None
-        I2C bus number.  ``None`` → use OAK-D IMU.
-    use_oakd_imu : bool
-        Explicit flag — if True, use OAK-D IMU regardless of I2C settings.
+        I2C bus number.
+    synthetic : bool
+        Generate synthetic IMU data instead of reading hardware.
+
+    If neither synthetic mode nor a complete I2C address/bus is configured
+    the worker idles and publishes nothing — it never substitutes fake data
+    for a real sensor.
     """
 
     def __init__(self, name: str = "imu", **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
         self._imu_buf: IMUBuffer | None = None
         self._bus = None
-        self._use_oakd = False
         self._dummy = False
         self._synthetic = False
         self._synth_gen = None
-        self._device = None
-        self._queue = None
 
     def setup(self) -> None:
         import os
@@ -70,21 +70,16 @@ class IMUWorker(BaseWorker):
 
         i2c_address = self.config.get("i2c_address")
         i2c_bus = self.config.get("i2c_bus")
-        self._use_oakd = self.config.get("use_oakd_imu", False)
+        if i2c_address is None or i2c_bus is None:
+            self._dummy = True
+            self.logger.warning(
+                "No I2C address/bus configured — IMU worker idle (no data). "
+                "Set use_oakd_imu: true to stream the OAK-D IMU instead."
+            )
+            return
+        self._setup_i2c(i2c_address, i2c_bus)
 
-        if self._use_oakd or i2c_address is None or i2c_bus is None:
-            self._use_oakd = True
-            try:
-                self._setup_oakd_imu()
-            except (ImportError, Exception) as exc:
-                self.logger.warning(
-                    f"OAK-D IMU unavailable ({exc}) — falling back to synthetic IMU"
-                )
-                self._setup_synthetic()
-        else:
-            self._setup_i2c(i2c_address, i2c_bus)
-
-    #  I2C path 
+    # --- I2C path ---
 
     def _setup_i2c(self, address: int, bus: int) -> None:
         if smbus2 is None:
@@ -99,7 +94,7 @@ class IMUWorker(BaseWorker):
         raw = bytes(self._bus.read_i2c_block_data(self._i2c_address, 0, 32))
         values = struct.unpack("<fffffffHH", raw)
         w, x, y, z, ax, ay, az, throttle, steering = values
-        # Convert accelerometer from g → m/s²
+        # Convert accelerometer from milli-g → m/s²
         ax *= 0.00980665
         ay *= 0.00980665
         az *= 0.00980665
@@ -109,48 +104,7 @@ class IMUWorker(BaseWorker):
         )
         self._imu_buf.write(vec)
 
-    #  OAK-D IMU path ─
-
-    def _setup_oakd_imu(self) -> None:
-        if dai is None:
-            raise ImportError("depthai is required for OAK-D IMU")
-
-        pipeline = dai.Pipeline()
-        imu = pipeline.create(dai.node.IMU)
-        imu.enableIMUSensor(
-            [dai.IMUSensor.ACCELEROMETER_RAW, dai.IMUSensor.GYROSCOPE_RAW], 200
-        )
-        imu.setBatchReportThreshold(2)
-        imu.setMaxBatchReports(10)
-
-        xout = pipeline.create(dai.node.XLinkOut)
-        xout.setStreamName("imu")
-        imu.out.link(xout.input)
-
-        self._device = dai.Device(pipeline)
-        self._queue = self._device.getOutputQueue("imu", maxSize=16, blocking=False)
-        self.logger.info("OAK-D IMU ready @ 200 Hz")
-
-    def _step_oakd(self) -> None:
-        imu_data = self._queue.tryGet()
-        if imu_data is None:
-            time.sleep(0.001)
-            return
-
-        for packet in imu_data.packets:
-            accel = packet.acceleroMeter
-            gyro = packet.gyroscope
-            vec = np.array(
-                [
-                    0.0, 0.0, 0.0, 0.0,  # placeholder quaternion (w,x,y,z)
-                    accel.x, accel.y, accel.z,
-                    gyro.x, gyro.y,  # repurpose last 2 slots for gyro x,y
-                ],
-                dtype=np.float32,
-            )[:9]
-            self._imu_buf.write(vec)
-
-    # ── synthetic IMU ──────────────────────────────────────────────
+    # --- synthetic IMU ---
 
     def _setup_synthetic(self) -> None:
         from synthetic import SyntheticIMUGenerator
@@ -158,7 +112,6 @@ class IMUWorker(BaseWorker):
         self._synth_gen = SyntheticIMUGenerator()
         self._synthetic = True
         self._dummy = False
-        self._use_oakd = False
         self.logger.info("Synthetic IMU ready")
 
     def _step_synthetic(self) -> None:
@@ -166,17 +119,13 @@ class IMUWorker(BaseWorker):
         self._imu_buf.write(vec)
         time.sleep(0.005)  # ~200 Hz
 
-    #  dispatch 
+    # --- dispatch ---
 
     def step(self) -> None:
-        if getattr(self, '_synthetic', False):
+        if self._synthetic:
             self._step_synthetic()
-            return
-        if self._dummy:
+        elif self._dummy:
             time.sleep(0.1)
-            return
-        if self._use_oakd:
-            self._step_oakd()
         else:
             self._step_i2c()
 
@@ -184,6 +133,3 @@ class IMUWorker(BaseWorker):
         if self._bus is not None:
             self._bus.close()
             self.logger.info("I2C bus closed")
-        if self._device is not None:
-            self._device.close()
-            self.logger.info("OAK-D IMU device closed")

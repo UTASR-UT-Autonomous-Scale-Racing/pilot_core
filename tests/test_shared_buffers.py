@@ -45,9 +45,9 @@ def _uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
-# 
-#  Schema & SlotHeader
-# 
+#
+# --- Schema & SlotHeader ---
+#
 
 class TestSlotHeader:
     """Smoke + round-trip tests for the SlotHeader dataclass."""
@@ -79,9 +79,9 @@ class TestSlotHeader:
         assert h.payload_size == 0
 
 
-# 
-#  SharedRingBuffer (low-level)
-# 
+#
+# --- SharedRingBuffer (low-level) ---
+#
 
 class TestSharedRingBuffer:
 
@@ -161,9 +161,9 @@ class TestSharedRingBuffer:
         rb.unlink()
 
 
-# 
-#  FrameBuffer
-# 
+#
+# --- FrameBuffer ---
+#
 
 class TestFrameBuffer:
 
@@ -202,9 +202,9 @@ class TestFrameBuffer:
         np.testing.assert_allclose(depth_out, 5.0, atol=1e-6)
 
 
-# 
-#  IMUBuffer
-# 
+#
+# --- IMUBuffer ---
+#
 
 class TestIMUBuffer:
 
@@ -239,9 +239,9 @@ class TestIMUBuffer:
             imu_buffer.read_latest()
 
 
-# 
-#  SegmentationBuffer
-# 
+#
+# --- SegmentationBuffer ---
+#
 
 class TestSegmentationBuffer:
 
@@ -265,9 +265,9 @@ class TestSegmentationBuffer:
         assert mask_out.shape == (400, 640)
 
 
-# 
-#  PoseBuffer
-# 
+#
+# --- PoseBuffer ---
+#
 
 class TestPoseBuffer:
 
@@ -304,9 +304,9 @@ class TestPoseBuffer:
         assert mp_out.shape == (0, 3)
 
 
-# 
-#  ControlBuffer
-# 
+#
+# --- ControlBuffer ---
+#
 
 class TestControlBuffer:
 
@@ -337,9 +337,9 @@ class TestControlBuffer:
         assert throttle == 0.0
 
 
-# 
-#  PointCloudBuffer
-# 
+#
+# --- PointCloudBuffer ---
+#
 
 class TestPointCloudBuffer:
 
@@ -375,9 +375,9 @@ class TestPointCloudBuffer:
         buf.unlink()
 
 
-# 
-#  TrackBoundaryBuffer
-# 
+#
+# --- TrackBoundaryBuffer ---
+#
 
 class TestTrackBoundaryBuffer:
 
@@ -413,9 +413,9 @@ class TestTrackBoundaryBuffer:
         assert i.shape == (200, 2)
 
 
-# 
-#  Race condition tests — concurrent write/read across processes
-# 
+#
+# --- Race condition tests — concurrent write/read across processes ---
+#
 
 def _reader_process(name: str, n_reads: int, results: mp.Queue):
     """Child process: reads from buffer and counts valid reads."""

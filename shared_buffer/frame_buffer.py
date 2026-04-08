@@ -66,7 +66,7 @@ class FrameBuffer:
             create=create,
         )
 
-    #  write ─
+    # --- write ---
 
     def write(self, rgb: np.ndarray, depth: np.ndarray) -> SlotHeader:
         """Serialise and write an RGB + depth frame pair.
@@ -86,7 +86,7 @@ class FrameBuffer:
         payload = meta + rgb.tobytes() + depth.tobytes()
         return self._rb.write(payload)
 
-    #  read 
+    # --- read ---
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray, np.ndarray]]:
         """Read the most recent frame pair.
@@ -123,7 +123,7 @@ class FrameBuffer:
 
         return header, rgb.copy(), depth.copy()
 
-    #  lifecycle ─
+    # --- lifecycle ---
 
     def close(self):
         self._rb.close()

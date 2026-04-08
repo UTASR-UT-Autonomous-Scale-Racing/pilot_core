@@ -11,8 +11,15 @@ Design goals
 
 Thread / process safety
 -----------------------
-A single writer is assumed per buffer instance.  Multiple readers are safe
-because they only *read* the payload area and atomically *write* ``read_ts``
+A single writer is assumed per buffer instance.  Slots follow a seqlock
+protocol so readers never see a torn record:
+
+1. the writer zeroes the slot's ``seq_no`` (readers skip the slot),
+2. writes the payload,
+3. publishes the header with the new ``seq_no`` last;
+
+the reader copies header + payload, then re-reads ``seq_no`` and retries if
+the writer lapped the slot mid-copy.  Readers atomically *write* ``read_ts``
 (a single 8-byte ``float64`` store, naturally aligned → atomic on x86/ARM64).
 The ``write_index`` is an ``mp.Value('Q')`` protected by its built-in lock.
 """
@@ -25,7 +32,11 @@ import time
 from multiprocessing import shared_memory
 from typing import Optional, Tuple
 
-from .schema import HEADER_SIZE, HEADER_STRUCT, SCHEMA_VERSION, DTypeTag, SlotHeader
+from .schema import HEADER_SIZE, SCHEMA_VERSION, DTypeTag, SlotHeader
+
+# Seqlock read attempts before giving up for this call (writer lapping us
+# repeatedly means the reader is far too slow for the slot count anyway).
+_READ_RETRIES = 8
 
 
 class SharedRingBuffer:
@@ -88,13 +99,13 @@ class SharedRingBuffer:
             # Readers don't need the counter; they scan slot headers.
             self._seq = None
 
-    #  helpers 
+    # --- helpers ---
 
     def _slot_offset(self, index: int) -> int:
         """Byte offset of slot *index* in the shared memory block."""
         return index * self.slot_size
 
-    #  write (producer) 
+    # --- write (producer) ---
 
     def write(self, payload: bytes) -> SlotHeader:
         """Write *payload* into the next slot, returning the header written.
@@ -126,22 +137,36 @@ class SharedRingBuffer:
             dtype_tag=int(self.dtype_tag),
         )
 
-        # Write header + payload into shm
-        header_bytes = header.pack()
-        self._shm.buf[offset : offset + HEADER_SIZE] = header_bytes
+        # Seqlock publish: invalidate → payload → header (seq_no last)
+        struct.pack_into("<Q", self._shm.buf, offset, 0)
         self._shm.buf[offset + HEADER_SIZE : offset + HEADER_SIZE + payload_len] = payload
+        self._shm.buf[offset : offset + HEADER_SIZE] = header.pack()
 
         return header
 
-    #  read (consumer) ─
+    # --- read (consumer) ---
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, bytes]]:
         """Return ``(header, payload_bytes)`` for the slot with the highest
-        ``seq_no``, or *None* if no slot has been written yet.
+        ``seq_no``, or *None* if no complete slot has been written yet.
 
         After reading, ``read_ts`` in the slot header is updated to
         ``time.time()`` so producers/monitors can track consumer lag.
         """
+        for _ in range(_READ_RETRIES):
+            result = self._try_read_latest()
+            if result is not None or not self._any_slot_written():
+                return result
+        return None
+
+    def _any_slot_written(self) -> bool:
+        return any(
+            struct.unpack_from("<Q", self._shm.buf, self._slot_offset(i))[0]
+            for i in range(self.slots)
+        )
+
+    def _try_read_latest(self) -> Optional[Tuple[SlotHeader, bytes]]:
+        """One seqlock read attempt; *None* if the slot changed mid-copy."""
         best_seq = 0
         best_idx = -1
 
@@ -161,11 +186,19 @@ class SharedRingBuffer:
         raw_header = bytes(self._shm.buf[offset : offset + HEADER_SIZE])
         header = SlotHeader.unpack(raw_header)
 
+        if header.seq_no != best_seq:
+            return None  # overwritten between scan and header read
+
         payload = bytes(
             self._shm.buf[
                 offset + HEADER_SIZE : offset + HEADER_SIZE + header.payload_size
             ]
         )
+
+        # Validate: the writer must not have touched the slot during the copy
+        (seq_after,) = struct.unpack_from("<Q", self._shm.buf, offset)
+        if seq_after != header.seq_no:
+            return None
 
         # Stamp read_ts (offset 16 in the header is the read_ts float64)
         now = time.time()
@@ -174,7 +207,7 @@ class SharedRingBuffer:
 
         return header, payload
 
-    #  lifecycle ─
+    # --- lifecycle ---
 
     def close(self) -> None:
         """Close (but don't unlink) the shared memory handle."""

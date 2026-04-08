@@ -11,7 +11,6 @@ from __future__ import annotations
 import struct
 from typing import Optional, Tuple
 
-import numpy as np
 
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader

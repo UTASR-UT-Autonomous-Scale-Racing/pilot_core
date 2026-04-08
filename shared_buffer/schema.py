@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass
 from enum import IntEnum
 
-#  DType tags 
+# --- DType tags ---
 
 class DTypeTag(IntEnum):
     """Identifies the payload type stored in a buffer slot."""
@@ -21,7 +21,7 @@ class DTypeTag(IntEnum):
     CONTROL = 5        # Normalized steering + throttle
 
 
-#  Header layout ─
+# --- Header layout ---
 #
 #   Offset  Size  Type      Field
 #   0       8     uint64    seq_no           (monotonically increasing write counter)

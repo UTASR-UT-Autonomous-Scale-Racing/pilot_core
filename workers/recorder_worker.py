@@ -10,12 +10,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import struct
 import time
 from typing import Any, Dict
 
 import cv2
-import numpy as np
 
 from .base_worker import BaseWorker
 from shared_buffer import (

@@ -30,7 +30,7 @@ pid:
 enable_slam: true
 slam:
   vocabulary: ORB_SLAM3/Vocabulary/ORBvoc.txt
-  settings: oak_d_orbslam_settings.yaml
+  settings: orbslam_oakd_rgbd.yaml    # regenerate: scripts/gen_orbslam_settings.py
   sensor: RGBD
 
 # --- Mapping (BEV boundary extraction) ---

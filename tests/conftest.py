@@ -22,18 +22,18 @@ from typing import Generator
 import numpy as np
 import pytest
 
-# 
+#
 # Unique naming helpers — prevent shm collisions across parallel workers / reruns
-# 
+#
 
 def _uid() -> str:
     """Short unique suffix for shared-memory names."""
     return uuid.uuid4().hex[:8]
 
 
-# 
+#
 # Synthetic data factories
-# 
+#
 
 @pytest.fixture()
 def rgb_frame() -> np.ndarray:
@@ -105,9 +105,9 @@ def track_boundaries() -> tuple[np.ndarray, np.ndarray]:
     return outer, inner
 
 
-# 
+#
 # Buffer fixtures (auto-cleanup via finalizer)
-# 
+#
 
 @pytest.fixture()
 def frame_buffer():
@@ -187,9 +187,9 @@ def boundary_buffer():
         pass
 
 
-# 
+#
 # Multiprocessing helpers
-# 
+#
 
 @pytest.fixture()
 def spawn_ctx():

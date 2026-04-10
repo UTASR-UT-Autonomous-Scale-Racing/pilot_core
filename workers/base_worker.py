@@ -37,7 +37,7 @@ class BaseWorker:
         self._stop_event = mp.Event()
         self._logger: logging.Logger | None = None
 
-    #  abstract interface 
+    # --- abstract interface ---
 
     def setup(self) -> None:
         """Initialise resources *inside the child process*.
@@ -56,9 +56,8 @@ class BaseWorker:
 
     def teardown(self) -> None:
         """Release resources before exit.  Override as needed."""
-        pass
 
-    #  lifecycle ─
+    # --- lifecycle ---
 
     def run(self) -> None:
         """Entry point executed inside the child process.
@@ -80,6 +79,13 @@ class BaseWorker:
 
         # Ignore SIGINT in workers — the orchestrator handles shutdown via _stop_event
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+        # OpenCV keeps its own thread pool; match the orchestrator's cap.
+        try:
+            import cv2
+            cv2.setNumThreads(int(os.environ.get("OMP_NUM_THREADS", "0")))
+        except (ImportError, ValueError):
+            pass
 
         self._logger.info("Starting up …")
         try:

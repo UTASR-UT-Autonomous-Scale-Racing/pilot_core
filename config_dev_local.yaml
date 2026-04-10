@@ -14,11 +14,11 @@ i2c_bus: null
 synthetic: true
 
 # --- Vision ---
-segmentation_config_path: test_segmentation_config.yaml
+segmentation_config_path: pilot_vision/models/default/config.yaml
 use_tensorrt: false
 
 # --- Control ---
-control_config_path: test_control_config.yaml
+control_config_path: pilot_controller/models/default/config.yaml
 control_mode: "pid"
 
 # --- PID Control ---
@@ -33,7 +33,7 @@ pid:
 enable_slam: false
 slam:
   vocabulary: ORB_SLAM3/Vocabulary/ORBvoc.txt
-  settings: oak_d_orbslam_settings.yaml
+  settings: synthetic_slam_settings.yaml
   sensor: RGBD
 
 # --- Mapping ---

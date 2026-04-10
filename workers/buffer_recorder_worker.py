@@ -50,9 +50,9 @@ from typing import Any
 
 from .base_worker import BaseWorker
 from shared_buffer.ring_buffer import SharedRingBuffer
-from shared_buffer.schema import HEADER_SIZE, SlotHeader, SCHEMA_VERSION
+from shared_buffer.schema import SlotHeader, SCHEMA_VERSION
 
-#  Binary protocol constants 
+# --- Binary protocol constants ---
 FILE_MAGIC = b"PLTREC\x00\x01"             # 8 bytes
 FILE_HEADER_FMT = "<8sHHIId30s"            # magic(8) schema(2) dtype(2) sample_k(4) top_n(4) session_ts(8) reserved(30) = 58 → padded to 64
 FILE_HEADER_SIZE = 64                      # fixed on-disk size (struct is 58, we pad 6 extra)
@@ -96,7 +96,7 @@ class BufferRecorderWorker(BaseWorker):
         self._data_start_offset: int = 0
         self._session_ts: float = 0.0
 
-    # ── lifecycle ──────────────────────────────────────────────────────────
+    # --- lifecycle ---
 
     def setup(self) -> None:
         buf = self.config["buffer"]
@@ -162,7 +162,7 @@ class BufferRecorderWorker(BaseWorker):
                 f"{self._records_written} records written"
             )
 
-    # ── binary I/O helpers ─────────────────────────────────────────────────
+    # --- binary I/O helpers ---
 
     def _write_file_header(self) -> None:
         """Write the 64-byte file header once at the start of the file."""
@@ -195,7 +195,7 @@ class BufferRecorderWorker(BaseWorker):
         self._fp.write(rec_hdr)
         self._fp.write(payload)
 
-    # ── static helpers for reading files back ──────────────────────────────
+    # --- static helpers for reading files back ---
 
     @staticmethod
     def read_file_header(fp) -> dict:

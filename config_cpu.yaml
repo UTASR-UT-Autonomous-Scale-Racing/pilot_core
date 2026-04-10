@@ -1,0 +1,75 @@
+# config_cpu.yaml — Workstation profile: real OAK-D camera, CPU-only
+# inference, no actuator output.
+#
+#   python start.py --config config_cpu.yaml                # vision + control
+#   python start.py --config config_cpu.yaml --enable-slam  # + ORB-SLAM3 mapping
+#
+# I2C is deliberately disabled: on a laptop/desktop /dev/i2c-* are
+# motherboard buses, not the car's Arduino.  Never point this profile at one.
+
+# --- Pipeline ---
+fps: 15                       # Leave CPU headroom (OAK-D streams up to 30)
+resolution: [640, 400]
+threads_per_worker: 1         # BLAS/OpenMP/OpenCV threads per worker process
+
+# --- Sensor / Hardware ---
+synthetic: false
+use_oakd_imu: true            # Stream the OAK-D on-board IMU via the camera worker
+i2c_address: null             # null → actuator runs in dummy mode (no writes)
+i2c_bus: null
+
+# --- Vision ---
+segmentation_config_path: pilot_vision/models/default/config.yaml
+use_tensorrt: false
+
+# --- Control ---
+control_config_path: pilot_controller/models/default/config.yaml
+control_mode: "neural"        # "pid" requires --enable-slam
+
+pid:
+  kp_steer: 1.0
+  ki_steer: 0.0
+  kd_steer: 0.1
+  target_throttle: 0.3
+  noise_std: 0.0
+
+# --- SLAM ---
+enable_slam: false
+slam:
+  vocabulary: ORB_SLAM3/Vocabulary/ORBvoc.txt
+  settings: orbslam_oakd_rgbd.yaml    # regenerate: scripts/gen_orbslam_settings.py
+  sensor: RGBD
+
+# --- Mapping ---
+mapping:
+  alpha_shape: 25.0
+  boundary_min_points: 50
+  origin_keyframe: 0
+
+# --- Recording ---
+recording: false
+recording_path: /tmp/pilot_recordings
+
+# --- Web Telemetry ---
+web_publish:
+  enabled: false
+
+# --- Shared Buffers ---
+buffers:
+  frame:
+    slots: 8
+  imu:
+    slots: 32
+  segmentation:
+    slots: 4
+  pose:
+    slots: 8
+  control:
+    slots: 8
+  pointcloud:
+    slots: 4
+  boundary:
+    slots: 2
+
+# --- Deployment ---
+device: "cpu"

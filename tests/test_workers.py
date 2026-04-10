@@ -47,9 +47,9 @@ def _uid():
     return uuid.uuid4().hex[:8]
 
 
-# 
-#  BaseWorker
-# 
+#
+# --- BaseWorker ---
+#
 
 class TestBaseWorker:
 
@@ -80,9 +80,9 @@ class TestBaseWorker:
         w.teardown()  # should not raise
 
 
-# 
-#  CameraWorker — requires OAK-D hardware
-# 
+#
+# --- CameraWorker — requires OAK-D hardware ---
+#
 
 class TestCameraWorker:
 
@@ -174,9 +174,9 @@ class TestCameraWorker:
             fb.unlink()
 
 
-# 
-#  IMUWorker — synthetic I2C stub
-# 
+#
+# --- IMUWorker — synthetic I2C stub ---
+#
 
 class TestIMUWorker:
 
@@ -209,9 +209,9 @@ class TestIMUWorker:
             ib.unlink()
 
 
-# 
-#  VisionWorker — mock model
-# 
+#
+# --- VisionWorker — mock model ---
+#
 
 class TestVisionWorker:
 
@@ -313,9 +313,9 @@ class TestVisionWorker:
             sb.unlink()
 
 
-# 
-#  SLAMWorker — stub mode (no orbslam3_python needed)
-# 
+#
+# --- SLAMWorker — stub mode (no orbslam3_python needed) ---
+#
 
 class TestSLAMWorker:
 
@@ -515,9 +515,9 @@ class TestSLAMWorker:
             pb.unlink()
 
 
-# 
-#  MappingWorker
-# 
+#
+# --- MappingWorker ---
+#
 
 class TestMappingWorker:
 
@@ -728,9 +728,9 @@ class TestMappingWorker:
             bb.unlink()
 
 
-# 
-#  ControlWorker — both modes
-# 
+#
+# --- ControlWorker — both modes ---
+#
 
 class TestControlWorkerPID:
 
@@ -908,9 +908,9 @@ class TestControlWorkerNeural:
             pb.unlink()
 
 
-# 
-#  ActuatorWorker
-# 
+#
+# --- ActuatorWorker ---
+#
 
 class TestActuatorWorker:
 
@@ -925,9 +925,9 @@ class TestActuatorWorker:
             cb.unlink()
 
 
-# 
-#  RecorderWorker
-# 
+#
+# --- RecorderWorker ---
+#
 
 class TestRecorderWorker:
 

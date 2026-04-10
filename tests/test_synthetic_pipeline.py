@@ -37,7 +37,7 @@ def _uid():
 
 
 # ---------------------------------------------------------------------------
-#  Synthetic frame generator tests
+# --- Synthetic frame generator tests ---
 # ---------------------------------------------------------------------------
 
 class TestSyntheticFrameGenerator:
@@ -124,7 +124,7 @@ class TestSyntheticIMUGenerator:
 
 
 # ---------------------------------------------------------------------------
-#  CameraWorker with synthetic mode
+# --- CameraWorker with synthetic mode ---
 # ---------------------------------------------------------------------------
 
 class TestCameraWorkerSynthetic:
@@ -189,7 +189,7 @@ class TestCameraWorkerSynthetic:
 
 
 # ---------------------------------------------------------------------------
-#  IMUWorker with synthetic mode
+# --- IMUWorker with synthetic mode ---
 # ---------------------------------------------------------------------------
 
 class TestIMUWorkerSynthetic:
@@ -220,7 +220,7 @@ class TestIMUWorkerSynthetic:
 
 
 # ---------------------------------------------------------------------------
-#  Full synthetic pipeline: Camera → SLAM(stub) → Vision(mock) → Control
+# --- Full synthetic pipeline: Camera → SLAM(stub) → Vision(mock) → Control ---
 # ---------------------------------------------------------------------------
 
 class TestFullSyntheticPipeline:

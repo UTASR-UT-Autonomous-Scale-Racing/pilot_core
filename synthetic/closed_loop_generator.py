@@ -543,10 +543,10 @@ class ClosedLoopFrameGenerator:
             pose[1, 3] = -self.cam_h
             pose[2, 3] = z
 
-            # ── Render ────────────────────────────────────────────────
+            # --- Render ---
             rgb, depth = self._render_frame_fast(x, z, heading)
 
-            # ── IMU ─────────────────────────────────────────────────
+            # --- IMU ---
             vel_w, acc_w, heading_rate = self._ellipse_derivatives(
                 theta, omega,
             )

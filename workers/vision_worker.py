@@ -14,7 +14,6 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import numpy as np
 
 from .base_worker import BaseWorker
 from shared_buffer import FrameBuffer, SegmentationBuffer

@@ -163,7 +163,6 @@ class TrackFTGController:
 
     def reset(self) -> None:
         """No internal state to reset (reactive controller)."""
-        pass
 
     # ------------------------------------------------------------------
     # Virtual LiDAR scan from BEV boundary polylines

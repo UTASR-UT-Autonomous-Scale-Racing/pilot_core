@@ -18,9 +18,9 @@ import pytest
 from workers.track_pid_controller import TrackPIDController, _angle_diff
 
 
-# 
-#  _angle_diff helper
-# 
+#
+# --- _angle_diff helper ---
+#
 
 class TestAngleDiff:
 
@@ -45,9 +45,9 @@ class TestAngleDiff:
         assert abs(d) < 1e-6 or abs(abs(d) - 2 * np.pi) < 1e-6
 
 
-# 
-#  TrackPIDController — Smoke & Initialisation
-# 
+#
+# --- TrackPIDController — Smoke & Initialisation ---
+#
 
 class TestPIDInit:
 
@@ -84,9 +84,9 @@ class TestPIDInit:
         assert pid._integral == 0.0
 
 
-# 
-#  PID step() I/O tests
-# 
+#
+# --- PID step() I/O tests ---
+#
 
 @pytest.fixture()
 def oval_boundaries():
@@ -178,9 +178,9 @@ class TestPIDStep:
         assert pid._integral != 0.0
 
 
-# 
-#  Edge cases
-# 
+#
+# --- Edge cases ---
+#
 
 class TestPIDEdgeCases:
 

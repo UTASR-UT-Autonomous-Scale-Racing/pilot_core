@@ -26,11 +26,11 @@ import os
 import signal
 import sys
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 import yaml
 
-#  Shared buffers 
+# --- Shared buffers ---
 from shared_buffer import (
     ControlBuffer,
     FrameBuffer,
@@ -41,7 +41,7 @@ from shared_buffer import (
     TrackBoundaryBuffer,
 )
 
-# Workers 
+# --- Workers ---
 from workers import (
     ActuatorWorker,
     BaseWorker,
@@ -50,15 +50,14 @@ from workers import (
     ControlWorker,
     IMUWorker,
     MappingWorker,
-    RecorderWorker,
     SLAMWorker,
     VisionWorker,
     WebPublishWorker,
 )
 
-# 
+# --------------------------------------------------------------------------
 # Config helpers
-# 
+# --------------------------------------------------------------------------
 
 def load_config(path: str) -> Dict[str, Any]:
     """Load YAML config file and return as a dict."""
@@ -98,9 +97,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# 
+# --------------------------------------------------------------------------
 # Global state for signal handling
-# 
+# --------------------------------------------------------------------------
 
 _workers: List[BaseWorker] = []
 _processes: List[mp.Process] = []
@@ -141,9 +140,9 @@ def _shutdown(signum=None, frame=None) -> None:
     sys.exit(0)
 
 
-# 
+# --------------------------------------------------------------------------
 # Main
-# 
+# --------------------------------------------------------------------------
 
 def main() -> None:
     args = parse_args()
@@ -165,6 +164,13 @@ def main() -> None:
     config = load_config(args.config)
     logger.info(f"Loaded config from {args.config}")
 
+    # Every worker is its own process; letting each one spin up a full
+    # BLAS/OpenMP thread pool oversubscribes small CPUs badly.  Children
+    # inherit this environment when spawned.
+    threads = str(config.get("threads_per_worker", 1))
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, threads)
+
     # Merge CLI overrides
     if args.recording:
         config["recording"] = True
@@ -176,7 +182,7 @@ def main() -> None:
     enable_slam = config.get("enable_slam", False)
     control_mode = config.get("control_mode", "neural")
 
-    #  1. Create shared buffers 
+    # --- 1. Create shared buffers ---
     buf_cfg = config.get("buffers", {})
 
     frame_buf = FrameBuffer(
@@ -226,12 +232,12 @@ def main() -> None:
 
     logger.info("Shared buffers created")
 
-    #  2. Create multiprocessing events for pipeline coordination 
+    # --- 2. Create multiprocessing events for pipeline coordination ---
     loop_event = mp.Event() if enable_slam else None
     mapping_done_event = mp.Event() if enable_slam else None
     localize_event = mp.Event() if enable_slam else None
 
-    #  3. Resolve config values 
+    # --- 3. Resolve config values ---
     seg_config_path = config.get(
         "segmentation_config_path", "pilot_vision/models/default/config.yaml"
     )
@@ -251,10 +257,15 @@ def main() -> None:
     if isinstance(i2c_address, str):
         i2c_address = int(i2c_address, 0)
 
-    #  4. Define workers   
-      
-    use_webcam = config.get("use_webcam", False)
-    use_synthetic = config.get("synthetic", False)
+    # --- 4. Define workers ---
+
+    use_synthetic = (
+        config.get("synthetic", False) or os.environ.get("PILOT_SYNTHETIC") == "1"
+    )
+    # The OAK-D can only be opened by one process, so its IMU is streamed by
+    # the camera worker.  Otherwise a dedicated IMU worker reads I2C/synthetic.
+    oakd_imu_via_camera = use_oakd_imu and not use_synthetic
+
     global _workers
     _workers = [
         CameraWorker(
@@ -263,15 +274,20 @@ def main() -> None:
             fps=fps,
             resolution=resolution,
             synthetic=use_synthetic,
+            imu_buffer=imu_buf if oakd_imu_via_camera else None,
         ),
-        IMUWorker(
-            name="imu",
-            output_buffer=imu_buf,
-            i2c_address=i2c_address,
-            i2c_bus=i2c_bus,
-            use_oakd_imu=use_oakd_imu,
-            synthetic=use_synthetic,
-        ),
+    ]
+    if not oakd_imu_via_camera:
+        _workers.append(
+            IMUWorker(
+                name="imu",
+                output_buffer=imu_buf,
+                i2c_address=i2c_address,
+                i2c_bus=i2c_bus,
+                synthetic=use_synthetic,
+            )
+        )
+    _workers.append(
         VisionWorker(
             name="vision",
             input_buffer=frame_buf,
@@ -279,8 +295,8 @@ def main() -> None:
             model_config=seg_config_path,
             device=device,
             use_tensorrt=config.get("use_tensorrt", False),
-        ),
-    ]
+        )
+    )
 
     # Control worker — mode depends on config
     if control_mode == "pid" and enable_slam:
@@ -409,12 +425,11 @@ def main() -> None:
         )
         logger.info("Web publish worker enabled → %s", web_cfg.get("endpoint"))
 
-    #  5. Register signal handlers ─
+    # --- 5. Register signal handlers ---
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    #  6. Spawn worker processes ─
-    global _processes
+    # --- 6. Spawn worker processes ---
     _restart_counts: Dict[str, int] = {w.name: 0 for w in _workers}
     for w in _workers:
         p = mp.Process(target=w.run, name=w.name, daemon=False)
@@ -429,7 +444,7 @@ def main() -> None:
             "then PID control"
         )
 
-    #  7. Monitor loop 
+    # --- 7. Monitor loop ---
     try:
         _terminal_gate_done = False
         while not _shutting_down:

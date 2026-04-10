@@ -43,9 +43,9 @@ def _uid():
     return uuid.uuid4().hex[:8]
 
 
-# 
-#  Helper: minimal worker that stops after N steps
-# 
+#
+# --- Helper: minimal worker that stops after N steps ---
+#
 
 class _StepCounterWorker(BaseWorker):
     """Test worker that counts steps and auto-stops."""
@@ -68,9 +68,9 @@ class _StepCounterWorker(BaseWorker):
         pass
 
 
-# 
-#  Smoke test: BaseWorker run loop in a child process
-# 
+#
+# --- Smoke test: BaseWorker run loop in a child process ---
+#
 
 class TestWorkerLifecycle:
 
@@ -101,9 +101,9 @@ class TestWorkerLifecycle:
             p.join(timeout=2)
 
 
-# 
-#  Synthetic data pipeline: Frame → SLAM(stub) → Pose → MappingWorker
-# 
+#
+# --- Synthetic data pipeline: Frame → SLAM(stub) → Pose → MappingWorker ---
+#
 
 class TestSyntheticPipeline:
     """Full pipeline test using synthetic data (no hardware required)."""
@@ -323,9 +323,9 @@ class TestSyntheticPipeline:
             cb.unlink()
 
 
-# 
-#  Null / Empty pipeline — no data flows, nothing crashes
-# 
+#
+# --- Null / Empty pipeline — no data flows, nothing crashes ---
+#
 
 class TestNullPipeline:
 
@@ -406,9 +406,9 @@ class TestNullPipeline:
             bb.unlink()
 
 
-# 
-#  Buffer chain race condition test — writer + reader in parallel processes
-# 
+#
+# --- Buffer chain race condition test — writer + reader in parallel processes ---
+#
 
 def _pose_reader(name: str, n: int, results: mp.Queue):
     """Read from PoseBuffer and count valid reads."""
@@ -473,9 +473,9 @@ class TestPipelineRaceConditions:
             pb.unlink()
 
 
-# 
-#  Mapping helper functions
-# 
+#
+# --- Mapping helper functions ---
+#
 
 class TestMappingHelpers:
 
@@ -513,9 +513,9 @@ class TestMappingHelpers:
         assert len(in_line) > 0
 
 
-# 
-#  OAK-D hardware integration — full pipeline
-# 
+#
+# --- OAK-D hardware integration — full pipeline ---
+#
 
 @pytest.mark.skipif(
     not os.environ.get("OAKD_AVAILABLE", ""),
@@ -694,9 +694,9 @@ class TestOAKDIntegration:
             bb.unlink()
 
 
-# 
-#  start.py CLI smoke tests
-# 
+#
+# --- start.py CLI smoke tests ---
+#
 
 class TestStartCLI:
 
@@ -739,9 +739,9 @@ class TestStartCLI:
             load_config("nonexistent_config.yaml")
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  FTG Controller integration — TrackBoundaryBuffer → FTG → ControlBuffer
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ----------------------------------------------------------------------------
+# --- FTG Controller integration — TrackBoundaryBuffer → FTG → ControlBuffer ---
+# ----------------------------------------------------------------------------
 
 class TestFTGControllerPipelineIntegration:
     """Verify TrackFTGController can replace PID inside the ControlWorker path."""

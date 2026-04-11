@@ -155,6 +155,7 @@ pilot_core/
 ├── scripts/              # Launch, deploy and setup helpers
 ├── src/ include/ utility/  # Legacy C++ pipeline (scripts/READMECPP.md)
 ├── config*.yaml          # Runtime profiles
+├── vehicle_params.yaml   # Vehicle geometry/limits (F1TENTH placeholders)
 └── submodules: pilot_controller, pilot_vision, pilot_ingest, firmware, ORB_SLAM3, depthai-core
 ```
 

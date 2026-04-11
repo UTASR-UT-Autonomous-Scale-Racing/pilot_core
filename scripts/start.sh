@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Exits on error
-set -e  
+set -e
+cd "$(dirname "$0")/.."
 
 # ================================
 # Updates repositories
@@ -73,8 +74,6 @@ sudo docker run \
     --net=host \
     --device /dev/i2c-1 \
     -e DISPLAY=$DISPLAY \
-    -e SEGMENTATION_CONFIG="$SEGMENTATION_CONFIG" \
-    -e CONTROL_CONFIG="$CONTROL_CONFIG" \
     --name utasr-container \
     ${IMAGE_NAME} \
     "$@"

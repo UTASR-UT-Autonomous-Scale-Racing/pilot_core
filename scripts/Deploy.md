@@ -29,9 +29,9 @@ The container also requires hardware access to:
 
 ```
 pilot_core/
-    ├── start.sh
+    ├── scripts/start.sh
     ├── Dockerfile
-    ├── _start.py
+    ├── start.py
     ├── config.yaml
     ├── pilot_ingest/
     ├── pilot_vision/
@@ -41,11 +41,10 @@ pilot_core/
 
 ## Quick Start
 
-Run the following script will clone/update all repositories ,validate configurations, build Docker image, start the container. The `<Arguments>` field is specified in `_start.py`.
+The following script updates all repositories, validates the configuration, builds the Docker image and starts the container. Any `<Arguments>` are forwarded to `start.py` (see `python start.py --help`).
 
 ```bash
-chmod +x start.sh
-./start.sh <Arguments>
+scripts/start.sh <Arguments>
 ```
 
 **Helpful Docker Commands**

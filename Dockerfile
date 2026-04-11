@@ -19,7 +19,8 @@ RUN pip3 install --no-cache-dir \
     pandas \
     matplotlib \
     smbus2 \
-    depthai \
+    "depthai>=3.0" \
+    scipy \
     onnxruntime-gpu
 
 # Creates application directory
@@ -28,28 +29,10 @@ WORKDIR /app/pilot_core
 # Copies all application code
 COPY . /app/pilot_core
 
+# Flush output to the terminal immediately
+ENV PYTHONUNBUFFERED=1
 
-# Environment variables 
-# flushes output to the terminal immediately
-ENV PYTHONUNBUFFERED=1   
-ENV SEGMENTATION_CONFIG=""
-ENV CONTROL_CONFIG=""
-
-# Executes _start.py as entrypoint, args forwarded via '$@'
-RUN echo '#!/bin/bash\n\
-set -e\n\
-echo "Starting the container..."\n\
-echo "Segmentation config: $SEGMENTATION_CONFIG"\n\
-echo "Control config: $CONTROL_CONFIG"\n\
-exec python3 _start.py \\\n\
-    --segmentation_config "$SEGMENTATION_CONFIG" \\\n\
-    --control_config "$CONTROL_CONFIG" \\\n\
-    "$@"\n\
-' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
-
-ENTRYPOINT ["/app/entrypoint.sh"]
-
-# defaults arg to the /app/entrypoint.sh
-CMD []   
-
-
+# start.py is the entrypoint; container args are forwarded to it, e.g.
+#   docker run ... pilot_core --config config.yaml --recording
+ENTRYPOINT ["python3", "start.py"]
+CMD ["--config", "config.yaml"]

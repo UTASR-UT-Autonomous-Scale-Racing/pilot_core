@@ -1,6 +1,7 @@
 #!/bin/bash
 # NOTE: This script is intended to be run on a Jetson device only.
 set -e  # Exit on error
+cd "$(dirname "$0")/.."
 
 # Power Mode (Performance)
 echo "Setting performance mode..."
@@ -30,11 +31,7 @@ done
 
 echo "All repositories are up to date."
 
-# Read config paths from config.yaml
-CONFIG_FILE="config.yaml"
-SEGMENTATION_CONFIG=$(grep '^segmentation_config_path:' "$CONFIG_FILE" | awk '{print $2}')
-CONTROL_CONFIG=$(grep '^control_config_path:' "$CONFIG_FILE" | awk '{print $2}')
-
-# Start Pilot
+# Start Pilot (sudo for I2C / USB access; -E keeps the venv + LD_LIBRARY_PATH)
 echo "Starting Pilot..."
-sudo -E $(which python) /home/forecr/pilot_core/_start.py --segmentation_config "$SEGMENTATION_CONFIG" --control_config "$CONTROL_CONFIG" "$@" 
+export LD_LIBRARY_PATH="$PWD/ORB_SLAM3/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}"
+sudo -E "$(which python3)" start.py --config config.yaml "$@"

@@ -1,20 +1,29 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
 
+# --- Build artefacts ---
+build/
+lib/
+# pybind11 wrapper is built locally (see README) — never commit the binary
+orbslam3_python*.so
+
+# --- Runtime output ---
 recordings/
 temp/
+/test_output
+*.db
+*.sqlite
+*.mp4
 *.png
 *.jpg
 *.jpeg
 *.gif
-*.db
-*.sqlite
-lib/
-pip*
-python*
-act*
+
+# --- Editor / notebooks ---
 .vscode/
-venv/
-__pycache__/
-build/
-*.mp4
-/test_output
 *.ipynb

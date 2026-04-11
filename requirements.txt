@@ -1,0 +1,15 @@
+# Runtime
+numpy
+scipy
+PyYAML
+opencv-python-headless
+matplotlib
+depthai>=3.0        # OAK-D camera + IMU (v3 API)
+smbus2              # Arduino I2C link (Jetson)
+
+# Tests
+pytest
+pytest-timeout
+
+# ORB-SLAM3 Python wrapper build (see README)
+pybind11

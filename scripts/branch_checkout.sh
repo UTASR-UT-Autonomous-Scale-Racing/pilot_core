@@ -1,16 +1,20 @@
-#chmod +x branch_checkout.sh
+#!/usr/bin/env bash
+# Check out the same branch in pilot_core and every component submodule.
+#   scripts/branch_checkout.sh [branch]   (default: main)
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
 branch="${1:-main}"
-branch="${branch:1}"
-# Switch to the main branch in each repository
+
 for repo in pilot_ingest pilot_vision pilot_controller firmware; do
-    if [ -d "$(pwd)/$repo/.git" ]; then
-        echo "Checking out $branch branch in $repo..."
-        git -C "$(pwd)/$repo" fetch origin $branch
-        git -C "$(pwd)/$repo" checkout $branch
+    # Submodules have a .git *file*, not a directory
+    if [ -e "$repo/.git" ]; then
+        echo "Checking out '$branch' in $repo ..."
+        git -C "$repo" fetch origin "$branch"
+        git -C "$repo" checkout "$branch"
     fi
 done
-# Switch to the main branch in pilot_core
-echo "Checking out '$branch' branch in pilot_core..."
-git -C "$(pwd)" fetch origin $branch
-git -C "$(pwd)" checkout $branch
+
+echo "Checking out '$branch' in pilot_core ..."
+git fetch origin "$branch"
+git checkout "$branch"

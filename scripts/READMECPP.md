@@ -138,7 +138,7 @@ chmod +x setup.sh
 
 This will clone the required Python modules:
 - `pilot_ingest`
-- `pilot_vision` 
+- `pilot_vision`
 - `pilot_controller`
 
 ## Build Process
@@ -221,7 +221,7 @@ Utility for replaying recorded data.
    ```bash
    # Check OpenCV installation
    pkg-config --modversion opencv4
-   
+
    # If not found, install from source or use conda
    ```
 

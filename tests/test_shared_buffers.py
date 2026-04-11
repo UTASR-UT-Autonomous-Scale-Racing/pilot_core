@@ -282,9 +282,10 @@ class TestPoseBuffer:
         pose_buffer.write(identity)
         result = pose_buffer.read_latest()
         assert result is not None
-        _, pose_out, mp_out = result
+        _, pose_out, mp_out, speed = result
         np.testing.assert_allclose(pose_out, identity, atol=1e-7)
         assert mp_out.shape == (0, 3)
+        assert speed == 0.0
 
     def test_write_pose_with_map_points(self, pose_buffer, pose_4x4, point_cloud):
         # Use only first 100 points to stay within limits
@@ -292,7 +293,7 @@ class TestPoseBuffer:
         pose_buffer.write(pose_4x4, map_points=pts)
         result = pose_buffer.read_latest()
         assert result is not None
-        _, pose_out, mp_out = result
+        _, pose_out, mp_out, _ = result
         np.testing.assert_allclose(pose_out, pose_4x4, atol=1e-6)
         assert mp_out.shape == (100, 3)
         np.testing.assert_allclose(mp_out, pts, atol=1e-6)
@@ -300,8 +301,14 @@ class TestPoseBuffer:
     def test_pose_null_map_points(self, pose_buffer):
         pose = np.eye(4, dtype=np.float32)
         pose_buffer.write(pose, map_points=None)
-        _, _, mp_out = pose_buffer.read_latest()
+        _, _, mp_out, _ = pose_buffer.read_latest()
         assert mp_out.shape == (0, 3)
+
+    def test_speed_round_trip(self, pose_buffer, point_cloud):
+        pose_buffer.write(np.eye(4, dtype=np.float32), map_points=point_cloud[:10], speed=2.5)
+        _, _, mp_out, speed = pose_buffer.read_latest()
+        assert mp_out.shape == (10, 3)
+        assert speed == pytest.approx(2.5)
 
 
 #

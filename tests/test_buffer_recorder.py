@@ -370,8 +370,8 @@ class TestPoseRecorder:
                 rec = BufferRecorderWorker.read_record(f)
             assert rec is not None
             _, payload = rec
-            # 64 bytes pose + 4 bytes count (0)
-            assert len(payload) == 68
+            # 64 bytes pose + 4 bytes count (0) + 4 bytes speed
+            assert len(payload) == 72
         finally:
             buf.unlink()
 

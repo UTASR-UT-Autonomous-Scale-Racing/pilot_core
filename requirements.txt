@@ -6,6 +6,7 @@ opencv-python-headless
 matplotlib
 depthai>=3.0        # OAK-D camera + IMU (v3 API)
 smbus2              # Arduino I2C link (Jetson)
+pyzmq               # AutoDRIVE simulator bridge
 
 # Tests
 pytest

@@ -51,7 +51,7 @@ def test_publishes_camera_position_in_world():
     w, fb, pb = _worker_with_fake_slam(np.linalg.inv(Twc).astype(np.float32), state=2)
     try:
         w.step()
-        _, pose, _ = pb.read_latest()
+        _, pose, _, _ = pb.read_latest()
         np.testing.assert_allclose(pose[:3, 3], [2.0, 0.0, 5.0], atol=1e-5)
     finally:
         fb.unlink(); pb.unlink()
@@ -62,5 +62,17 @@ def test_lost_tracking_publishes_nothing():
     try:
         w.step()
         assert pb.read_latest() is None
+    finally:
+        fb.unlink(); pb.unlink()
+
+
+def test_warmup_frames_are_skipped():
+    w, fb, pb = _worker_with_fake_slam(np.eye(4, dtype=np.float32), state=2)
+    try:
+        w._warmup_frames = 2
+        for i in range(3):
+            fb.write(np.zeros((400, 640, 3), np.uint8), np.ones((400, 640), np.float32))
+            w.step()
+        assert w._slam.track_rgbd.call_count == 1   # frames 1-2 skipped, frame 3 tracked
     finally:
         fb.unlink(); pb.unlink()

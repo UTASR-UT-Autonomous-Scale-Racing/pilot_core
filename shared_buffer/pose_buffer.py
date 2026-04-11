@@ -5,6 +5,7 @@ Payload layout:
     [64 bytes]  float32[4][4]   pose matrix (row-major)
     [4 bytes]   uint32          num_map_points  (N)
     [N*12 bytes] float32[N][3]  map point positions (x, y, z)
+    [4 bytes]   float32         speed (m/s)
 """
 
 from __future__ import annotations
@@ -21,7 +22,8 @@ _POSE_BYTES = 4 * 4 * 4  # 4×4 float32 matrix = 64 bytes
 _COUNT_FMT = "<I"
 _COUNT_SIZE = 4
 _MAX_MAP_POINTS = 2048
-_MAX_PAYLOAD = _POSE_BYTES + _COUNT_SIZE + _MAX_MAP_POINTS * 3 * 4  # ~25 KB
+_SPEED_SIZE = 4  # float32
+_MAX_PAYLOAD = _POSE_BYTES + _COUNT_SIZE + _MAX_MAP_POINTS * 3 * 4 + _SPEED_SIZE  # ~25 KB
 
 
 class PoseBuffer:
@@ -52,7 +54,7 @@ class PoseBuffer:
         )
 
     def write(
-        self, pose: np.ndarray, map_points: Optional[np.ndarray] = None
+        self, pose: np.ndarray, map_points: Optional[np.ndarray] = None, speed: float = 0.0
     ) -> SlotHeader:
         """Write a 4×4 pose matrix and optional map points.
 
@@ -74,17 +76,18 @@ class PoseBuffer:
         else:
             payload = pose_bytes + struct.pack(_COUNT_FMT, 0)
 
+        payload += struct.pack("<f", float(speed))
         return self._rb.write(payload)
 
     def read_latest(
         self,
-    ) -> Optional[Tuple[SlotHeader, np.ndarray, np.ndarray]]:
+    ) -> Optional[Tuple[SlotHeader, np.ndarray, np.ndarray, float]]:
         """Read the most recent pose + map points.
 
         Returns
         -------
-        (header, pose, map_points) or *None*.
-        ``pose`` is ``(4,4) float32``; ``map_points`` is ``(N,3) float32``.
+        (header, pose, map_points, speed) or *None*.
+        ``pose`` is ``(4,4) float32``; ``map_points`` is ``(N,3) float32``; ``speed`` is float m/s.
         """
         result = self._rb.read_latest()
         if result is None:
@@ -105,7 +108,13 @@ class PoseBuffer:
         else:
             map_points = np.empty((0, 3), dtype=np.float32)
 
-        return header, pose, map_points
+        speed_offset = _POSE_BYTES + _COUNT_SIZE + n * 3 * 4
+        if len(payload) >= speed_offset + _SPEED_SIZE:
+            (speed,) = struct.unpack_from("<f", payload, speed_offset)
+        else:
+            speed = 0.0
+
+        return header, pose, map_points, speed
 
     def close(self):
         self._rb.close()

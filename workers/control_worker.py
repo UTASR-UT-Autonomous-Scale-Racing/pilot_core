@@ -1,17 +1,25 @@
 """
-ControlWorker — operates in one of two modes:
+ControlWorker — operates in one of three modes:
 
 1. **Neural mode** (default): reads segmentation masks + IMU, runs a learned
    control model, and writes normalised steering/throttle into ControlBuffer.
 
 2. **PID mode** (``mode="pid"``): reads live pose from PoseBuffer and track
    boundaries from TrackBoundaryBuffer, runs the TrackPIDController, and
-   writes the result to ControlBuffer.
+   writes the result to ControlBuffer.  ``mode="ftg"`` runs the
+   Follow-the-Gap controller on the same inputs.
+
+3. **LIDAR wall mode** (``mode="lidar_pid"``): reads the live LIDAR scan each
+   step, computes lateral centering error from the forward-facing sector, and
+   runs a PID to steer between the walls.  No mapping or global boundary needed.
 
 Output contract: every value written to ControlBuffer is normalised to
-``[0, 1]`` (steering 0 = full left, 0.5 = centre, 1 = full right; throttle
-0 = neutral, 1 = max forward), matching ``pilot_controller.Controller``.
-Controllers that work in signed ``[-1, 1]`` space are converted here.
+``[0, 1]`` with **0.5 = neutral** on both channels, matching
+``pilot_controller.Controller`` (linear over each channel's PWM [MIN, MAX])
+and the simulator bridge: steering 0 = full left, 1 = full right;
+throttle < 0.5 = brake / reverse, > 0.5 = forward.  Controllers work in
+signed ``[-1, 1]`` space with **+steering = left** and are converted here with
+:func:`signed_to_unit`.
 """
 
 from __future__ import annotations
@@ -24,36 +32,36 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from .base_worker import BaseWorker
+from .bev import pose_to_bev
 from shared_buffer import ControlBuffer, IMUBuffer, PoseBuffer, SegmentationBuffer
 
-# Optional — only needed in PID mode
+# Optional — only needed in boundary-PID mode
 try:
     from shared_buffer.track_boundary_buffer import TrackBoundaryBuffer
 except ImportError:
     TrackBoundaryBuffer = None  # type: ignore[misc]
 
+# Optional — only needed in lidar_pid mode
+try:
+    from shared_buffer import LidarBuffer
+except ImportError:
+    LidarBuffer = None  # type: ignore[misc,assignment]
+
 
 def signed_to_unit(steering: float, throttle: float) -> tuple[float, float]:
     """Convert signed controller output to the ControlBuffer ``[0, 1]`` contract.
 
-    Steering ``[-1, 1]`` maps linearly onto ``[0, 1]``.  Throttle is clipped
-    to ``[0, 1]`` because the PWM mapper has no reverse range.
+    Signed convention (all track controllers and RL policies): steering
+    **+1 = full left** (ROS / REP-103, counter-clockwise), throttle +1 = full
+    forward, -1 = full brake / reverse.
+
+    ControlBuffer follows the car's PWM convention (adding to neutral steers
+    right): steering 0 = full left, 1 = full right, so steering is negated
+    here.  Both channels map 0 → 0.5 (neutral).
     """
-    steer_unit = float(np.clip((steering + 1.0) / 2.0, 0.0, 1.0))
-    throttle_unit = float(np.clip(throttle, 0.0, 1.0))
+    steer_unit = float(np.clip((1.0 - steering) / 2.0, 0.0, 1.0))
+    throttle_unit = float(np.clip((throttle + 1.0) / 2.0, 0.0, 1.0))
     return steer_unit, throttle_unit
-
-
-def pose_to_bev(pose: np.ndarray) -> tuple[np.ndarray, float]:
-    """Extract BEV position ``(X, Z)`` and heading from a camera-to-world pose.
-
-    Heading is the camera's forward axis (third rotation column) projected
-    onto the X-Z plane, measured from +X towards +Z — the same convention
-    the track controllers use for bearings (``atan2(dz, dx)``).
-    """
-    position = np.array([pose[0, 3], pose[2, 3]], dtype=np.float32)
-    heading = float(np.arctan2(pose[2, 2], pose[0, 2]))
-    return position, heading
 
 
 class ControlWorker(BaseWorker):
@@ -90,13 +98,17 @@ class ControlWorker(BaseWorker):
         self._model = None
         self._model_takes_timestamp = False
         self._last_seg_seq = 0
-        # PID-mode state
+        # Boundary-PID-mode state
         self._boundary_buf: Optional[Any] = None
         self._pid = None
         self._mapping_done_event: Optional[mp.Event] = None
         self._outer_line: Optional[np.ndarray] = None
         self._inner_line: Optional[np.ndarray] = None
         self._last_pose_seq = 0
+        # LIDAR-wall-mode state
+        self._lidar_buf: Optional[Any] = None
+        self._lidar_wall_ctrl = None
+        self._last_lidar_seq = 0
 
     def setup(self) -> None:
         self._mode = self.config.get("mode", "neural")
@@ -104,6 +116,10 @@ class ControlWorker(BaseWorker):
 
         if self._mode == "pid":
             self._setup_pid()
+        elif self._mode == "ftg":
+            self._setup_ftg()
+        elif self._mode == "lidar_pid":
+            self._setup_lidar_pid()
         else:
             self._setup_neural()
 
@@ -132,6 +148,9 @@ class ControlWorker(BaseWorker):
         self._pose_buf = self.config["pose_buffer"]
         self._boundary_buf = self.config.get("boundary_buffer")
         self._mapping_done_event = self.config.get("mapping_done_event")
+        # Ground-plane / forward axes — see pose_to_bev(); must match MappingWorker
+        self._bev_axes = tuple(self.config.get("bev_axes", [0, 2]))
+        self._forward_axis = int(self.config.get("forward_axis", 2))
 
         pid_cfg = self.config.get("pid_config", {})
         self._pid = TrackPIDController(
@@ -141,13 +160,79 @@ class ControlWorker(BaseWorker):
             target_throttle=pid_cfg.get("target_throttle", 0.3),
             noise_std=pid_cfg.get("noise_std", 0.05),
         )
-        self.logger.info("ControlWorker ready — PID mode")
+        self.logger.info(f"ControlWorker ready — PID mode (bev_axes={self._bev_axes})")
+
+    def _setup_ftg(self) -> None:
+        from .track_ftg_controller import TrackFTGController
+
+        self._pose_buf = self.config["pose_buffer"]
+        self._boundary_buf = self.config.get("boundary_buffer")
+        self._mapping_done_event = self.config.get("mapping_done_event")
+        self._bev_axes = tuple(self.config.get("bev_axes", [0, 2]))
+        self._forward_axis = int(self.config.get("forward_axis", 2))
+
+        ftg_cfg = self.config.get("ftg_config", {})
+        self._pid = TrackFTGController(
+            num_beams=ftg_cfg.get("num_beams", 360),
+            fov_deg=ftg_cfg.get("fov_deg", 270.0),
+            max_range=ftg_cfg.get("max_range", 5.0),
+            bubble_radius_deg=ftg_cfg.get("bubble_radius_deg", 30.0),
+            smooth_window=ftg_cfg.get("smooth_window", 5),
+            target_throttle=ftg_cfg.get("target_throttle", 0.3),
+            throttle_corner_scale=ftg_cfg.get("throttle_corner_scale", 0.5),
+            noise_std=ftg_cfg.get("noise_std", 0.05),
+            gap_strategy=ftg_cfg.get("gap_strategy", "deepest"),
+        )
+        self.logger.info(f"ControlWorker ready — FTG mode (bev_axes={self._bev_axes})")
+
+    def _setup_lidar_pid(self) -> None:
+        from .lidar_wall_controller import LidarWallController
+
+        self._lidar_buf = self.config["lidar_buffer"]
+        pid_cfg = self.config.get("pid_config", {})
+        self._lidar_wall_ctrl = LidarWallController(
+            kp=pid_cfg.get("kp_steer", 1.0),
+            ki=pid_cfg.get("ki_steer", 0.0),
+            kd=pid_cfg.get("kd_steer", 0.1),
+            target_throttle=pid_cfg.get("target_throttle", 0.4),
+            sector_deg=pid_cfg.get("sector_deg", 60.0),
+            range_min=pid_cfg.get("range_min", 0.1),
+            range_max=pid_cfg.get("range_max", 9.5),
+            slow_corner_factor=pid_cfg.get("slow_corner_factor", 0.6),
+        )
+        self.logger.info("ControlWorker ready — LIDAR wall-centering PID mode")
 
     def step(self) -> None:
-        if self._mode == "pid":
+        if self._mode in ("pid", "ftg"):
             self._step_pid()
+        elif self._mode == "lidar_pid":
+            self._step_lidar_pid()
         else:
             self._step_neural()
+
+    # --- LIDAR wall-centering PID mode ---
+
+    def _step_lidar_pid(self) -> None:
+        result = self._lidar_buf.read_latest()
+        if result is None:
+            time.sleep(0.01)
+            return
+
+        header, ranges = result
+        if header.seq_no <= self._last_lidar_seq:
+            time.sleep(0.005)
+            return
+        self._last_lidar_seq = header.seq_no
+
+        steer_raw, throttle_raw = self._lidar_wall_ctrl.step(ranges)
+        steer_unit, throttle_unit = signed_to_unit(steer_raw, throttle_raw)
+        self._ctrl_buf.write(steer_unit, throttle_unit)
+
+        if self._last_lidar_seq % 30 == 0:
+            self.logger.debug(
+                f"[lidar_pid] steer={steer_raw:+.3f} throttle={throttle_raw:+.3f} "
+                f"-> buffer ({steer_unit:.3f}, {throttle_unit:.3f})"
+            )
 
     # --- Neural mode ---
 
@@ -217,27 +302,27 @@ class ControlWorker(BaseWorker):
             time.sleep(0.005)
             return
 
-        pose_header, pose, _ = pose_result
+        pose_header, pose, _, _ = pose_result
         if pose_header.seq_no <= self._last_pose_seq:
             time.sleep(0.005)
             return
         self._last_pose_seq = pose_header.seq_no
 
-        current_bev, heading = pose_to_bev(pose)
+        current_bev, heading = pose_to_bev(pose, self._bev_axes, self._forward_axis)
 
-        # PID step
-        steering, throttle = self._pid.step(
+        # PID step — returns raw [-1, 1]; normalize to [0, 1] for ControlBuffer
+        steer_raw, throttle_raw = self._pid.step(
             current_bev, heading, self._outer_line, self._inner_line
         )
 
-        # PID works in signed space; convert to the ControlBuffer contract
-        steer_unit, throttle_unit = signed_to_unit(steering, throttle)
+        # Controllers work in signed space; convert to the ControlBuffer contract
+        steer_unit, throttle_unit = signed_to_unit(steer_raw, throttle_raw)
         self._ctrl_buf.write(steer_unit, throttle_unit)
 
         if self._last_pose_seq % 30 == 0:
             self.logger.debug(
-                f"steering={steering:+.3f} throttle={throttle:+.3f} "
-                f"-> buffer ({steer_unit:.3f}, {throttle_unit:.3f})"
+                f"[{self._mode}] pos={current_bev} steer={steer_raw:+.3f} "
+                f"throttle={throttle_raw:+.3f} -> buffer ({steer_unit:.3f}, {throttle_unit:.3f})"
             )
 
     def teardown(self) -> None:

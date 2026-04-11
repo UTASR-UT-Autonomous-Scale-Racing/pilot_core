@@ -27,3 +27,7 @@ temp/
 # --- Editor / notebooks ---
 .vscode/
 *.ipynb
+
+# --- RL training outputs ---
+rl/checkpoints/
+rl/logs/

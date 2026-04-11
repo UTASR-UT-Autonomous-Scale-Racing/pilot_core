@@ -42,6 +42,7 @@ class VisionWorker(BaseWorker):
         self._seg_buf: SegmentationBuffer | None = None
         self._model = None
         self._last_seq = 0
+        self._waiting_logged = False
 
     def setup(self) -> None:
         self._frame_buf = self.config["input_buffer"]
@@ -60,6 +61,9 @@ class VisionWorker(BaseWorker):
     def step(self) -> None:
         result = self._frame_buf.read_latest()
         if result is None:
+            if not self._waiting_logged:
+                self.logger.debug("frame_buf empty — waiting for frames")
+                self._waiting_logged = True
             time.sleep(0.001)
             return
 
@@ -71,11 +75,16 @@ class VisionWorker(BaseWorker):
             return
         self._last_seq = header.seq_no
 
+        # self.logger.debug(f"Running get_mask on frame seq={header.seq_no} rgb={rgb.shape}")
+
         # Run segmentation — interface: model.get_mask(depth_frame, rgb_frame)
         mask = self._model.get_mask(depth, rgb)
 
         if mask is not None:
             self._seg_buf.write(mask)
+        #     self.logger.debug(f"Wrote mask to seg_buf shape={mask.shape} max={mask.max():.3f}")
+        # else:
+        #     self.logger.warning("get_mask returned None")
 
     def teardown(self) -> None:
         self.logger.info("VisionWorker shutting down")

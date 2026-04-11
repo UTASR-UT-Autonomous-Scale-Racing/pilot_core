@@ -1,6 +1,6 @@
 # Control models: assessment and implementation plan
 
-Status: **proposal, awaiting a decision.** Nothing in this document has been implemented yet.
+Status: **proposal.** Done so far: P0a (signed actuation / brake-reverse), the `simulator_integration` merge, and FTG selection (`control_mode: ftg`, from that branch). Everything else is not started.
 
 ## 1. Where control stands today
 
@@ -9,9 +9,9 @@ Status: **proposal, awaiting a decision.** Nothing in this document has been imp
 | `MeanIntensity` (default "neural") | `pilot_controller/models/default` | Placeholder: always returns `(0.5, 0.5)`. Runs an IMU-integrating EKF + matplotlib mapper as a side effect. |
 | `RNN` | `pilot_controller/models/rnn/.py` | Stub (`tanh(mean(history))`). File is literally named `.py` / `.yaml`, so it can't be loaded. |
 | RNN trainer | `pilot_controller/Controller/` | Torch GRU/LSTM scaffold that predicts the next *input* vector, not actions. No dataset, not wired in. |
-| `TrackPIDController` | `workers/track_pid_controller.py` | Runs, but: target = nearest centre-line point (no look-ahead), so the error is ill-defined when on the line; no `dt`; no anti-windup; constant throttle; Gaussian noise injected into real commands. |
-| `TrackFTGController` | `workers/track_ftg_controller.py` | Implemented and unit-tested, but **not selectable**. `ControlWorker` only knows `neural` / `pid`. |
-| RL (PPO) + `LidarWallController` | `simulator_integration` branch (unmerged) | Gymnasium env over the AutoDRIVE simulator, PPO with a 1-D CNN over boundary points. Diverged from this branch (4 commits). |
+| `TrackPIDController` | `workers/track_pid_controller.py` | Runs. Since the sim merge it aligns the heading with the local boundary tangent, but has **no cross-track term**, so lateral drift is never corrected. In a closed-loop test at 0.84 m/s it drifted off the track within about one lap (on track 43% of the time). Also: no `dt`, no anti-windup, constant throttle, Gaussian noise injected into real commands. |
+| `TrackFTGController` | `workers/track_ftg_controller.py` | Implemented, unit-tested, selectable with `control_mode: ftg` (since the merge). Not yet evaluated closed-loop. |
+| RL (PPO) + `LidarWallController` | `rl/`, `workers/lidar_wall_controller.py` (merged) | Gymnasium env over AutoDRIVE, PPO with a 1-D CNN over boundary points; LIDAR wall-centering PID (`control_mode: lidar_pid`). |
 
 Fixed during the release clean-up (so they're not repeated below): the PID [-1,1] vs
 actuator [0,1] range crash, the SLAM Tcw-vs-Twc pose convention, the PID heading
@@ -26,24 +26,19 @@ evaluate a controller before it touches the car.
 
 These come first. Every controller below depends on them.
 
-### P0a. Signed actuation contract (enables braking + reverse)
-PWM is defined relative to the neutral values in `pilot_controller/control_output.py`:
-below neutral = left / brake-reverse, above neutral = right / forward.
-Today `Controller` maps throttle `[0,1]` onto neutral→max only (`THROTTLE_MIN`
-is never used), and `ControlWorker` clips negative throttle to 0, so **software
-cannot brake or reverse**. Steering is mapped linearly over `[MIN, MAX]`, so
-"centre" (0.5) lands at 1465 µs instead of the configured 1461 µs.
-
-- Change `ctrl_buf` to **signed** `steering, throttle ∈ [-1, 1]` (0 = neutral for both).
-- Map piecewise around neutral: `pwm = NEUTRAL + u·(MAX−NEUTRAL)` for `u ≥ 0`,
-  `pwm = NEUTRAL + u·(NEUTRAL−MIN)` for `u < 0`, so 0 is exactly the configured neutral
-  and the full range of each side is reachable.
-- Touches: `pilot_controller/control_output.py` (submodule), `ActuatorWorker`,
-  `ControlWorker` (drop `signed_to_unit`), `ControlBuffer` docs, an adapter for
-  `[0,1]` neural models, tests. PID/FTG/RL already produce signed output.
-- Bench check: many RC ESCs need brake → neutral → reverse before reverse engages.
-  The firmware passes PWM straight through, so verify the ESC's behaviour and, if
-  needed, add that sequence in `ActuatorWorker`.
+### P0a. Signed actuation contract (brake + reverse) — **done**
+- `ctrl_buf`: both channels `[0, 1]`, **0.5 = neutral**, car PWM convention
+  (steer 0 = full left, 1 = full right; throttle < 0.5 = brake / reverse).
+- `pilot_controller.Controller` maps throttle linearly over
+  `[THROTTLE_MIN, THROTTLE_MAX]`, like steering; 0.5 lands exactly on
+  `THROTTLE_NEURAL`. Steering offsets unchanged (intended).
+- Signed controller convention: **+steering = left** (ROS / REP-103), matching
+  the controllers' geometry and AutoDRIVE. `signed_to_unit()` negates steering
+  into `ctrl_buf`, and the ZMQ actuator converts back. Before this, PID/FTG would
+  have steered the *car* the wrong way (they only worked in the simulator).
+- **Bench check still needed:** many RC ESCs need brake → neutral → reverse
+  before reverse engages. The firmware passes PWM straight through, so verify the
+  ESC's behaviour and, if needed, add that sequence in `ActuatorWorker`.
 
 ### P0b. Actuation safety layer: `ActuatorWorker`
 - **Command watchdog:** if the newest `ctrl_buf` entry is older than `command_timeout_ms` (e.g. 150 ms), send neutral throttle and hold steering. Today a stalled controller or lost SLAM tracking leaves the car on its last command.
@@ -60,7 +55,7 @@ cannot brake or reverse**. Steering is mapped linearly over `[MIN, MAX]`, so
 - Built once from `boundary_buf`: order and resample boundaries, compute the centre-line, arc length `s`, curvature `κ(s)` and left/right widths.
 - `project(x, z) → (s, lateral_error, heading_error)` with index continuity (no global nearest-point search every step).
 - Later: minimum-curvature race line as an alternative reference path.
-- The `simulator_integration` branch already has `boundary_resampler.py`, which is worth porting.
+- Reuse `workers/boundary_resampler.py` (merged from the sim branch).
 
 ### P3. Controller interface + selection
 ```python
@@ -68,13 +63,12 @@ class TrackController(Protocol):
     def reset(self) -> None: ...
     def step(self, state: VehicleState, track: TrackModel) -> Command: ...  # steer, throttle ∈ [-1,1] (P0a)
 ```
-- `ControlWorker` gets a registry keyed by `control_mode` (`pid`, `pure_pursuit`, `stanley`, `ftg`, `policy`, `neural`) instead of the current if/else.
-- Wire the existing FTG in on day one.
+- `ControlWorker` gets a registry keyed by `control_mode` (`pid`, `ftg`, `lidar_pid`, `pure_pursuit`, `stanley`, `policy`, `neural`) instead of the current if/else chain.
 
 ### P4. Closed-loop evaluation harness
 - Pure-Python kinematic bicycle simulator on synthetic tracks (`conftest.track_boundaries`, `synthetic/closed_loop_generator.py`) → `pytest` benchmarks: lap completion, lap time, cross-track RMS / max, steering jerk.
 - Every controller must pass it before car testing. Seconds per run on CPU.
-- AutoDRIVE / `scale_racing_simulator` (via the sim branch's ZMQ workers) is the higher-fidelity stage.
+- AutoDRIVE (via the ZMQ workers) is the higher-fidelity stage. A fake ZMQ bridge with a kinematic bicycle model (F1TENTH params) already closes the loop around the unmodified pipeline. It was used to validate the merge and should become this harness.
 
 ## 3. Controllers to implement (recommended order)
 
@@ -102,7 +96,7 @@ class TrackController(Protocol):
 
 ### C5. Learned policy deployment (`policy` mode)
 - Load a trained policy exported to **ONNX** and run it on CPU with onnxruntime (tiny MLP/1-D CNN: well under 1 ms). The observation builder reuses `TrackModel` to produce the sim branch's boundary-point observation.
-- Start from the PPO work on `simulator_integration` (merge/rebase that branch first). Sim-to-real gap is the main risk; gate behind the P0b safety layer and the P4 harness.
+- Start from the merged PPO work in `rl/`. Sim-to-real gap is the main risk; gate behind the P0b safety layer and the P4 harness.
 - Optional follow-on: behaviour cloning from `BufferRecorderWorker` recordings of C1/C2 laps (fixes the `pilot_controller` RNN scaffold into an action-predicting model).
 - Effort: **M** for deployment; training effort is open-ended.
 
@@ -110,26 +104,31 @@ class TrackController(Protocol):
 - Kinematic-bicycle MPC (CasADi/acados) tracking the race line with input constraints. Best lap-time potential, but needs an identified vehicle model and more CPU. Revisit after C1–C3 are characterised on the car.
 - Effort: **L**.
 
-## 4. Decisions (22 Sep 2026)
-1. **Steering / throttle sign:** set by the neutral values in the control config.
-   Below neutral = left / brake-reverse, above neutral = right / forward. → P0a.
-2. **Vehicle parameters:** use the F1TENTH simulator values for now
-   (`vehicle_params.yaml`, marked as placeholders until the car is measured).
-3. **Mapping lap:** driven by hand. C4 drops in priority.
-4. **Braking and reverse:** supported by the car. → P0a.
+## 4. Decisions
+1. **Steering / throttle sign (22 Sep):** set by the neutral values in the control
+   config: below neutral = left / brake-reverse, above = right / forward. → P0a.
+2. **Vehicle parameters (22 Sep):** F1TENTH simulator values for now
+   (`vehicle_params.yaml`, placeholders until the car is measured).
+3. **Mapping lap (22 Sep):** driven by hand. C4 drops in priority.
+4. **Braking and reverse (22 Sep):** supported and to be used. → P0a, done.
+5. **Simulator:** AutoDRIVE. `simulator_integration` merged; the PyBullet
+   `scale_racing_simulator` is outdated and ignored.
+6. **Steering offsets:** intended. Linear `[MIN, MAX]` mapping kept.
 
-**Still open**
-- **Simulator:** AutoDRIVE (Unity, via ZMQ, on `simulator_integration`, Feb–Apr 2026)
-  vs. the older PyBullet `scale_racing_simulator` (Apr 2025, 2 commits). P4's kinematic
-  simulator is needed either way for fast CI checks.
-- **`simulator_integration` branch:** merge it into this branch (brings RL, ZMQ,
-  LiDAR, depth projection) or keep it separate?
+### Simulator follow-ups found during the merge
+- `config_zmq.yaml` references `pilot_vision/models/deeplab/config.yaml`, which only
+  exists on `pilot_vision`'s `deeplab` branch (the submodule is pinned to `main`).
+  Not needed in the default sim mode (LiDAR mapping skips vision).
+- `simulator_orbslam_settings.yaml` is referenced but was never committed (only
+  needed for SLAM-in-sim).
+- The sim camera path delivers **RGB** frames while the OAK-D path delivers **BGR**.
+  Left as is until it's clear how the sim-trained vision model expects its input.
 
 ## 5. Suggested sequencing
 
 | Phase | Scope | Outcome |
 | --- | --- | --- |
-| 1 | P0a signed actuation, P0b safety, P3 interface (+ FTG wiring), P4 harness | Brake/reverse available; safe to test any controller; benchmarks in CI |
+| 1 | P0b safety, P3 interface, P4 harness | Safe to test any controller; benchmarks in CI |
 | 2 | P1 estimator, P2 track model, C1 Pure Pursuit | Reliable autonomous laps on a mapped track |
 | 3 | C2 speed planner, C3 Stanley | Faster laps; lateral controller A/B |
 | 4 | C5 policy deployment, C4 reactive depth | RL on car; tracking-loss fallback |

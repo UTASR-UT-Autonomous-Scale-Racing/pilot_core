@@ -141,7 +141,7 @@ class TestPIDStep:
         steers = set()
         for _ in range(20):
             pid.reset()
-            s, _ = pid.step(pos, 0.0, outer, inner)
+            s, _ = pid.step(pos, np.pi / 2, outer, inner)
             steers.add(round(s, 4))
 
         assert len(steers) > 1  # should not all be identical
@@ -152,11 +152,10 @@ class TestPIDStep:
         outer, inner = oval_boundaries
         # Midpoint between outer[0]=(8,0) and inner[0]=(5,0) is (6.5, 0)
         pos = np.array([6.5, 0.0], dtype=np.float32)
-        heading = 0.0  # pointing along X
+        heading = np.pi / 2  # along the track tangent (+Z) at theta = 0
         steer, throttle = pid.step(pos, heading, outer, inner)
-        # Steering should be close to zero (heading towards centre)
-        # Depending on exact geometry it may not be exactly 0, but should be small
-        assert abs(steer) < 0.5
+        # Aligned with the track on the centre line → (near) zero steering
+        assert abs(steer) < 0.05
 
     def test_throttle_near_target(self, oval_boundaries):
         """Throttle should be close to target_throttle (with no noise)."""

@@ -3,7 +3,7 @@ test_control_contract.py — Regression tests for the ControlBuffer [0, 1]
 contract between controllers, ControlWorker and ActuatorWorker.
 
 Covers:
-    - signed_to_unit(): PID/FTG [-1, 1] output → [0, 1]
+    - signed_to_unit(): PID/FTG [-1, 1] output → [0, 1], 0.5 = neutral
     - pose_to_bev(): heading convention matches controller bearings
     - ControlWorker PID mode never writes out-of-range values
     - ControlWorker neural mode passes ``timestamp`` to models that take it
@@ -31,14 +31,18 @@ class TestSignedToUnit:
 
     @pytest.mark.parametrize(
         "signed, expected",
-        [(-1.0, 0.0), (0.0, 0.5), (1.0, 1.0), (-0.5, 0.25), (-3.0, 0.0), (3.0, 1.0)],
+        # signed +1 = full left → buffer 0.0 (car PWM: below neutral = left)
+        [(1.0, 0.0), (0.0, 0.5), (-1.0, 1.0), (0.5, 0.25), (3.0, 0.0), (-3.0, 1.0)],
     )
     def test_steering_mapping(self, signed, expected):
         steer, _ = signed_to_unit(signed, 0.3)
         assert steer == pytest.approx(expected)
 
-    @pytest.mark.parametrize("throttle, expected", [(-0.4, 0.0), (0.3, 0.3), (1.7, 1.0)])
-    def test_throttle_clipped(self, throttle, expected):
+    @pytest.mark.parametrize(
+        "throttle, expected",
+        [(-1.0, 0.0), (-0.4, 0.3), (0.0, 0.5), (0.3, 0.65), (1.7, 1.0)],
+    )
+    def test_throttle_mapping_allows_reverse(self, throttle, expected):
         _, thr = signed_to_unit(0.0, throttle)
         assert thr == pytest.approx(expected)
 
@@ -70,6 +74,30 @@ class TestPoseToBev:
         inner = np.array([[5.0, -1.0]], dtype=np.float32)
         steer, _ = pid.step(pos, heading, outer, inner)
         assert steer == pytest.approx(0.0, abs=1e-6)
+
+
+class TestSteeringDirection:
+    """Geometry → buffer: a track that bends left must produce a *left*
+    command (buffer < 0.5), because on the car PWM above neutral steers right."""
+
+    @pytest.mark.parametrize("bend, left", [(+0.4, True), (-0.4, False)])
+    def test_pid_turns_towards_track(self, bend, left):
+        from workers.track_pid_controller import TrackPIDController
+
+        pid = TrackPIDController(kp_steer=1.0, ki_steer=0.0, kd_steer=0.0, noise_std=0.0)
+        # Car at origin heading +X (camera frame: forward axis Z along world X)
+        T = np.eye(4, dtype=np.float32)
+        T[:3, 2] = (1, 0, 0)
+        pos, heading = pose_to_bev(T)
+        # Walls either side of a track whose tangent is rotated by `bend` rad
+        # (positive = counter-clockwise from above = to the car's left)
+        tangent = np.array([np.cos(bend), np.sin(bend)])
+        normal = np.array([-tangent[1], tangent[0]])
+        outer = (pos + normal * -1.0)[None].astype(np.float32)
+        inner = (pos + normal * +1.0)[None].astype(np.float32)
+        steer_signed, _ = pid.step(pos, heading, outer, inner)
+        steer_unit, _ = signed_to_unit(steer_signed, 0.0)
+        assert (steer_unit < 0.5) == left
 
 
 class TestControlWorkerPIDContract:
@@ -156,7 +184,7 @@ class TestActuatorClamp:
 
     @pytest.mark.parametrize(
         "steer, thr, expected",
-        [(-0.3, 0.2, (0.0, 0.2)), (1.4, 1.2, (1.0, 1.0)), (math.nan, math.nan, (0.5, 0.0))],
+        [(-0.3, 0.2, (0.0, 0.2)), (1.4, 1.2, (1.0, 1.0)), (math.nan, math.nan, (0.5, 0.5))],
     )
     def test_out_of_range_is_clamped(self, steer, thr, expected):
         from workers import ActuatorWorker
@@ -173,3 +201,22 @@ class TestActuatorClamp:
             assert args == pytest.approx(expected)
         finally:
             ctrl.unlink()
+
+
+class TestPWMMapping:
+    """ControlBuffer [0, 1] → PWM via pilot_controller.Controller."""
+
+    def test_throttle_neutral_brake_forward(self):
+        from pilot_controller.control_output import (
+            Controller, THROTTLE_MAX, THROTTLE_MIN, THROTTLE_NEURAL,
+        )
+        c = Controller()
+        assert c.get_normalized_action_output(0.5, 0.5)[1] == THROTTLE_NEURAL
+        assert c.get_normalized_action_output(0.5, 0.0)[1] == THROTTLE_MIN   # full brake / reverse
+        assert c.get_normalized_action_output(0.5, 1.0)[1] == THROTTLE_MAX
+
+    def test_steering_full_range(self):
+        from pilot_controller.control_output import Controller, STEER_MAX, STEER_MIN
+        c = Controller()
+        assert c.get_normalized_action_output(0.0, 0.5)[0] == STEER_MIN   # full left
+        assert c.get_normalized_action_output(1.0, 0.5)[0] == STEER_MAX   # full right

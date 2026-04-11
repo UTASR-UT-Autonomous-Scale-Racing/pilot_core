@@ -390,7 +390,7 @@ class TestSLAMWorker:
             # Should have written identity pose
             result = pb.read_latest()
             assert result is not None
-            _, pose, _ = result
+            _, pose, _, _ = result
             np.testing.assert_allclose(pose, np.eye(4, dtype=np.float32), atol=1e-7)
         finally:
             fb.unlink()
@@ -494,7 +494,8 @@ class TestSLAMWorker:
                 input_buffer=fb,
                 output_buffer=pb,
                 vocab_path="ORB_SLAM3/Vocabulary/ORBvoc.txt",
-                settings_path="oak_d_orbslam_settings.yaml",
+                settings_path="orbslam_oakd_rgbd.yaml",
+                warmup_frames=0,  # single-frame test
             )
             w._logger = MagicMock()
             w._logger.info = print
@@ -507,7 +508,7 @@ class TestSLAMWorker:
             w.step()
             result = pb.read_latest()
             assert result is not None
-            _, pose, _ = result
+            _, pose, _, _ = result
             assert pose.shape == (4, 4)
             w.teardown()
         finally:
@@ -568,13 +569,14 @@ class TestMappingWorker:
                 boundary_buffer=bb,
                 loop_event=loop_ev,
                 mapping_done_event=done_ev,
-                alpha_shape=20.0,
                 boundary_min_points=30,
             )
             w._logger = MagicMock()
             w.setup()
-            assert w._alpha == 20.0
             assert w._min_points == 30
+            # Defaults: SLAM camera frame (X/Z ground plane, Z forward)
+            assert w._bev_axes == (0, 2)
+            assert w._forward_axis == 2
         finally:
             pb.unlink()
             sb.unlink()
@@ -669,15 +671,15 @@ class TestMappingWorker:
             all_pts = np.vstack([outer_3d, inner_3d])
             pcb.write(all_pts)
 
-            # Write some poses for trajectory
-            for i in range(5):
+            # Drive one lap of the centre line (counter-clockwise in X-Z) with
+            # the camera's forward (Z) axis along the track tangent.  The
+            # worker reads only the newest pose, so step after every write.
+            for phi in np.linspace(0, 2 * np.pi, 40, endpoint=False):
                 T = np.eye(4, dtype=np.float32)
-                T[0, 3] = float(i)
-                T[2, 3] = float(i) * 0.5
+                T[0, 3], T[2, 3] = 6.5 * np.cos(phi), 4.0 * np.sin(phi)
+                tangent = np.array([-6.5 * np.sin(phi), 0.0, 4.0 * np.cos(phi)])
+                T[:3, 2] = tangent / np.linalg.norm(tangent)
                 pb.write(T)
-
-            # Step a few times to accumulate
-            for _ in range(5):
                 w.step()
 
             # Set loop closure → should extract boundaries
@@ -693,6 +695,10 @@ class TestMappingWorker:
             _, outer_out, inner_out = result
             assert len(outer_out) > 0
             assert len(inner_out) > 0
+            # Counter-clockwise lap: the inner wall is on the left
+            r_outer = np.linalg.norm(outer_out / [8.0, 5.0], axis=1)
+            r_inner = np.linalg.norm(inner_out / [8.0, 5.0], axis=1)
+            assert np.median(r_outer) > np.median(r_inner)
         finally:
             pb.unlink()
             sb.unlink()

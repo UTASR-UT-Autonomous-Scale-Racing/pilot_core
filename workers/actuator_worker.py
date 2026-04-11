@@ -1,13 +1,14 @@
 """
 ActuatorWorker — reads normalised control values from ControlBuffer,
 maps them to PWM via ``pilot_controller.Controller``, and writes
-to the Arduino over I2C.
+to the Arduino over I2C and/or publishes to ZMQ for simulator control.
 
 Replaces ``I2CDataProcessor.write()`` in the old pipeline.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from typing import Any
@@ -20,9 +21,14 @@ try:
 except ImportError:
     smbus2 = None
 
+try:
+    import zmq
+except ImportError:
+    zmq = None
+
 
 class ActuatorWorker(BaseWorker):
-    """Worker process that drives steering/throttle actuators via I2C.
+    """Worker process that drives steering/throttle actuators via I2C and/or ZMQ.
 
     Config kwargs
     -------------
@@ -32,6 +38,10 @@ class ActuatorWorker(BaseWorker):
         I2C slave address of the Arduino.
     i2c_bus : int | None
         I2C bus number.
+    zmq_enabled : bool
+        Enable ZMQ publishing to simulator (default: False)
+    zmq_port : int
+        Port to bind ZMQ control publisher (default: 5556)
     """
 
     def __init__(self, name: str = "actuator", **kwargs: Any) -> None:
@@ -42,10 +52,17 @@ class ActuatorWorker(BaseWorker):
         self._controller = None
         self._last_seq = 0
         self._dummy = False
+        # ZMQ attributes
+        self._zmq_enabled = False
+        self._zmq_context = None
+        self._zmq_pub = None
+        # Reset signal — set this mp.Event to send reset:true on the next ZMQ publish
+        self._reset_event = None
 
     def setup(self) -> None:
         self._ctrl_buf = self.config["input_buffer"]
 
+        # Setup I2C hardware
         i2c_address = self.config.get("i2c_address")
         i2c_bus = self.config.get("i2c_bus")
 
@@ -60,6 +77,32 @@ class ActuatorWorker(BaseWorker):
                 self._i2c_address = i2c_address
                 self._bus = smbus2.SMBus(i2c_bus)
                 self.logger.info(f"I2C actuator ready on bus {i2c_bus}, address 0x{i2c_address:02x}")
+
+        self._reset_event = self.config.get("reset_event")
+
+        # Setup ZMQ publisher for simulator
+        self._zmq_enabled = self.config.get("zmq_enabled", False)
+        if self._zmq_enabled:
+            if zmq is None:
+                self.logger.warning("pyzmq not installed — ZMQ disabled")
+                self._zmq_enabled = False
+            else:
+                zmq_port = self.config.get("zmq_port", 5556)
+                try:
+                    self._zmq_context = zmq.Context()
+                    self._zmq_pub = self._zmq_context.socket(zmq.PUB)
+                    self._zmq_pub.setsockopt(zmq.SNDHWM, 10)
+                    self._zmq_pub.setsockopt(zmq.LINGER, 1000)
+                    self._zmq_pub.bind(f"tcp://*:{zmq_port}")
+                    time.sleep(0.5)  # Allow socket to initialize
+                    self.logger.info(f"ZMQ control publisher bound to port {zmq_port}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to bind ZMQ publisher: {e}")
+                    self._zmq_enabled = False
+                    if self._zmq_pub:
+                        self._zmq_pub.close()
+                    if self._zmq_context:
+                        self._zmq_context.term()
 
         # PWM mapper from pilot_controller
         from pilot_controller.control_output import Controller
@@ -86,15 +129,25 @@ class ActuatorWorker(BaseWorker):
                 f"Control command out of [0, 1] range "
                 f"(steering={steering_norm:.3f}, throttle={throttle_norm:.3f}) — clamping"
             )
-            # NaN → neutral steering / zero throttle
+            # NaN → neutral (0.5) on both channels
             steering_norm = min(max(steering_norm, 0.0), 1.0) if math.isfinite(steering_norm) else 0.5
-            throttle_norm = min(max(throttle_norm, 0.0), 1.0) if math.isfinite(throttle_norm) else 0.0
+            throttle_norm = min(max(throttle_norm, 0.0), 1.0) if math.isfinite(throttle_norm) else 0.5
 
-        # Map normalised → PWM
+        # Send to ZMQ (simulator): [0, 1] → [-1, 1], 0.5 = neutral.
+        # AutoDRIVE steering is +1 = left (ROS); ControlBuffer is 1 = right.
+        if self._zmq_enabled:
+            steering_sim = 1.0 - (steering_norm * 2.0)
+            throttle_sim = (throttle_norm * 2.0) - 1.0
+            reset = False
+            if self._reset_event is not None and self._reset_event.is_set():
+                reset = True
+                self._reset_event.clear()
+            self._publish_zmq(steering_sim, throttle_sim, reset)
+
+        # Map normalised → PWM, send to I2C (hardware)
         pwm_steering, pwm_throttle = self._controller.get_normalized_action_output(
             steering_norm, throttle_norm
         )
-
         if not self._dummy:
             self._write_i2c(pwm_steering, pwm_throttle)
 
@@ -107,8 +160,32 @@ class ActuatorWorker(BaseWorker):
         except Exception:
             self.logger.exception("I2C write failed")
 
+    def _publish_zmq(self, steering: float, throttle: float, reset: bool = False) -> None:
+        """Publish control commands to simulator via ZMQ."""
+        command = {
+            'throttle': float(throttle),
+            'steering': float(steering),
+            'reset': reset,
+        }
+
+        try:
+            cmd_json = json.dumps(command)
+            self._zmq_pub.send_string(cmd_json, zmq.NOBLOCK)
+        except Exception as e:
+            self.logger.debug(f"ZMQ publish failed: {e}")
+
     def teardown(self) -> None:
-        # Send neutral values before shutting down
+        # Send neutral commands before shutting down
+        if self._zmq_enabled and self._zmq_pub is not None:
+            try:
+                self._publish_zmq(0.0, 0.0)
+            except Exception:
+                pass
+            self._zmq_pub.close()
+            if self._zmq_context is not None:
+                self._zmq_context.term()
+            self.logger.info("ZMQ publisher closed")
+
         if self._controller is not None and not self._dummy:
             from pilot_controller.control_output import STEER_NEURAL, THROTTLE_NEURAL
             self._write_i2c(STEER_NEURAL, THROTTLE_NEURAL)

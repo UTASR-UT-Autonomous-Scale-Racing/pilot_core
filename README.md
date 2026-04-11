@@ -49,11 +49,14 @@ shutdown.
 | `frame_buf`    | BGR `uint8` (H,W,3) + depth `float32` metres (H,W), depth aligned to RGB        |
 | `imu_buf`      | `[qw, qx, qy, qz, ax, ay, az, s7, s8]`, accel m/s² (see `IMUWorker` / `CameraWorker`) |
 | `pose_buf`     | 4×4 **camera-to-world** pose (Twc); only published while SLAM tracking is OK   |
-| `ctrl_buf`     | `steering, throttle` both in **[0, 1]** (steer 0.5 = centre; throttle 0 = neutral) |
+| `ctrl_buf`     | `steering, throttle` both in **[0, 1]**, **0.5 = neutral**: steer 0 = full left, 1 = full right; throttle < 0.5 = brake / reverse, > 0.5 = forward |
 
-Controllers that work in signed `[-1, 1]` space (PID, FTG) are converted in
-`ControlWorker`. `ActuatorWorker` clamps anything out of range as a last line of
-defence.
+`ctrl_buf` follows the car's PWM convention (below neutral = left / brake-reverse,
+above = right / forward). `pilot_controller.Controller` maps each channel linearly
+over its `[MIN, MAX]` PWM range. Controllers and RL policies work in signed
+`[-1, 1]` space with **+steering = left** (ROS / REP-103); `ControlWorker`
+converts with `signed_to_unit()`, and the simulator bridge converts back.
+`ActuatorWorker` clamps anything out of range as a last line of defence.
 
 ## Configuration profiles
 
@@ -62,6 +65,7 @@ defence.
 | `config.yaml`           | On the car (Jetson): CUDA, I2C actuator on `/dev/i2c-1`, SLAM + PID     |
 | `config_cpu.yaml`       | Workstation: real OAK-D, CPU-only, **actuator output disabled**       |
 | `config_dev_local.yaml` | No hardware: synthetic camera/IMU (also used by the dev container)    |
+| `config_zmq.yaml`       | AutoDRIVE simulator over ZMQ (see [Simulator](#simulator-autodrive))  |
 
 CLI flags override the config: `--enable-slam`, `--recording`, `--oakd-imu`, `--debug`.
 
@@ -121,6 +125,34 @@ Then run with SLAM (`scripts/run.sh` sets `LD_LIBRARY_PATH` for you):
 scripts/run.sh --config config_cpu.yaml --enable-slam
 ```
 
+## Simulator (AutoDRIVE)
+
+pilot_core runs against the Unity-based AutoDRIVE simulator through an
+`autodrive_bridge` over ZMQ. `ZMQSensorWorker` replaces the camera/IMU workers and
+`ActuatorWorker` publishes commands back:
+
+| Port | Direction | Content |
+| ---- | --------- | ------- |
+| 5555 | sim → pilot_core | camera (JPEG), depth, pose (ground truth), IMU, LiDAR, speed, lap/collision counters |
+| 5556 | pilot_core → sim | `{"steering", "throttle", "reset"}` in `[-1, 1]`, steering +1 = left |
+| 5557 | pilot_core → sim | telemetry / visualisation (boundaries, pose, segmentation) |
+
+```bash
+python start.py --config config_zmq.yaml
+```
+
+With `use_zmq_pose: true` the simulator's ground-truth pose replaces SLAM and a
+LiDAR projection builds the wall map (`L` + ENTER signals loop closure). Set
+`use_saved_map: true` to load boundaries from `saved_map_path` and drive
+immediately. `control_mode` can be `pid`, `ftg`, `lidar_pid` or `neural`.
+
+RL training (PPO, needs `pip install gymnasium stable-baselines3 torch`):
+
+```bash
+python rl/train.py              # new run → rl/logs/PPO_N, rl/checkpoints/
+tensorboard --logdir rl/logs
+```
+
 ## Tests
 
 ```bash
@@ -152,6 +184,8 @@ pilot_core/
 ├── synthetic/            # Synthetic camera / IMU / closed-loop track generators
 ├── tests/                # pytest suite
 ├── orbslam3_wrapper/     # pybind11 bindings for ORB-SLAM3
+├── rl/                   # Gymnasium env + PPO training on AutoDRIVE
+├── collect_frames.py     # Save simulator camera frames for dataset building
 ├── scripts/              # Launch, deploy and setup helpers
 ├── src/ include/ utility/  # Legacy C++ pipeline (scripts/READMECPP.md)
 ├── config*.yaml          # Runtime profiles

@@ -138,7 +138,7 @@ class TestSyntheticPipeline:
             # Should have identity pose
             result = pb.read_latest()
             assert result is not None
-            _, pose, _ = result
+            _, pose, _, _ = result
             np.testing.assert_allclose(pose, np.eye(4, dtype=np.float32), atol=1e-7)
         finally:
             fb.unlink()
@@ -312,9 +312,10 @@ class TestSyntheticPipeline:
             result = cb.read_latest()
             assert result is not None
             _, steer, throttle = result
-            assert -1.0 <= steer <= 1.0
-            assert -1.0 <= throttle <= 1.0
-            assert abs(throttle - 0.3) < 0.1  # near target throttle
+            assert 0.0 <= steer <= 1.0
+            assert 0.0 <= throttle <= 1.0
+            # target_throttle 0.3 (signed) → 0.65 in the [0, 1], 0.5-neutral contract
+            assert abs(throttle - 0.65) < 0.05
         finally:
             pb.unlink()
             sb.unlink()
@@ -489,28 +490,31 @@ class TestMappingHelpers:
         assert bev.shape == (2, 2)
         np.testing.assert_array_equal(bev, [[1.0, 3.0], [4.0, 6.0]])
 
-    def test_order_boundary_small(self):
-        from workers.mapping_worker import _order_boundary
-        pts = np.array([[1, 0], [0, 1], [-1, 0], [0, -1]], dtype=np.float32)
-        ordered = _order_boundary(pts)
-        assert ordered.shape == (4, 2)
-
-    def test_order_boundary_degenerate(self):
-        from workers.mapping_worker import _order_boundary
-        pts = np.array([[1, 0]], dtype=np.float32)
-        assert _order_boundary(pts).shape == (1, 2)
-
-    def test_extract_track_boundaries(self):
-        from workers.mapping_worker import extract_track_boundaries
-        theta = np.linspace(0, 2 * np.pi, 200, endpoint=False)
+    @staticmethod
+    def _ccw_lap(n: int = 100):
+        theta = np.linspace(0, 2 * np.pi, n, endpoint=False)
         outer = np.column_stack([10 * np.cos(theta), 10 * np.sin(theta)]).astype(np.float32)
         inner = np.column_stack([5 * np.cos(theta), 5 * np.sin(theta)]).astype(np.float32)
-        wall_pts = np.vstack([outer, inner])
-        traj = np.column_stack([7.5 * np.cos(theta[:50]), 7.5 * np.sin(theta[:50])]).astype(np.float32)
+        # Centre-line trajectory, heading = tangent of a counter-clockwise lap
+        traj = np.column_stack([
+            7.5 * np.cos(theta), 7.5 * np.sin(theta), theta + np.pi / 2,
+        ]).astype(np.float32)
+        return outer, inner, traj
 
-        out_line, in_line = extract_track_boundaries(wall_pts, traj, alpha=25.0)
-        assert len(out_line) > 0
-        assert len(in_line) > 0
+    def test_split_walls_left_right(self):
+        from workers.mapping_worker import split_walls_by_trajectory
+        outer, inner, traj = self._ccw_lap()
+        left, right = split_walls_by_trajectory(np.vstack([outer, inner]), traj)
+        # Counter-clockwise: inner wall on the left, outer on the right
+        np.testing.assert_allclose(np.linalg.norm(left, axis=1), 5.0, atol=1e-4)
+        np.testing.assert_allclose(np.linalg.norm(right, axis=1), 10.0, atol=1e-4)
+
+    def test_split_walls_ordered_by_arc_length(self):
+        from workers.mapping_worker import split_walls_by_trajectory
+        outer, inner, traj = self._ccw_lap()
+        _, right = split_walls_by_trajectory(np.vstack([outer, inner]), traj)
+        angles = np.unwrap(np.arctan2(right[:, 1], right[:, 0]))
+        assert np.all(np.diff(angles) >= -1e-6)  # monotonic along the lap
 
 
 #
@@ -597,7 +601,7 @@ class TestOAKDIntegration:
                 slam.step()
                 result = pb.read_latest()
                 if result is not None:
-                    h, pose, _ = result
+                    h, pose, _, _ = result
                     if h.seq_no > pose_count:
                         pose_count = h.seq_no
                 time.sleep(0.01)

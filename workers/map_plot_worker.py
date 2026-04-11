@@ -209,7 +209,7 @@ class MapPlotWorker(BaseWorker):
         # --- Read pose ---
         pose_result = self._pose_buf.read_latest()
         if pose_result is not None:
-            pose_header, pose, _ = pose_result
+            pose_header, pose, _, _ = pose_result
             if pose_header.seq_no > self._last_pose_seq:
                 pos = np.array([pose[0, 3], pose[2, 3]], dtype=np.float32)
                 self._traj_pts.append(pos)

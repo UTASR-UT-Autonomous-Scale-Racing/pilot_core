@@ -252,7 +252,7 @@ class TestFullSyntheticPipeline:
 
             result = pb.read_latest()
             assert result is not None
-            _, pose, _ = result
+            _, pose, _, _ = result
             np.testing.assert_allclose(pose, np.eye(4, dtype=np.float32), atol=1e-7)
         finally:
             fb.unlink()

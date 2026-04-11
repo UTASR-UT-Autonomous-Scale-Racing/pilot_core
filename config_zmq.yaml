@@ -1,0 +1,150 @@
+# Configuration for ZMQ simulator mode
+# Use this config when running with Unity simulator via autodrive_bridge
+
+# ======================================================================
+# ZMQ Communication Settings
+# ======================================================================
+use_zmq: true
+zmq_host: "localhost"           # or "autodrive_bridge" if in separate container
+zmq_sensor_port: 5555           # Subscribe to sensor data from simulator
+zmq_control_port: 5556          # Publish control commands to simulator
+zmq_telemetry_port: 5557        # Publish telemetry/visualization data
+
+# Use ground truth poses from simulator (bypasses SLAM)
+use_zmq_pose: true               # Use simulator ground truth pose; LIDAR projection builds point cloud
+
+# ======================================================================
+# Hardware Settings (disabled in ZMQ mode)
+# ======================================================================
+i2c_address: null               # No I2C hardware
+i2c_bus: null
+use_oakd_imu: false
+synthetic: false                # Not needed - using ZMQ
+
+# ======================================================================
+# Camera & Processing Settings
+# ======================================================================
+resolution: [360, 640]          # Must match Unity camera resolution
+fps: 30                         # Target FPS
+device: "cuda:0"                # or "cpu" if no GPU
+
+# Depth camera far clip in metres — must match Unity DepthCamera.cs farClipPlane.
+# DepthCamera.cs line 48: this.depthCamera.farClipPlane = 15.0f
+# Shader outputs linear depth in [0,1] normalised to [near=0.05m, far=15.0m].
+depth_max_meters: 15.0
+
+# ======================================================================
+# Model Configurations
+# ======================================================================
+segmentation_config_path: "pilot_vision/models/deeplab/config.yaml"
+control_config_path: "pilot_controller/models/default/config.yaml"
+
+# Control mode: "neural" or "pid" or "ftg"
+control_mode: "pid"
+
+# ======================================================================
+# Camera Intrinsics (used by DepthProjectionWorker when use_zmq_pose: true)
+# Matches simulator_orbslam_settings.yaml
+# ======================================================================
+camera:
+  fx: 397.5
+  fy: 397.5
+  cx: 320.0
+  cy: 180.0
+  depth_min: 0.1      # metres — discard very close hits (noise)
+
+# ======================================================================
+# LIDAR Settings (used by LidarProjectionWorker when use_zmq_pose: true)
+# Hokuyo UST-10LX: 1080 rays, ±135°, 0.06–10m range
+# Mount offset: [x=0.2733, y=0.0, z=0.096] in vehicle frame
+# ======================================================================
+lidar:
+  range_min: 0.1        # metres — discard very close returns (vehicle body)
+  range_max: 9.5        # metres — discard max-range (no-return) values
+  voxel_size: 0.10      # metres — deduplication cell size
+  move_threshold: 0.05  # metres — minimum movement before projecting a new scan
+
+# ======================================================================
+# SLAM & Mapping (optional in ZMQ mode)
+# ======================================================================
+enable_slam: true             # With use_zmq_pose: true, uses LIDAR projection instead of SLAM
+use_saved_map: false          # Skip mapping, load pre-saved boundaries from saved_map_path
+saved_map_path: "rl/boundaries_easy"  # Path containing outer_line.npy / inner_line.npy
+
+slam:
+  vocabulary: "ORB_SLAM3/Vocabulary/ORBvoc.txt"
+  settings: "simulator_orbslam_settings.yaml"
+
+mapping:
+  alpha_shape: 5.0
+  boundary_min_points: 50
+  bev_axes: [0, 1]      # simulator: X=col0, Y=col1 are horizontal; Z=col2 is height
+  forward_axis: 0       # simulator vehicle frame: X = forward (SLAM camera: 2)
+                         # (SLAM camera convention uses [0, 2]: X,Z horizontal, Y down)
+  boundary_save_path: "rl/boundaries_easy"   # set to null to disable saving
+
+pid:
+  kp_steer: 2.0
+  ki_steer: 0.0
+  kd_steer: 0.1
+  target_throttle: 0.05
+  sector_deg: 60.0        # half-angle of forward sector used for wall detection
+  slow_corner_factor: 0.6 # throttle multiplier at full steer
+
+ftg:
+  num_beams: 360
+  fov_deg: 270.0
+  max_range: 5.0
+  bubble_radius_deg: 30.0
+  smooth_window: 5
+  target_throttle: 0.05
+  throttle_corner_scale: 0.5
+  noise_std: 0.05
+  gap_strategy: "deepest"   # "deepest" or "centroid"
+
+# ======================================================================
+# Shared Buffer Configuration
+# ======================================================================
+buffers:
+  frame:
+    slots: 8
+  imu:
+    slots: 32
+  segmentation:
+    slots: 4
+  pose:
+    slots: 8
+  control:
+    slots: 8
+  pointcloud:
+    slots: 4
+  boundary:
+    slots: 2
+  lidar:
+    slots: 16
+
+# ======================================================================
+# ZMQ Telemetry Publishing (optional)
+# ======================================================================
+zmq_publish:
+  enabled: true                 # Enable telemetry back to simulator
+  control: true                # Echo control commands
+  pose: true                    # Publish trajectory
+  segmentation: true             # Publish segmentation masks
+  boundary: true               # Publish track boundaries (only if SLAM enabled)
+  pointcloud: true             # Publish SLAM point cloud (only if SLAM enabled)
+
+# ======================================================================
+# Recording (optional)
+# ======================================================================
+recording: false
+recording_path: "/tmp/pilot_recordings"
+recording_config:
+  sample_k: 1                   # Record every frame
+  top_n: 1000                   # Max 1000 samples per buffer
+
+# ======================================================================
+# Web Publishing (disabled in ZMQ mode)
+# ======================================================================
+web_publish:
+  enabled: false

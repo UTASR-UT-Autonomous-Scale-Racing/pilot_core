@@ -20,6 +20,7 @@ class DTypeTag(IntEnum):
     POSE = 4           # 4x4 pose + map points
     CONTROL = 5        # Normalized steering + throttle
     LIDAR = 6          # 1080-float32 range scan
+    STATE = 7          # Estimated vehicle state (BEV)
 
 
 # --- Header layout ---

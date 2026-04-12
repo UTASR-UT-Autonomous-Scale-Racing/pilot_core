@@ -15,6 +15,7 @@ from .control_buffer import ControlBuffer
 from .pointcloud_buffer import PointCloudBuffer
 from .track_boundary_buffer import TrackBoundaryBuffer
 from .lidar_buffer import LidarBuffer
+from .state_buffer import StateBuffer
 
 __all__ = [
     "SharedRingBuffer",
@@ -30,4 +31,5 @@ __all__ = [
     "PointCloudBuffer",
     "TrackBoundaryBuffer",
     "LidarBuffer",
+    "StateBuffer",
 ]

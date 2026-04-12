@@ -75,7 +75,7 @@ class SyntheticFrameGenerator:
         Returns
         -------
         rgb : np.ndarray
-            Shape ``(H, W, 3)`` dtype ``uint8`` BGR frame.
+            Shape ``(H, W, 3)`` dtype ``uint8`` RGB frame.
         depth : np.ndarray
             Shape ``(H, W)`` dtype ``float32`` depth in metres.
         """

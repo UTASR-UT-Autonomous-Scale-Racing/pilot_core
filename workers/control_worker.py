@@ -64,6 +64,11 @@ def signed_to_unit(steering: float, throttle: float) -> tuple[float, float]:
     return steer_unit, throttle_unit
 
 
+def unit_to_signed(steering: float, throttle: float) -> tuple[float, float]:
+    """Inverse of :func:`signed_to_unit`."""
+    return 1.0 - 2.0 * steering, 2.0 * throttle - 1.0
+
+
 class ControlWorker(BaseWorker):
     """Worker process for control-policy inference (neural or PID).
 
@@ -114,14 +119,22 @@ class ControlWorker(BaseWorker):
         self._mode = self.config.get("mode", "neural")
         self._ctrl_buf = self.config["output_buffer"]
 
-        if self._mode == "pid":
-            self._setup_pid()
-        elif self._mode == "ftg":
-            self._setup_ftg()
-        elif self._mode == "lidar_pid":
-            self._setup_lidar_pid()
-        else:
-            self._setup_neural()
+        modes = self._modes()
+        if self._mode not in modes:
+            raise ValueError(f"Unknown control mode {self._mode!r}; options: {sorted(modes)}")
+        setup, self._step_fn = modes[self._mode]
+        setup()
+
+    def _modes(self) -> Dict[str, tuple]:
+        """control_mode → (setup, step)."""
+        return {
+            "neural": (self._setup_neural, self._step_neural),
+            "pid": (self._setup_pid, self._step_pid),
+            "ftg": (self._setup_ftg, self._step_pid),
+            "lidar_pid": (self._setup_lidar_pid, self._step_lidar_pid),
+            "pure_pursuit": (self._setup_track, self._step_track),
+            "stanley": (self._setup_track, self._step_track),
+        }
 
     def _setup_neural(self) -> None:
         bufs: Dict[str, Any] = self.config["input_buffers"]
@@ -203,12 +216,74 @@ class ControlWorker(BaseWorker):
         self.logger.info("ControlWorker ready — LIDAR wall-centering PID mode")
 
     def step(self) -> None:
-        if self._mode in ("pid", "ftg"):
-            self._step_pid()
-        elif self._mode == "lidar_pid":
-            self._step_lidar_pid()
-        else:
-            self._step_neural()
+        self._step_fn()
+
+    # --- Track-following modes (pure_pursuit, stanley) ---
+
+    def _setup_track(self) -> None:
+        from control.types import VehicleParams
+
+        self._state_buf = self.config["state_buffer"]
+        self._boundary_buf = self.config["boundary_buffer"]
+        self._mapping_done_event = self.config.get("mapping_done_event")
+        self._vehicle = VehicleParams.load(self.config.get("vehicle_params", "vehicle_params.yaml"))
+        self._track_cfg = self.config.get("track_config", {})
+        self._follower = None
+        self._last_state_seq = 0
+        self.logger.info(
+            f"ControlWorker ready — {self._mode} mode "
+            f"(wheelbase={self._vehicle.wheelbase} m, max_steer={self._vehicle.max_steering_angle} rad)"
+        )
+
+    def _build_follower(self, outer: np.ndarray, inner: np.ndarray, state) -> None:
+        from control.controllers import build_track_follower
+        from control.track import TrackModel
+
+        cfg = self._track_cfg
+        track = TrackModel(outer, inner, spacing=cfg.get("spacing", 0.05))
+        reversed_ = track.align_direction(state.x, state.y, state.yaw)
+        self._follower = build_track_follower(
+            self._mode, track, self._vehicle, cfg.get(self._mode, {}), cfg.get("speed", {})
+        )
+        self.logger.info(
+            f"Track model built: length={track.length:.1f} m, "
+            f"min half-width={track.half_width.min():.2f} m"
+            + (" (direction reversed to match heading)" if reversed_ else "")
+        )
+
+    def _step_track(self) -> None:
+        if self._mapping_done_event is not None and not self._mapping_done_event.is_set():
+            time.sleep(0.1)
+            return
+
+        result = self._state_buf.read_latest()
+        if result is None:
+            time.sleep(0.005)
+            return
+        header, state = result
+        if header.seq_no <= self._last_state_seq:
+            time.sleep(0.002)
+            return
+        self._last_state_seq = header.seq_no
+
+        if self._follower is None:
+            bnd = self._boundary_buf.read_latest()
+            if bnd is None:
+                time.sleep(0.05)
+                return
+            _, outer, inner = bnd
+            self._build_follower(outer, inner, state)
+
+        cmd = self._follower.step(state)
+        steer_unit, throttle_unit = signed_to_unit(cmd.steering, cmd.throttle)
+        self._ctrl_buf.write(steer_unit, throttle_unit)
+
+        if self._last_state_seq % 50 == 0:
+            pr = self._follower.last_projection
+            self.logger.debug(
+                f"[{self._mode}] s={pr.s:.1f} e={pr.lateral_error:+.3f} v={state.v:.2f} "
+                f"steer={cmd.steering:+.3f} throttle={cmd.throttle:+.3f}"
+            )
 
     # --- LIDAR wall-centering PID mode ---
 

@@ -22,6 +22,7 @@ import time
 from datetime import timedelta
 from typing import Any
 
+import cv2
 import numpy as np
 
 from .base_worker import BaseWorker
@@ -213,7 +214,8 @@ class CameraWorker(BaseWorker):
         rgb_frame = msg_group["rgb"]
         depth_frame = msg_group["depth"]
 
-        rgb = rgb_frame.getCvFrame().astype(np.uint8)
+        # DepthAI delivers BGR; FrameBuffer carries RGB (vision models expect RGB)
+        rgb = cv2.cvtColor(rgb_frame.getCvFrame(), cv2.COLOR_BGR2RGB)
         depth = depth_frame.getFrame().astype(np.float32)
         depth /= 1000.0  # mm → metres
 

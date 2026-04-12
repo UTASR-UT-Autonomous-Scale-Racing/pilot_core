@@ -5,7 +5,7 @@ factory calibration, matching exactly what CameraWorker publishes:
 
     * RGB (CAM_A) intrinsics scaled to the configured output resolution
     * undistorted RGB (CameraWorker requests enableUndistortion=True)
-    * BGR colour order (DepthAI getCvFrame())
+    * RGB colour order (CameraWorker converts from DepthAI's BGR)
     * depth in metres (CameraWorker divides by 1000) → DepthMapFactor 1.0
 
 Calibration is per unit — rerun this whenever the camera is swapped.
@@ -52,8 +52,8 @@ Camera.width: {width}
 Camera.height: {height}
 Camera.fps: {fps}
 
-# 0: BGR (DepthAI getCvFrame), 1: RGB
-Camera.RGB: 0
+# 0: BGR, 1: RGB (CameraWorker publishes RGB)
+Camera.RGB: 1
 
 #--------------------------------------------------------------------------------------------
 # Depth (CameraWorker publishes metres)

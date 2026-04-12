@@ -24,7 +24,7 @@ use_tensorrt: false
 
 # --- Control ---
 control_config_path: pilot_controller/models/default/config.yaml
-control_mode: "neural"        # "pid" requires --enable-slam
+control_mode: "neural"        # pure_pursuit | stanley | pid | ftg need --enable-slam + a mapped track
 
 pid:
   kp_steer: 1.0
@@ -32,6 +32,46 @@ pid:
   kd_steer: 0.1
   target_throttle: 0.3
   noise_std: 0.0
+
+# --- Track following (control_mode: pure_pursuit | stanley) ---
+vehicle_params: vehicle_params.yaml
+track_control:
+  spacing: 0.05                 # m, centre-line sample spacing
+  pure_pursuit:
+    lookahead_min: 0.6          # m
+    lookahead_max: 2.0          # m
+    k_v: 0.5                    # s, look-ahead growth with speed
+  stanley:
+    k: 1.0
+    k_soft: 1.0                 # m/s
+  speed:
+    v_max: 1.3                  # m/s — keep below safety.speed_cap
+    lat_accel_fraction: 0.6     # of friction_coeff * g in corners
+    accel: 1.5                  # m/s²
+    decel: 1.0                  # m/s² (coasting + limited backward input)
+    longitudinal:
+      speed_per_throttle: 3.0   # m/s per unit throttle — CALIBRATE on the car
+      kp: 0.25
+      ki: 0.15
+      max_backward: 0.3         # most backward input used to slow down
+      min_speed_for_backward: 0.3
+
+# --- State estimator (pose EKF) ---
+estimator:
+  pos_std: 0.03                 # m
+  yaw_std: 0.03                 # rad
+  stale_after: 0.5              # s without a pose → stop driving
+
+# --- Safety supervisor (ActuatorWorker) ---
+safety:
+  command_timeout: 0.150        # s — no fresh command → throttle neutral
+  speed_cap: 1.5                # m/s — forward throttle tapers to 0 approaching this
+  cap_margin: 0.2               # m/s taper band below the cap
+  # Forward throttle is also bounded by speed_cap / speed_per_throttle
+  # (track_control.speed.longitudinal.speed_per_throttle) — calibrate it.
+  max_throttle_no_speed: 0.4    # forward cap when there is no speed estimate
+  steering_rate: 7.6            # units/s (signed range [-1, 1])
+  throttle_rate: 4.0            # units/s
 
 # --- SLAM ---
 enable_slam: false

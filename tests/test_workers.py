@@ -481,11 +481,13 @@ class TestSLAMWorker:
             cam._logger.info = print
             cam.setup()
 
-            for _ in range(100):
+            # Skip ~1 s of camera warm-up (sparse stereo depth in the first frames)
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
                 cam.step()
-                if fb.read_latest() is not None:
+                latest = fb.read_latest()
+                if latest is not None and latest[0].seq_no >= 30:
                     break
-                time.sleep(0.05)
             cam.teardown()
 
             # Run SLAM on captured frame

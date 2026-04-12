@@ -40,6 +40,7 @@ from shared_buffer import (
     PointCloudBuffer,
     PoseBuffer,
     SegmentationBuffer,
+    StateBuffer,
     TrackBoundaryBuffer,
 )
 
@@ -54,6 +55,7 @@ from workers import (
     LidarProjectionWorker,
     MappingWorker,
     SLAMWorker,
+    StateWorker,
     VisionWorker,
     WebPublishWorker,
     ZMQPublishWorker,
@@ -110,6 +112,8 @@ _workers: List[BaseWorker] = []
 _processes: List[mp.Process] = []
 _buffers: List[Any] = []
 _shutting_down = False
+_armed_event = None
+_keyboard = None
 MAX_RESTARTS = 3
 
 
@@ -121,6 +125,12 @@ def _shutdown(signum=None, frame=None) -> None:
     _shutting_down = True
 
     logging.info("Shutdown signal received — stopping workers …")
+
+    # Disarm first so the actuator outputs neutral while everything stops
+    if _armed_event is not None:
+        _armed_event.clear()
+    if _keyboard is not None:
+        _keyboard.close()
 
     # Signal all workers to stop
     for w in _workers:
@@ -143,6 +153,62 @@ def _shutdown(signum=None, frame=None) -> None:
 
     logging.info("All workers stopped. Exiting.")
     sys.exit(0)
+
+
+# --------------------------------------------------------------------------
+# Operator keyboard
+# --------------------------------------------------------------------------
+
+class KeyboardControl:
+    """Non-blocking single-key input from the terminal.
+
+    On a TTY the terminal is put in cbreak mode so keys act immediately
+    (restored by :meth:`close`).  Otherwise (piped stdin) each line is one
+    command.  End-of-input is ignored — the car simply stays as it is.
+    """
+
+    def __init__(self) -> None:
+        self._fd = None
+        self._old = None
+        self._eof = False
+        try:
+            if sys.stdin.isatty():
+                import termios
+                import tty
+
+                self._fd = sys.stdin.fileno()
+                self._old = termios.tcgetattr(self._fd)
+                tty.setcbreak(self._fd)
+        except Exception:
+            self._fd = None
+
+    def poll(self) -> List[str]:
+        import select
+
+        keys: List[str] = []
+        if self._eof:
+            return keys
+        while select.select([sys.stdin], [], [], 0)[0]:
+            if self._fd is not None:
+                ch = os.read(self._fd, 1).decode(errors="ignore")
+                if ch:
+                    keys.append(ch.lower())
+                    continue
+            else:
+                line = sys.stdin.readline()
+                if line:
+                    keys.append(line.strip().lower()[:1] or " ")
+                    continue
+            self._eof = True
+            break
+        return keys
+
+    def close(self) -> None:
+        if self._fd is not None and self._old is not None:
+            import termios
+
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
+            self._fd = None
 
 
 # --------------------------------------------------------------------------
@@ -261,6 +327,17 @@ def main() -> None:
         )
         _buffers.append(lidar_buf)
 
+    # Vehicle state estimate — whenever there is a pose source
+    has_pose_source = enable_slam or use_zmq_pose
+    state_buf = None
+    if has_pose_source:
+        state_buf = StateBuffer(
+            slots=buf_cfg.get("state", {}).get("slots", 8),
+            name="state_buf",
+            create=True,
+        )
+        _buffers.append(state_buf)
+
     logger.info("Shared buffers created")
 
     # --- 2. Create multiprocessing events for pipeline coordination ---
@@ -374,7 +451,6 @@ def main() -> None:
 
     # Control worker — mode depends on config
     # PID mode can use either SLAM or ZMQ ground truth pose
-    has_pose_source = enable_slam or use_zmq_pose
     if control_mode == "lidar_pid":
         _workers.append(
             ControlWorker(
@@ -397,6 +473,19 @@ def main() -> None:
                 pid_config=pid_cfg,
                 bev_axes=mapping_cfg.get("bev_axes", [0, 2]),
                 forward_axis=mapping_cfg.get("forward_axis", 2),
+            )
+        )
+    elif control_mode in ("pure_pursuit", "stanley") and has_pose_source:
+        _workers.append(
+            ControlWorker(
+                name="control",
+                mode=control_mode,
+                output_buffer=ctrl_buf,
+                state_buffer=state_buf,
+                boundary_buffer=boundary_buf,
+                mapping_done_event=mapping_done_event,
+                track_config=config.get("track_control", {}),
+                vehicle_params=config.get("vehicle_params", "vehicle_params.yaml"),
             )
         )
     elif control_mode == "ftg" and has_pose_source:
@@ -429,7 +518,31 @@ def main() -> None:
             )
         )
 
-    # Actuator worker (hardware I2C and/or ZMQ control publisher)
+    if has_pose_source:
+        _workers.append(
+            StateWorker(
+                name="state",
+                pose_buffer=pose_buf,
+                output_buffer=state_buf,
+                bev_axes=mapping_cfg.get("bev_axes", [0, 2]),
+                forward_axis=mapping_cfg.get("forward_axis", 2),
+                use_pose_speed=use_zmq_pose,
+                estimator=config.get("estimator", {}),
+            )
+        )
+
+    # Safety supervisor config.  The steady-state throttle bound uses the same
+    # drivetrain gain as the speed controller unless set explicitly.
+    safety_cfg = dict(config.get("safety", {}))
+    safety_cfg.setdefault(
+        "speed_per_throttle",
+        config.get("track_control", {}).get("speed", {}).get("longitudinal", {}).get("speed_per_throttle", 3.0),
+    )
+
+    # Actuator worker (hardware I2C and/or ZMQ control publisher).
+    # Outputs stay neutral until the operator arms from the terminal.
+    global _armed_event
+    _armed_event = mp.Event()
     _workers.append(
         ActuatorWorker(
             name="actuator",
@@ -438,6 +551,9 @@ def main() -> None:
             i2c_bus=i2c_bus,
             zmq_enabled=use_zmq,
             zmq_port=zmq_control_port,
+            armed_event=_armed_event,
+            state_buffer=state_buf,
+            safety=safety_cfg,
         )
     )
 
@@ -581,54 +697,55 @@ def main() -> None:
         _processes.append(p)
         logger.info(f"Spawned worker: {w.name} (pid={p.pid})")
 
-    logger.info(f"All {len(_workers)} workers running.  Press Ctrl+C to stop.")
-    if enable_slam:
-        logger.info(
-            "SLAM pipeline enabled — mapping until loop closure, "
-            "then PID control"
-        )
+    logger.info(f"All {len(_workers)} workers running.")
 
-    # --- 7. Monitor loop ---
-    # Inform user of manual loop-closure trigger when SLAM is enabled
-    if enable_slam:
-        logger.info("SLAM mapping active. Press 'L' + ENTER to manually signal loop closure if SLAM doesn't auto-detect it.")
+    # --- 7. Operator keys + monitor loop ---
+    global _keyboard
+    _keyboard = KeyboardControl()
+    logger.info("=" * 60)
+    logger.info("Keys:  [a] ARM   [SPACE] DISARM (stop)   [l] loop closure   [q] quit")
+    logger.info("Outputs are neutral until armed.")
+    logger.info("=" * 60)
 
     try:
-        _terminal_gate_done = False
+        _mapping_announced = False
+        _next_health_check = 0.0
         while not _shutting_down:
-            # Check if mapping is done → prompt for terminal confirmation
+            for key in _keyboard.poll():
+                if key == "a":
+                    _armed_event.set()
+                    logger.warning("ARMED by operator")
+                elif key == "l" and enable_slam and loop_event is not None:
+                    if not loop_event.is_set():
+                        loop_event.set()
+                        logger.info("Manual loop closure — extracting boundaries …")
+                elif key == "q":
+                    logger.info("Quit requested")
+                    _shutdown()
+                else:
+                    # Any other key (SPACE by convention) disarms immediately
+                    if _armed_event.is_set():
+                        logger.warning("DISARMED by operator")
+                    _armed_event.clear()
+
+            # Mapping finished → switch SLAM to localization-only mode
             if (
                 enable_slam
                 and mapping_done_event is not None
                 and mapping_done_event.is_set()
-                and not _terminal_gate_done
+                and not _mapping_announced
             ):
-                logger.info("=" * 60)
-                logger.info("Track mapping complete!")
-                logger.info("=" * 60)
-                try:
-                    input("Press ENTER to start PID control …")
-                except EOFError:
-                    pass
-                # Switch SLAM to localization-only mode
                 if localize_event is not None:
                     localize_event.set()
-                _terminal_gate_done = True
-                logger.info("PID control activated — vehicle driving")
+                _mapping_announced = True
+                logger.info("=" * 60)
+                logger.info("Track mapping complete — press [a] to arm and drive")
+                logger.info("=" * 60)
 
-            # Manual loop closure trigger: type 'L' + ENTER in the terminal
-            if (
-                enable_slam
-                and loop_event is not None
-                and not loop_event.is_set()
-                and not _terminal_gate_done
-            ):
-                import select, sys as _sys
-                if select.select([_sys.stdin], [], [], 0)[0]:
-                    line = _sys.stdin.readline().strip().upper()
-                    if line == 'L':
-                        loop_event.set()
-                        logger.info("Manual loop closure triggered — extracting boundaries …")
+            if time.time() < _next_health_check:
+                time.sleep(0.05)
+                continue
+            _next_health_check = time.time() + 1.0
 
             for i, (w, p) in enumerate(zip(_workers, _processes)):
                 if not p.is_alive() and not _shutting_down:
@@ -653,7 +770,6 @@ def main() -> None:
                     logger.info(
                         f"Restarted worker: {w.name} (new pid={new_p.pid})"
                     )
-            time.sleep(1.0)
     except KeyboardInterrupt:
         pass
     finally:

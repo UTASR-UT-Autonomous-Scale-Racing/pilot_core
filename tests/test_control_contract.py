@@ -189,16 +189,20 @@ class TestActuatorClamp:
     def test_out_of_range_is_clamped(self, steer, thr, expected):
         from workers import ActuatorWorker
 
+        w = ActuatorWorker(name="actuator", input_buffer=None)
+        w._logger = MagicMock()
+        assert w._sanitize(steer, thr) == pytest.approx(expected)
+
+    def test_out_of_range_command_does_not_crash_loop(self):
+        from workers import ActuatorWorker
+
         ctrl = ControlBuffer(slots=4, name=f"cc_act_{_uid()}", create=True)
         try:
             w = ActuatorWorker(name="actuator", input_buffer=ctrl, i2c_address=None, i2c_bus=None)
             w._logger = MagicMock()
             w.setup()
-            w._controller = MagicMock(wraps=w._controller)
-            ctrl.write(steer, thr)
+            ctrl.write(math.nan, 7.0)
             w.step()  # must not raise
-            args = w._controller.get_normalized_action_output.call_args[0]
-            assert args == pytest.approx(expected)
         finally:
             ctrl.unlink()
 

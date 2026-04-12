@@ -13,7 +13,10 @@ import math
 import time
 from typing import Any
 
+from control.types import Command
+
 from .base_worker import BaseWorker
+from .control_worker import signed_to_unit, unit_to_signed
 from shared_buffer import ControlBuffer
 
 try:
@@ -42,6 +45,20 @@ class ActuatorWorker(BaseWorker):
         Enable ZMQ publishing to simulator (default: False)
     zmq_port : int
         Port to bind ZMQ control publisher (default: 5556)
+    armed_event : mp.Event | None
+        Output is neutral unless this event is set.  ``None`` = always armed
+        (tests, RL training); ``start.py`` always supplies one.
+    state_buffer : StateBuffer | None
+        Vehicle state for the speed cap (fallback throttle cap without it).
+    safety : dict
+        :class:`control.SafetyConfig` overrides.
+    rate_hz : float
+        Output loop rate (default 50).
+
+    Every tick the newest command is passed through
+    :class:`control.SafetySupervisor` (arming → watchdog → speed cap → slew
+    limits) and the result is sent, so a stalled controller always brings
+    the car back to neutral.
     """
 
     def __init__(self, name: str = "actuator", **kwargs: Any) -> None:
@@ -58,6 +75,15 @@ class ActuatorWorker(BaseWorker):
         self._zmq_pub = None
         # Reset signal — set this mp.Event to send reset:true on the next ZMQ publish
         self._reset_event = None
+        # Safety / output loop
+        self._supervisor = None
+        self._armed_event = None
+        self._state_buf = None
+        self._period = 0.02
+        self._next_tick = 0.0
+        self._last_pwm = None
+        self._last_i2c_write = 0.0
+        self._last_status = None
 
     def setup(self) -> None:
         self._ctrl_buf = self.config["input_buffer"]
@@ -108,48 +134,89 @@ class ActuatorWorker(BaseWorker):
         from pilot_controller.control_output import Controller
         self._controller = Controller()
 
+        from control.safety import SafetyConfig, SafetySupervisor
+        self._supervisor = SafetySupervisor(SafetyConfig(**self.config.get("safety", {})))
+        self._armed_event = self.config.get("armed_event")
+        self._state_buf = self.config.get("state_buffer")
+        self._period = 1.0 / float(self.config.get("rate_hz", 50.0))
+        cfg = self._supervisor.cfg
+        self.logger.info(
+            f"Safety: timeout={cfg.command_timeout * 1000:.0f} ms, speed cap={cfg.speed_cap} m/s, "
+            f"arming={'terminal' if self._armed_event is not None else 'always armed'}"
+        )
+
     def step(self) -> None:
+        now = time.time()
+        if now < self._next_tick:
+            time.sleep(min(self._next_tick - now, 0.005))
+            return
+        self._next_tick = now + self._period
+
+        # Newest command (ControlBuffer [0, 1] → signed)
+        command = command_time = None
         result = self._ctrl_buf.read_latest()
-        if result is None:
-            time.sleep(0.005)
-            return
+        if result is not None:
+            header, steering_norm, throttle_norm = result
+            steering_norm, throttle_norm = self._sanitize(steering_norm, throttle_norm)
+            s_signed, t_signed = unit_to_signed(steering_norm, throttle_norm)
+            command, command_time = Command(s_signed, t_signed), header.produced_ts
 
-        header, steering_norm, throttle_norm = result
+        armed = self._armed_event.is_set() if self._armed_event is not None else True
+        out = self._supervisor.step(now, command, command_time, armed, speed=self._speed(now))
+        self._log_status()
 
-        # Skip if we already sent this command
-        if header.seq_no <= self._last_seq:
-            time.sleep(0.005)
-            return
-        self._last_seq = header.seq_no
+        steering_norm, throttle_norm = signed_to_unit(out.steering, out.throttle)
 
-        # Last line of defence: an out-of-range command must never crash the
-        # actuator loop (the car would hold its previous PWM).  Clamp and warn.
-        if not (0.0 <= steering_norm <= 1.0 and 0.0 <= throttle_norm <= 1.0):
-            self.logger.warning(
-                f"Control command out of [0, 1] range "
-                f"(steering={steering_norm:.3f}, throttle={throttle_norm:.3f}) — clamping"
-            )
-            # NaN → neutral (0.5) on both channels
-            steering_norm = min(max(steering_norm, 0.0), 1.0) if math.isfinite(steering_norm) else 0.5
-            throttle_norm = min(max(throttle_norm, 0.0), 1.0) if math.isfinite(throttle_norm) else 0.5
-
-        # Send to ZMQ (simulator): [0, 1] → [-1, 1], 0.5 = neutral.
-        # AutoDRIVE steering is +1 = left (ROS); ControlBuffer is 1 = right.
+        # Send to ZMQ (simulator): AutoDRIVE uses signed [-1, 1], steering +1 = left
         if self._zmq_enabled:
-            steering_sim = 1.0 - (steering_norm * 2.0)
-            throttle_sim = (throttle_norm * 2.0) - 1.0
             reset = False
             if self._reset_event is not None and self._reset_event.is_set():
                 reset = True
                 self._reset_event.clear()
-            self._publish_zmq(steering_sim, throttle_sim, reset)
+            self._publish_zmq(out.steering, out.throttle, reset)
 
-        # Map normalised → PWM, send to I2C (hardware)
-        pwm_steering, pwm_throttle = self._controller.get_normalized_action_output(
-            steering_norm, throttle_norm
+        # Map normalised → PWM, send to I2C (hardware) on change + keep-alive
+        pwm = tuple(self._controller.get_normalized_action_output(steering_norm, throttle_norm))
+        if not self._dummy and (pwm != self._last_pwm or now - self._last_i2c_write > 0.1):
+            self._write_i2c(*pwm)
+            self._last_i2c_write = now
+        self._last_pwm = pwm
+
+    def _sanitize(self, steering_norm: float, throttle_norm: float) -> tuple[float, float]:
+        """Clamp out-of-range / NaN commands instead of crashing the loop."""
+        if 0.0 <= steering_norm <= 1.0 and 0.0 <= throttle_norm <= 1.0:
+            return steering_norm, throttle_norm
+        self.logger.warning(
+            f"Control command out of [0, 1] range "
+            f"(steering={steering_norm:.3f}, throttle={throttle_norm:.3f}) — clamping"
         )
-        if not self._dummy:
-            self._write_i2c(pwm_steering, pwm_throttle)
+        # NaN → neutral (0.5) on both channels
+        steering_norm = min(max(steering_norm, 0.0), 1.0) if math.isfinite(steering_norm) else 0.5
+        throttle_norm = min(max(throttle_norm, 0.0), 1.0) if math.isfinite(throttle_norm) else 0.5
+        return steering_norm, throttle_norm
+
+    def _speed(self, now: float):
+        if self._state_buf is None:
+            return None
+        result = self._state_buf.read_latest()
+        if result is None:
+            return None
+        _, state = result
+        return state.v if now - state.t < 0.3 else None
+
+    def _log_status(self) -> None:
+        st = self._supervisor.status
+        key = (st.armed, st.watchdog_tripped)
+        if key == self._last_status:
+            return
+        if self._last_status is not None or st.armed:
+            if not st.armed:
+                self.logger.warning("DISARMED — outputs neutral")
+            elif st.watchdog_tripped:
+                self.logger.warning("Command watchdog — no fresh commands, throttle neutral")
+            else:
+                self.logger.info("ARMED — driving")
+        self._last_status = key
 
     def _write_i2c(self, steering: int, throttle: int) -> None:
         """Send PWM values to the Arduino over I2C."""

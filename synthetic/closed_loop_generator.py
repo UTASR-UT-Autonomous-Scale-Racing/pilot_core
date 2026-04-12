@@ -178,7 +178,7 @@ class ClosedLoopFrameGenerator:
         )
 
     def _make_ground_tile(self) -> np.ndarray:
-        """Create a 256×256 BGR texture tile with checkerboard + noise."""
+        """Create a 256×256 RGB texture tile with checkerboard + noise."""
         tile = np.zeros((256, 256, 3), dtype=np.uint8)
         # Checkerboard (32-pixel squares)
         for row in range(8):
@@ -221,7 +221,7 @@ class ClosedLoopFrameGenerator:
         return np.column_stack([x, np.zeros(n_dots), z]).astype(np.float32)
 
     def _make_wall_tile(self) -> np.ndarray:
-        """Create a 256×256 BGR tile for wall markers.
+        """Create a 256×256 RGB tile for wall markers.
 
         Contains coloured rectangles, arrows, and numbers at regular
         intervals to provide distinctive visual landmarks that help
@@ -497,7 +497,7 @@ class ClosedLoopFrameGenerator:
         -------
         frames : list of (rgb, depth, pose_4x4, timestamp, imu)
             Each element is a tuple of:
-            - rgb       : uint8 (H, W, 3) BGR frame
+            - rgb       : uint8 (H, W, 3) RGB frame
             - depth     : float32 (H, W) depth in metres
             - pose_4x4  : float32 (4, 4) ground-truth camera-to-world SE3
             - timestamp : float, seconds

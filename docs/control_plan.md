@@ -1,6 +1,8 @@
 # Control models: assessment and implementation plan
 
-Status: **proposal.** Done so far: P0a (signed actuation / brake-reverse), the `simulator_integration` merge, and FTG selection (`control_mode: ftg`, from that branch). Everything else is not started.
+Status: **Phases 1–3 implemented** (P0a, P0b, P1–P4, C1–C3), tested in the
+closed-loop bench and on the local camera/SLAM pipeline. Not yet run on the car.
+Remaining: C4, C5, C6, and on-car calibration (§6).
 
 ## 1. Where control stands today
 
@@ -36,28 +38,27 @@ These come first. Every controller below depends on them.
   the controllers' geometry and AutoDRIVE. `signed_to_unit()` negates steering
   into `ctrl_buf`, and the ZMQ actuator converts back. Before this, PID/FTG would
   have steered the *car* the wrong way (they only worked in the simulator).
-- **Bench check still needed:** many RC ESCs need brake → neutral → reverse
-  before reverse engages. The firmware passes PWM straight through, so verify the
-  ESC's behaviour and, if needed, add that sequence in `ActuatorWorker`.
+- Drivetrain (confirmed): input is forward or backward; neutral (untouched) coasts
+  and slows the car, and there is no separate brake.
 
-### P0b. Actuation safety layer: `ActuatorWorker`
+### P0b. Actuation safety layer: `ActuatorWorker` — **done** (`control/safety.py`)
 - **Command watchdog:** if the newest `ctrl_buf` entry is older than `command_timeout_ms` (e.g. 150 ms), send neutral throttle and hold steering. Today a stalled controller or lost SLAM tracking leaves the car on its last command.
 - **Rate / slew limits** on steering and throttle (configurable), applied after the controller.
-- **Arming:** actuator starts disarmed (neutral) and only arms on explicit operator action. Replaces the current `input()` gate in `start.py`.
+- **Arming:** actuator starts disarmed (neutral) and only arms on explicit operator action: terminal key `a`; `SPACE` disarms immediately.
 - Tests: watchdog timing, slew limiting, disarmed-by-default.
 
-### P1. Vehicle state estimator: new `StateWorker` → `state_buf`
-- EKF fusing SLAM pose (15 Hz, Twc) with OAK-D IMU (100 Hz: gyro yaw-rate, accel) → `VehicleState(t, x, z, yaw, v, yaw_rate)` at IMU rate.
+### P1. Vehicle state estimator: new `StateWorker` → `state_buf` — **done** (pose-only EKF, `control/estimator.py`)
+- Implemented as a pose-only EKF (unicycle model) published at 50 Hz. IMU fusion is a follow-up (§6): it would cut the ~150 ms speed-estimate lag, but needs the OAK-D IMU→camera extrinsics.
 - Gives controllers **speed** (currently unknown) and smooth, high-rate pose between SLAM frames; bridges short tracking losses with a bounded covariance.
 - Reuse the idea (not the code) of `pilot_controller/lap_engine.EKFLocalization`, which double-integrates world-frame acceleration and will drift.
 
-### P2. Track model: `TrackModel` (library, not a worker)
+### P2. Track model: `TrackModel` (library, not a worker) — **done** (`control/track.py`)
 - Built once from `boundary_buf`: order and resample boundaries, compute the centre-line, arc length `s`, curvature `κ(s)` and left/right widths.
 - `project(x, z) → (s, lateral_error, heading_error)` with index continuity (no global nearest-point search every step).
 - Later: minimum-curvature race line as an alternative reference path.
 - Reuse `workers/boundary_resampler.py` (merged from the sim branch).
 
-### P3. Controller interface + selection
+### P3. Controller interface + selection — **done** (`ControlWorker` mode registry, `control/controllers.py`)
 ```python
 class TrackController(Protocol):
     def reset(self) -> None: ...
@@ -65,26 +66,26 @@ class TrackController(Protocol):
 ```
 - `ControlWorker` gets a registry keyed by `control_mode` (`pid`, `ftg`, `lidar_pid`, `pure_pursuit`, `stanley`, `policy`, `neural`) instead of the current if/else chain.
 
-### P4. Closed-loop evaluation harness
+### P4. Closed-loop evaluation harness — **done** (`control/sim.py`, `tests/test_control_bench.py`, `scripts/sim_bench.py`)
 - Pure-Python kinematic bicycle simulator on synthetic tracks (`conftest.track_boundaries`, `synthetic/closed_loop_generator.py`) → `pytest` benchmarks: lap completion, lap time, cross-track RMS / max, steering jerk.
 - Every controller must pass it before car testing. Seconds per run on CPU.
 - AutoDRIVE (via the ZMQ workers) is the higher-fidelity stage. A fake ZMQ bridge with a kinematic bicycle model (F1TENTH params) already closes the loop around the unmodified pipeline. It was used to validate the merge and should become this harness.
 
 ## 3. Controllers to implement (recommended order)
 
-### C1. Pure Pursuit, the new baseline (replaces PID as the default)
+### C1. Pure Pursuit, the new baseline (replaces PID as the default) — **done**, default in `config.yaml`
 - Geometric path tracking on the `TrackModel` centre-line: look-ahead point at `L_d = clamp(k·v + L_min, L_min, L_max)`, steer `δ = atan(2·L·sin α / L_d)`, normalised by max steering angle.
 - Fixes the PID's core flaw: the reference is ahead of the car, so there is no singularity on the line.
 - Needs: P1 (speed), P2, wheelbase `L` and max steering angle from `vehicle_params.yaml`.
 - Effort: **S** (≈1–2 days incl. tests).
 
-### C2. Speed planner / longitudinal control
+### C2. Speed planner / longitudinal control — **done** (no-brake drivetrain: neutral coasts, limited backward input)
 - Curvature-based velocity profile: `v_max(s) = sqrt(a_lat_max / |κ(s)|)` (with `a_lat_max ≈ μ·g` from `friction_coeff`), forward/backward pass with `max_accel` / `max_decel` limits. Throttle via a PI controller on `v_ref − v`, with feed-forward from a measured throttle→speed map. With P0a, negative output brakes, so corners can be entered at the planned speed.
 - Pairs with C1/C3. Today throttle is a constant 0.3.
 - Needs: P1 and a one-off throttle-map calibration run (log PWM vs. estimated speed).
 - Effort: **S–M**.
 
-### C3. Stanley controller (alternative lateral controller)
+### C3. Stanley controller (alternative lateral controller) — **done**
 - `δ = ψ_e + atan(k·e / (k_soft + v))` on the front axle. Often better than Pure Pursuit at low speed and tight tracking.
 - Same interface and inputs as C1, so it's cheap once C1 exists, and A/B-able in the harness.
 - Effort: **S**.
@@ -106,14 +107,16 @@ class TrackController(Protocol):
 
 ## 4. Decisions
 1. **Steering / throttle sign (22 Sep):** set by the neutral values in the control
-   config: below neutral = left / brake-reverse, above = right / forward. → P0a.
+   config: below neutral = left / backward, above = right / forward. → P0a.
 2. **Vehicle parameters (22 Sep):** F1TENTH simulator values for now
    (`vehicle_params.yaml`, placeholders until the car is measured).
 3. **Mapping lap (22 Sep):** driven by hand. C4 drops in priority.
-4. **Braking and reverse (22 Sep):** supported and to be used. → P0a, done.
+4. **Throttle (22 Sep):** forward / backward input, neutral coasts, no separate brake. → P0a, C2.
 5. **Simulator:** AutoDRIVE. `simulator_integration` merged; the PyBullet
    `scale_racing_simulator` is outdated and ignored.
 6. **Steering offsets:** intended. Linear `[MIN, MAX]` mapping kept.
+7. **Arming:** terminal key press. **Safety defaults:** 150 ms watchdog, slew limits, 1.5 m/s cap.
+8. **Frames:** RGB.
 
 ### Simulator follow-ups found during the merge
 - `config_zmq.yaml` references `pilot_vision/models/deeplab/config.yaml`, which only
@@ -121,15 +124,49 @@ class TrackController(Protocol):
   Not needed in the default sim mode (LiDAR mapping skips vision).
 - `simulator_orbslam_settings.yaml` is referenced but was never committed (only
   needed for SLAM-in-sim).
-- The sim camera path delivers **RGB** frames while the OAK-D path delivers **BGR**.
-  Left as is until it's clear how the sim-trained vision model expects its input.
+- ~~RGB vs BGR~~: resolved. `frame_buf` is **RGB** everywhere (the vision models expect RGB);
+  CameraWorker converts from DepthAI's BGR and ORB-SLAM3 uses `Camera.RGB: 1`.
 
-## 5. Suggested sequencing
+## 5. Results (closed-loop bench, 60 s, 15 Hz noisy poses with 60 ms latency)
+
+| Track | Controller | Cross-track RMS / max | Off track | Speed mean / max |
+| ----- | ---------- | --------------------- | --------- | ---------------- |
+| oval | Pure Pursuit | 1.4 / 3.7 cm | 0 % | 1.29 / 1.43 m/s |
+| oval | Stanley | 1.6 / 3.8 cm | 0 % | 1.29 / 1.43 m/s |
+| twisty | Pure Pursuit | 3.4 / 11.6 cm | 0 % | 1.29 / 1.43 m/s |
+| twisty | Stanley | 1.9 / 4.5 cm | 0 % | 1.29 / 1.43 m/s |
+
+For comparison, the legacy PID (heading only) left the track within about one lap at 0.84 m/s
+in the same kind of test. Stanley tracks tighter on twisty tracks; Pure Pursuit
+steers about half as busily. End to end through `start.py` (processes, shared memory,
+arming keys) Pure Pursuit held 100 % on track at 1.33 m/s and coasted to a stop
+on disarm.
+
+Findings fixed along the way:
+- A speed cap based only on the (lagging) pose speed estimate let the car
+  overshoot to 2.3 m/s. The cap now also bounds forward throttle at
+  `speed_cap / speed_per_throttle`, and holds at ≤ 1.5 m/s.
+- Planning at exactly the cap made the planner and the cap fight (limit cycle), so the
+  planner now targets 1.3 m/s.
+- Curvature from raw 5 cm differences read 15 % high, so a ±0.25 m stencil is used.
+
+## 6. Before driving the car
+1. **Calibrate `speed_per_throttle`:** hold a few fixed throttles on a straight and
+   record the SLAM speed. Both the speed controller and the speed-cap bound use it.
+2. **Measure the vehicle:** wheelbase and max steering angle in `vehicle_params.yaml`
+   (F1TENTH placeholders now). Also the camera offset from the rear axle: the
+   controllers treat the pose as the rear axle.
+3. **First runs:** wheels off the ground (arm → disarm response), then low
+   `v_max` (e.g. 0.6 m/s) on the mapped track.
+4. **Follow-ups:** IMU in the EKF (lower speed lag); C4 map-free depth controller
+   as the tracking-loss fallback; C5 RL policy deployment; C6 MPC.
+
+## 7. Sequencing
 
 | Phase | Scope | Outcome |
 | --- | --- | --- |
-| 1 | P0b safety, P3 interface, P4 harness | Safe to test any controller; benchmarks in CI |
-| 2 | P1 estimator, P2 track model, C1 Pure Pursuit | Reliable autonomous laps on a mapped track |
-| 3 | C2 speed planner, C3 Stanley | Faster laps; lateral controller A/B |
+| 1 | P0b safety, P3 interface, P4 harness | **Done** |
+| 2 | P1 estimator, P2 track model, C1 Pure Pursuit | **Done** (bench-verified; not yet on the car) |
+| 3 | C2 speed planner, C3 Stanley | **Done** (bench-verified; not yet on the car) |
 | 4 | C5 policy deployment, C4 reactive depth | RL on car; tracking-loss fallback |
 | 5 | C6 MPC | Lap-time optimisation |

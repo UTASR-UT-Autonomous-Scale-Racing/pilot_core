@@ -21,7 +21,16 @@ python start.py --config config_cpu.yaml --debug    # verbose per-worker logging
 No camera? Run the same pipeline on synthetic data with
 `python start.py --config config_dev_local.yaml`.
 
-Stop with **Ctrl+C**. Workers shut down gracefully and shared memory is released.
+Operator keys in the terminal:
+
+| Key       | Action                                               |
+| --------- | ---------------------------------------------------- |
+| `a`       | **Arm**: actuator outputs follow the controller       |
+| `SPACE`   | **Disarm** (any key other than `a`/`l`/`q`): neutral immediately |
+| `l`       | Signal loop closure (end of the manual mapping lap)   |
+| `q`       | Quit (also **Ctrl+C**). Workers shut down gracefully   |
+
+Outputs are **neutral until armed**.
 
 ## Pipeline
 
@@ -46,9 +55,10 @@ shutdown.
 
 | Buffer         | Payload                                                                        |
 | -------------- | ------------------------------------------------------------------------------ |
-| `frame_buf`    | BGR `uint8` (H,W,3) + depth `float32` metres (H,W), depth aligned to RGB        |
+| `frame_buf`    | **RGB** `uint8` (H,W,3) + depth `float32` metres (H,W), depth aligned to RGB    |
 | `imu_buf`      | `[qw, qx, qy, qz, ax, ay, az, s7, s8]`, accel m/s² (see `IMUWorker` / `CameraWorker`) |
 | `pose_buf`     | 4×4 **camera-to-world** pose (Twc); only published while SLAM tracking is OK   |
+| `state_buf`    | `t, x, y, yaw, v, yaw_rate` in the BEV plane (StateWorker EKF)                 |
 | `ctrl_buf`     | `steering, throttle` both in **[0, 1]**, **0.5 = neutral**: steer 0 = full left, 1 = full right; throttle < 0.5 = brake / reverse, > 0.5 = forward |
 
 `ctrl_buf` follows the car's PWM convention (below neutral = left / brake-reverse,
@@ -57,6 +67,46 @@ over its `[MIN, MAX]` PWM range. Controllers and RL policies work in signed
 `[-1, 1]` space with **+steering = left** (ROS / REP-103); `ControlWorker`
 converts with `signed_to_unit()`, and the simulator bridge converts back.
 `ActuatorWorker` clamps anything out of range as a last line of defence.
+
+## Driving and control
+
+After the hand-driven mapping lap (`--enable-slam`, press `l` to close the loop),
+the track boundaries become a `TrackModel` (centre-line, curvature, width), and a
+track controller drives it:
+
+| `control_mode` | Lateral law | Notes |
+| -------------- | ----------- | ----- |
+| `pure_pursuit` | Look-ahead point on the centre-line (default) | Smooth, robust |
+| `stanley`      | Front-axle heading + cross-track error | Tighter tracking, busier steering |
+| `pid`, `ftg`, `lidar_pid`, `neural` | Legacy / simulator modes | |
+
+Speed comes from a curvature-based profile (`track_control.speed`) and a PI
+controller for a drivetrain **without a brake**: neutral coasts, and a limited
+backward input slows the car (never below 0.3 m/s, so it cannot start reversing).
+`StateWorker` fuses SLAM poses into a speed and yaw-rate estimate (EKF), since the car has
+no wheel encoders.
+
+Every command then passes the **safety supervisor** in `ActuatorWorker` (config `safety`):
+
+1. **Arming:** neutral until `a` is pressed.
+2. **Watchdog:** no fresh command for 150 ms gives neutral throttle with steering held,
+   so the car coasts to a stop (also when SLAM tracking is lost).
+3. **Speed cap:** 1.5 m/s. Throttle tapers near the cap and is bounded by
+   `speed_cap / speed_per_throttle`.
+4. **Slew limits** on steering and throttle.
+
+> **Calibrate `speed_per_throttle`** (`track_control.speed.longitudinal`) on the car:
+> the steady-state speed per unit of forward throttle. Both the speed controller
+> and the speed-cap bound depend on it. `vehicle_params.yaml` still holds F1TENTH
+> placeholder values.
+
+Evaluate controllers without hardware on the closed-loop bench (kinematic bicycle
+model, 15 Hz noisy delayed poses, the same estimator, controller and safety code):
+
+```bash
+python scripts/sim_bench.py                       # all controllers × tracks
+python scripts/sim_bench.py --mode stanley --plot bench.png
+```
 
 ## Configuration profiles
 
@@ -178,7 +228,8 @@ OAKD_AVAILABLE=1 python -m pytest tests/test_pipeline_integration.py tests/test_
 
 ```
 pilot_core/
-├── start.py              # Orchestrator (entry point)
+├── start.py              # Orchestrator (entry point, operator keys)
+├── control/              # Control library: track model, controllers, EKF, safety, sim bench
 ├── workers/              # Pipeline worker processes + track controllers (PID, FTG)
 ├── shared_buffer/        # Shared-memory ring buffers (seqlock, single-writer)
 ├── synthetic/            # Synthetic camera / IMU / closed-loop track generators
@@ -202,6 +253,7 @@ pilot_core/
 | `jetson_run.sh`               | On the car: performance mode, hard-reset to origin, launch |
 | `start.sh`                    | Jetson Docker deploy (pull, validate, build, run)        |
 | `gen_orbslam_settings.py`     | ORB-SLAM3 settings from OAK-D calibration                |
+| `sim_bench.py`                | Closed-loop controller benchmarks (no hardware)          |
 | `setup.sh`                    | Init all submodules                                      |
 | `branch_checkout.sh [branch]` | Check out a branch in pilot_core and all submodules      |
 | `build.sh` / `runCpp.sh` / `replay.sh` | Legacy C++ pipeline                             |

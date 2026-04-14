@@ -1,6 +1,6 @@
 """
-Track-following controllers: lateral (Pure Pursuit, Stanley) combined with
-the curvature-based speed planner into a :class:`TrackFollower`.
+Track-following controllers: lateral (Pure Pursuit, Stanley, LQR, MPC)
+combined with the curvature-based speed planner into a :class:`TrackFollower`.
 
 All controllers output a signed :class:`Command` (steering +1 = left).
 """
@@ -27,6 +27,9 @@ class LateralController(Protocol):
 @dataclass
 class PurePursuit:
     """Geometric path tracking towards a look-ahead point on the centre-line.
+
+    Reference: R. C. Coulter, "Implementation of the Pure Pursuit Path
+    Tracking Algorithm", CMU-RI-TR-92-01, 1992.
 
     ``L_d = clip(k_v * v + lookahead_min, lookahead_min, lookahead_max)``,
     ``delta = atan(2 L sin(alpha) / L_d)``.
@@ -55,6 +58,11 @@ class PurePursuit:
 @dataclass
 class Stanley:
     """Front-axle heading + cross-track error law.
+
+    Reference: S. Thrun et al., "Stanley: The Robot that Won the DARPA Grand
+    Challenge", J. Field Robotics 23(9), 2006; G. Hoffmann et al.,
+    "Autonomous Automobile Trajectory Tracking for Off-Road Driving",
+    ACC 2007.
 
     ``delta = heading_error - atan(k * e / (k_soft + v))`` evaluated at the
     front axle (pose reference is taken as the rear axle).
@@ -155,9 +163,21 @@ def _stanley(params: VehicleParams, cfg: Dict[str, Any]) -> LateralController:
     return Stanley(params, **cfg)
 
 
+def _lqr(params: VehicleParams, cfg: Dict[str, Any]) -> LateralController:
+    from .lqr import LQR
+    return LQR(params, **cfg)
+
+
+def _mpc(params: VehicleParams, cfg: Dict[str, Any]) -> LateralController:
+    from .mpc import MPC
+    return MPC(params, **cfg)
+
+
 LATERAL_CONTROLLERS: Dict[str, Callable[[VehicleParams, Dict[str, Any]], LateralController]] = {
     "pure_pursuit": _pure_pursuit,
     "stanley": _stanley,
+    "lqr": _lqr,
+    "mpc": _mpc,
 }
 
 

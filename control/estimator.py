@@ -3,6 +3,9 @@ Vehicle state estimator: an EKF on a unicycle model
 ``[x, y, yaw, v, yaw_rate]`` fed by pose measurements (SLAM, ~15 Hz) and,
 when available, a direct speed measurement (e.g. simulator ground truth).
 
+Reference: S. Thrun, W. Burgard, D. Fox, "Probabilistic Robotics",
+MIT Press, 2005 (Ch. 3, extended Kalman filter).
+
 The car has no wheel encoders, so speed is inferred from successive poses;
 the filter smooths that and lets controllers query the state at any time
 between pose updates (``predict_to``).

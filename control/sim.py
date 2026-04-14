@@ -3,7 +3,8 @@ Closed-loop evaluation bench: kinematic bicycle plant + simulated SLAM pose
 sensor, driving the *same* estimator → controller → safety chain used on
 the car.  Used by the pytest benchmarks and ``scripts/sim_bench.py``.
 
-Plant model
+Plant model (kinematic bicycle: R. Rajamani, "Vehicle Dynamics and Control",
+Springer, 2012; J. Kong et al., IEEE IV 2015)
 -----------
 * Kinematic bicycle referenced at the rear axle (``vehicle_params.yaml``).
 * Steering: rate-limited servo (``max_steering_vel``) behind a transport delay.
@@ -206,6 +207,88 @@ def run_closed_loop(
     )
 
 
+# ------------------------------------------------------------ depth camera
+
+def render_depth(x, y, yaw, walls, K, width, height, cam_height=0.12, wall_height=0.3, max_range=6.0):
+    """Ray-cast a depth image (metres, z-depth) of vertical track walls.
+
+    ``walls`` is a list of closed ``(N, 2)`` polylines.  The camera sits at
+    ``(x, y)`` looking along ``yaw``, level, ``cam_height`` above a flat floor.
+    """
+    u = np.arange(width)
+    bearing = np.arctan2(-(u - K.cx), K.fx)                 # + = left, per column
+    ang = yaw + bearing
+    d = np.column_stack([np.cos(ang), np.sin(ang)])          # (W, 2) ray directions
+    p0 = np.vstack([np.vstack([w, w[:1]])[:-1] for w in walls])
+    p1 = np.vstack([np.vstack([w, w[:1]])[1:] for w in walls])
+    e = p1 - p0                                              # (S, 2)
+    o = np.array([x, y])
+    # Solve o + t d = p0 + s e for every (ray, segment) pair
+    denom = d[:, None, 0] * e[None, :, 1] - d[:, None, 1] * e[None, :, 0]
+    w_ = p0[None] - o
+    t = (w_[..., 0] * e[None, :, 1] - w_[..., 1] * e[None, :, 0]) / np.where(denom == 0, np.nan, denom)
+    sg = (w_[..., 0] * d[:, None, 1] - w_[..., 1] * d[:, None, 0]) / np.where(denom == 0, np.nan, denom)
+    t = np.where((t > 0) & (sg >= 0) & (sg <= 1), t, np.inf)
+    dist = np.minimum(np.nanmin(t, axis=1), max_range)       # (W,) horizontal distance to wall
+    z_wall = dist * np.cos(bearing)
+
+    v = np.arange(height)[:, None]
+    ray_y = (v - K.cy) / K.fy                                # y per unit z (down)
+    depth = np.zeros((height, width))
+    # Wall pixels: those whose ray hits the wall between floor and wall top
+    y_at_wall = ray_y * z_wall[None, :]
+    on_wall = (y_at_wall <= cam_height) & (y_at_wall >= cam_height - wall_height) & (dist[None, :] < max_range)
+    depth[on_wall] = np.broadcast_to(z_wall[None, :], depth.shape)[on_wall]
+    # Floor pixels in front of the wall
+    with np.errstate(divide="ignore"):
+        z_floor = np.where(ray_y > 1e-6, cam_height / ray_y, np.inf)
+    floor = ~on_wall & (np.broadcast_to(z_floor, depth.shape) < np.minimum(z_wall[None, :], max_range))
+    depth[floor] = np.broadcast_to(z_floor, depth.shape)[floor]
+    return depth
+
+
+def run_depth_closed_loop(follower, outer, inner, params, duration=40.0, plant=None,
+                          safety=None, width=160, height=100, camera_rate=15.0, dt=0.005):
+    """Drive a :class:`control.depth_ftg.DepthGapFollower` from rendered depth only
+    (no pose, no map) and score it against the true track."""
+    from .track import TrackModel
+
+    plant_cfg = plant or PlantConfig()
+    track = TrackModel(outer, inner)
+    start = track.points[0]
+    car = BicyclePlant(params, plant_cfg, float(start[0]), float(start[1]), float(track.heading[0]))
+    sup = SafetySupervisor(safety)
+    cmd = cmd_t = None
+    next_frame = 0.0
+    rows, hint, s_prev, s_total = [], None, None, 0.0
+    t = 0.0
+    while t < duration:
+        if t >= next_frame:
+            depth = render_depth(car.x, car.y, car.yaw, [outer, inner], follower.K, width, height,
+                                 cam_height=follower.cfg.camera_height)
+            cmd, cmd_t = follower.step(depth), t
+            next_frame += 1.0 / camera_rate
+        out = sup.step(t, cmd, cmd_t, armed=True, speed=car.v)
+        car.step(out, t, dt)
+        pr = track.project(car.x, car.y, hint=hint)
+        hint = pr.idx
+        if s_prev is not None:
+            s_total += (pr.s - s_prev + track.length / 2) % track.length - track.length / 2
+        s_prev = pr.s
+        rows.append((t, car.x, car.y, car.v, out.steering, out.throttle, pr.lateral_error,
+                     float(track.half_width[pr.idx])))
+        t += dt
+    log = np.array(rows)
+    e = log[:, 6]
+    return RunResult(
+        laps=s_total / track.length, lap_times=[],
+        xtrack_rms=float(np.sqrt(np.mean(e ** 2))), xtrack_max=float(np.max(np.abs(e))),
+        off_track_fraction=float(np.mean(np.abs(e) > log[:, 7] - params.width / 2)),
+        mean_speed=float(np.mean(log[:, 3])), max_speed=float(np.max(log[:, 3])),
+        steer_rate_rms=float(np.sqrt(np.mean((np.diff(log[:, 4]) / dt) ** 2))), log=log[:, :7],
+    )
+
+
 def make_follower_factory(mode: str, params: VehicleParams, lateral_cfg=None, speed_cfg=None):
     """Convenience factory: boundaries → TrackFollower for ``mode``."""
     from .controllers import build_track_follower
@@ -219,5 +302,5 @@ def make_follower_factory(mode: str, params: VehicleParams, lateral_cfg=None, sp
 
 __all__ = [
     "BicyclePlant", "PlantConfig", "RunResult", "oval_track", "twisty_track",
-    "run_closed_loop", "make_follower_factory", "VehicleState",
+    "run_closed_loop", "run_depth_closed_loop", "render_depth", "make_follower_factory", "VehicleState",
 ]

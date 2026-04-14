@@ -2,6 +2,12 @@
 Longitudinal control: a curvature-based speed profile and a throttle
 controller for a drivetrain with **no brake** — neutral coasts, and a
 backward input actively decelerates (and would reverse once stopped).
+
+Reference (speed profile, forward/backward passes): N. R. Kapania,
+J. Subosits, J. C. Gerdes, "A Sequential Two-Step Algorithm for Fast
+Generation of Vehicle Racing Trajectories", J. Dyn. Sys., Meas., Control
+138(9), 2016.  PI control: K. J. Åström, R. M. Murray, "Feedback Systems",
+Princeton University Press, 2008.
 """
 
 from __future__ import annotations

@@ -15,6 +15,9 @@ The classic Follow-the-Gap pipeline then runs on that scan:
   6. Pick the best steering point inside that gap (deepest or centroid).
   7. Convert the chosen bearing into a normalised steering command.
 
+Reference: V. Sezer, M. Gokasan, "A novel obstacle avoidance algorithm:
+'Follow the Gap Method'", Robotics and Autonomous Systems 60(9), 2012.
+
 Output: (steering, throttle) both in [-1, 1], with optional Gaussian
 noise for stochastic sampling — matching TrackPIDController's API.
 """

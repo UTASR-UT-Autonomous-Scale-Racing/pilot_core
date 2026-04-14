@@ -2,6 +2,9 @@
 TrackPIDController — minimal PID that steers the vehicle along the
 centre-line of extracted track boundaries.
 
+Reference (PID): K. J. Åström, R. M. Murray, "Feedback Systems",
+Princeton University Press, 2008.
+
 Output: (steering, throttle) both in [-1, 1], stochastically sampled
 from the PID output with configurable Gaussian noise.
 """

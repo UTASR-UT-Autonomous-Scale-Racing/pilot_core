@@ -7,6 +7,8 @@ matplotlib
 depthai>=3.0        # OAK-D camera + IMU (v3 API)
 smbus2              # Arduino I2C link (Jetson)
 pyzmq               # AutoDRIVE simulator bridge
+osqp                # QP solver for control_mode: mpc
+onnxruntime         # control_mode: policy (CPU inference)
 
 # Tests
 pytest
@@ -14,3 +16,6 @@ pytest-timeout
 
 # ORB-SLAM3 Python wrapper build (see README)
 pybind11
+
+# RL training / policy export (dev machine only)
+# stable-baselines3 gymnasium onnx

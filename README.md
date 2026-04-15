@@ -74,11 +74,20 @@ After the hand-driven mapping lap (`--enable-slam`, press `l` to close the loop)
 the track boundaries become a `TrackModel` (centre-line, curvature, width), and a
 track controller drives it:
 
-| `control_mode` | Lateral law | Notes |
-| -------------- | ----------- | ----- |
-| `pure_pursuit` | Look-ahead point on the centre-line (default) | Smooth, robust |
-| `stanley`      | Front-axle heading + cross-track error | Tighter tracking, busier steering |
-| `pid`, `ftg`, `lidar_pid`, `neural` | Legacy / simulator modes | |
+| `control_mode` | Controller | Bench cross-track RMS (twisty track) | Notes |
+| -------------- | ---------- | ------------------------------------ | ----- |
+| `pure_pursuit` | Look-ahead point on the centre-line (default) | 3.4 cm | Smoothest steering, most robust |
+| `stanley`      | Front-axle heading + cross-track error | 1.9 cm | |
+| `lqr`          | Speed-scheduled LQR on the path-error model | 0.8 cm | |
+| `mpc`          | Linear time-varying kinematic MPC (OSQP, ~2 ms/solve) | 0.8 cm | Steering-angle/rate constraints, delay compensation |
+| `policy`       | PPO policy exported to ONNX (`rl/export_onnx.py`) | n/a | Needs a trained policy |
+| `depth_ftg`    | Follow-the-Gap on a depth-camera virtual scan | 7 cm | **Map-free**; also usable as the tracking-loss fallback |
+| `pid`, `ftg`, `lidar_pid`, `neural` | Legacy / simulator modes | | |
+
+References for each algorithm: [`docs/references.md`](docs/references.md).
+
+`track_control.fallback: depth_ftg` makes the track modes drive map-free while the
+state estimate is stale (e.g. SLAM tracking lost), and hand back once it recovers.
 
 Speed comes from a curvature-based profile (`track_control.speed`) and a PI
 controller for a drivetrain **without a brake**: neutral coasts, and a limited
@@ -106,6 +115,14 @@ model, 15 Hz noisy delayed poses, the same estimator, controller and safety code
 ```bash
 python scripts/sim_bench.py                       # all controllers × tracks
 python scripts/sim_bench.py --mode stanley --plot bench.png
+python scripts/sim_bench.py --mode depth_ftg      # renders depth images, no pose/map
+```
+
+Deploying a trained RL policy:
+
+```bash
+python rl/export_onnx.py --run PPO_3 --out policy.onnx   # bakes in VecNormalize + clipping
+# then set control_mode: policy and track_control.policy.model: policy.onnx
 ```
 
 ## Configuration profiles

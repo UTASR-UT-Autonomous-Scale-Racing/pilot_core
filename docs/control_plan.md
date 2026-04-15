@@ -1,8 +1,9 @@
 # Control models: assessment and implementation plan
 
-Status: **Phases 1–3 implemented** (P0a, P0b, P1–P4, C1–C3), tested in the
+Status: **all controllers implemented** (P0–P4, C1–C6 plus LQR), tested in the
 closed-loop bench and on the local camera/SLAM pipeline. Not yet run on the car.
-Remaining: C4, C5, C6, and on-car calibration (§6).
+Remaining: on-car calibration (§6) and training an RL policy for C5.
+References: [`references.md`](references.md).
 
 ## 1. Where control stands today
 
@@ -90,18 +91,18 @@ class TrackController(Protocol):
 - Same interface and inputs as C1, so it's cheap once C1 exists, and A/B-able in the harness.
 - Effort: **S**.
 
-### C4. Reactive depth controller (no map needed)
+### C4. Reactive depth controller (no map needed) — **done** (`depth_ftg`, also the optional tracking-loss fallback)
 - FTG (already written) fed by a *virtual scan built from the depth image* (ground-plane removal → per-column nearest obstacle) instead of from mapped boundaries. The sim branch's `depth_projection_worker.py` does this.
 - The mapping lap stays manual (decided), so this is mainly a **fallback when SLAM tracking is lost** and a map-free mode for new tracks. Lower priority.
 - Effort: **M**.
 
-### C5. Learned policy deployment (`policy` mode)
+### C5. Learned policy deployment (`policy` mode) — **done** (deployment path; no trained policy yet)
 - Load a trained policy exported to **ONNX** and run it on CPU with onnxruntime (tiny MLP/1-D CNN: well under 1 ms). The observation builder reuses `TrackModel` to produce the sim branch's boundary-point observation.
 - Start from the merged PPO work in `rl/`. Sim-to-real gap is the main risk; gate behind the P0b safety layer and the P4 harness.
 - Optional follow-on: behaviour cloning from `BufferRecorderWorker` recordings of C1/C2 laps (fixes the `pilot_controller` RNN scaffold into an action-predicting model).
 - Effort: **M** for deployment; training effort is open-ended.
 
-### C6 (later). MPC
+### C6. MPC — **done** (`mpc`, linear time-varying kinematic MPC; plus `lqr`)
 - Kinematic-bicycle MPC (CasADi/acados) tracking the race line with input constraints. Best lap-time potential, but needs an identified vehicle model and more CPU. Revisit after C1–C3 are characterised on the car.
 - Effort: **L**.
 
@@ -136,6 +137,18 @@ class TrackController(Protocol):
 | twisty | Pure Pursuit | 3.4 / 11.6 cm | 0 % | 1.29 / 1.43 m/s |
 | twisty | Stanley | 1.9 / 4.5 cm | 0 % | 1.29 / 1.43 m/s |
 
+| oval | LQR | 0.7 / 1.7 cm | 0 % | 1.29 / 1.43 m/s |
+| oval | MPC | 0.7 / 1.9 cm | 0 % | 1.29 / 1.43 m/s |
+| twisty | LQR | 0.8 / 3.2 cm | 0 % | 1.29 / 1.43 m/s |
+| twisty | MPC | 0.8 / 2.6 cm | 0 % | 1.29 / 1.43 m/s |
+| oval | depth FTG (map-free) | 5.1 / 15.2 cm | 0 % | 0.52 / 0.53 m/s |
+| twisty | depth FTG (map-free) | 6.8 / 12.7 cm | 0 % | 0.51 / 0.52 m/s |
+
+MPC steers about half as busily as LQR (steering rate RMS 1.5 vs 2.8 /s) at the same accuracy.
+The depth FTG uses only rendered depth images (no pose, no map). On the real OAK-D it
+produces commands at 15 Hz; in cluttered scenes it can alternate between near-equal
+gaps, and a gap-hysteresis term is a candidate improvement.
+
 For comparison, the legacy PID (heading only) left the track within about one lap at 0.84 m/s
 in the same kind of test. Stanley tracks tighter on twisty tracks; Pure Pursuit
 steers about half as busily. End to end through `start.py` (processes, shared memory,
@@ -158,8 +171,10 @@ Findings fixed along the way:
    controllers treat the pose as the rear axle.
 3. **First runs:** wheels off the ground (arm → disarm response), then low
    `v_max` (e.g. 0.6 m/s) on the mapped track.
-4. **Follow-ups:** IMU in the EKF (lower speed lag); C4 map-free depth controller
-   as the tracking-loss fallback; C5 RL policy deployment; C6 MPC.
+4. **Measure the camera height and pitch** for `depth_ftg` (level camera assumed).
+5. **Follow-ups:** IMU in the EKF (lower speed lag); gap hysteresis for `depth_ftg`;
+   train a PPO policy (`rl/train.py`) and export it for `policy` mode. Note that
+   `train.py` defines `TrackCNNExtractor` but doesn't pass it to PPO (it trains a plain MLP).
 
 ## 7. Sequencing
 

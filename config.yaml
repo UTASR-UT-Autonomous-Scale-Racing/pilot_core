@@ -16,7 +16,7 @@ use_tensorrt: false           # Set true on Jetson to load TensorRT engines
 
 # --- Control ---
 control_config_path: pilot_controller/models/default/config.yaml
-control_mode: "pure_pursuit"  # pure_pursuit | stanley | pid | ftg | neural
+control_mode: "pure_pursuit"  # pure_pursuit | stanley | lqr | mpc | policy | depth_ftg | pid | ftg | neural
 
 # --- PID Control (used when control_mode = "pid") ---
 pid:
@@ -37,6 +37,22 @@ track_control:
   stanley:
     k: 1.0
     k_soft: 1.0                 # m/s
+  lqr:
+    q_lateral: 4.0              # weight on lateral error²
+    q_heading: 1.0              # weight on heading error²
+    r_steer: 2.0                # weight on steering (beyond curvature feed-forward)²
+  mpc:
+    horizon: 20                 # steps
+    dt: 0.05                    # s per step (1 s horizon)
+    q_lateral: 10.0
+    q_heading: 2.0
+    r_steer: 1.0
+    r_rate: 20.0                # steering-rate smoothness
+    delay: 0.05                 # s actuation delay compensated
+  policy:
+    model: policy.onnx          # from rl/export_onnx.py (+ policy.json sidecar)
+  fallback: null                # "depth_ftg": drive map-free while the state estimate is stale
+  fallback_after: 0.3           # s without a fresh state before the fallback engages
   speed:
     v_max: 1.3                  # m/s — keep below safety.speed_cap
     lat_accel_fraction: 0.6     # of friction_coeff * g in corners
@@ -48,6 +64,17 @@ track_control:
       ki: 0.15
       max_backward: 0.3         # most backward input used to slow down
       min_speed_for_backward: 0.3
+
+# --- Map-free depth Follow-the-Gap (control_mode: depth_ftg, or track fallback) ---
+depth_ftg:
+  camera_height: 0.12           # m above ground — MEASURE on the car
+  min_obstacle_height: 0.04     # m, below = floor
+  max_obstacle_height: 0.50     # m, above = ignored
+  max_range: 4.0                # m
+  bubble_radius: 0.25           # m around the nearest obstacle
+  aim_distance: 0.7             # m
+  cruise_speed: 0.6             # m/s
+  stop_distance: 0.35           # m — obstacle this close ahead → neutral
 
 # --- State estimator (pose EKF) ---
 estimator:

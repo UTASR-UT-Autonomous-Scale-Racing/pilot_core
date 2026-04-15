@@ -61,6 +61,7 @@ from workers import (
     ZMQPublishWorker,
     ZMQSensorWorker,
 )
+from workers.control_worker import TRACK_MODES
 
 # --------------------------------------------------------------------------
 # Config helpers
@@ -382,6 +383,13 @@ def main() -> None:
 
     # --- 4. Define workers ---
 
+    # One drivetrain calibration shared by every speed-producing component
+    speed_per_throttle = (
+        config.get("track_control", {}).get("speed", {}).get("longitudinal", {}).get("speed_per_throttle", 3.0)
+    )
+    depth_ftg_cfg = dict(config.get("depth_ftg", {}))
+    depth_ftg_cfg.setdefault("speed_per_throttle", speed_per_throttle)
+
     use_synthetic = (
         config.get("synthetic", False) or os.environ.get("PILOT_SYNTHETIC") == "1"
     )
@@ -475,7 +483,7 @@ def main() -> None:
                 forward_axis=mapping_cfg.get("forward_axis", 2),
             )
         )
-    elif control_mode in ("pure_pursuit", "stanley") and has_pose_source:
+    elif control_mode in TRACK_MODES and has_pose_source:
         _workers.append(
             ControlWorker(
                 name="control",
@@ -485,6 +493,21 @@ def main() -> None:
                 boundary_buffer=boundary_buf,
                 mapping_done_event=mapping_done_event,
                 track_config=config.get("track_control", {}),
+                vehicle_params=config.get("vehicle_params", "vehicle_params.yaml"),
+                frame_buffer=frame_buf,
+                camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
+                depth_ftg_config=depth_ftg_cfg,
+            )
+        )
+    elif control_mode == "depth_ftg":
+        _workers.append(
+            ControlWorker(
+                name="control",
+                mode="depth_ftg",
+                output_buffer=ctrl_buf,
+                frame_buffer=frame_buf,
+                camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
+                depth_ftg_config=depth_ftg_cfg,
                 vehicle_params=config.get("vehicle_params", "vehicle_params.yaml"),
             )
         )
@@ -534,10 +557,7 @@ def main() -> None:
     # Safety supervisor config.  The steady-state throttle bound uses the same
     # drivetrain gain as the speed controller unless set explicitly.
     safety_cfg = dict(config.get("safety", {}))
-    safety_cfg.setdefault(
-        "speed_per_throttle",
-        config.get("track_control", {}).get("speed", {}).get("longitudinal", {}).get("speed_per_throttle", 3.0),
-    )
+    safety_cfg.setdefault("speed_per_throttle", speed_per_throttle)
 
     # Actuator worker (hardware I2C and/or ZMQ control publisher).
     # Outputs stay neutral until the operator arms from the terminal.

@@ -51,6 +51,18 @@ def twisty_track(radius: float = 6.0, width: float = 1.4, n: int = 800):
     return _offset_closed(centre, -width / 2), _offset_closed(centre, width / 2), centre
 
 
+def random_track(rng: np.random.Generator, n: int = 800):
+    """Random closed track (varying size, width and curvature) for data collection."""
+    th = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    radius = rng.uniform(5.0, 7.5)
+    r = radius * np.ones(n)
+    for k in (2, 3, 4):
+        r += rng.uniform(0, 0.25 * radius / k) * np.cos(k * th + rng.uniform(0, 2 * np.pi))
+    centre = np.column_stack([r * np.cos(th), r * np.sin(th)])
+    width = rng.uniform(1.3, 1.9)
+    return _offset_closed(centre, -width / 2), _offset_closed(centre, width / 2), centre
+
+
 # ----------------------------------------------------------------- plant
 
 @dataclass
@@ -248,9 +260,14 @@ def render_depth(x, y, yaw, walls, K, width, height, cam_height=0.12, wall_heigh
 
 
 def run_depth_closed_loop(follower, outer, inner, params, duration=40.0, plant=None,
-                          safety=None, width=160, height=100, camera_rate=15.0, dt=0.005):
-    """Drive a :class:`control.depth_ftg.DepthGapFollower` from rendered depth only
-    (no pose, no map) and score it against the true track."""
+                          safety=None, width=160, height=100, camera_rate=15.0, dt=0.005,
+                          K=None, camera_height=None):
+    """Drive a depth-image controller (``follower.step(depth) -> Command``, e.g.
+    DepthGapFollower or VAEPolicyFollower) from rendered depth only (no pose,
+    no map) and score it against the true track.  ``K`` / ``camera_height``
+    default to the follower's own attributes."""
+    K = K if K is not None else follower.K
+    camera_height = camera_height if camera_height is not None else follower.cfg.camera_height
     from .track import TrackModel
 
     plant_cfg = plant or PlantConfig()
@@ -264,8 +281,8 @@ def run_depth_closed_loop(follower, outer, inner, params, duration=40.0, plant=N
     t = 0.0
     while t < duration:
         if t >= next_frame:
-            depth = render_depth(car.x, car.y, car.yaw, [outer, inner], follower.K, width, height,
-                                 cam_height=follower.cfg.camera_height)
+            depth = render_depth(car.x, car.y, car.yaw, [outer, inner], K, width, height,
+                                 cam_height=camera_height)
             cmd, cmd_t = follower.step(depth), t
             next_frame += 1.0 / camera_rate
         out = sup.step(t, cmd, cmd_t, armed=True, speed=car.v)
@@ -301,6 +318,6 @@ def make_follower_factory(mode: str, params: VehicleParams, lateral_cfg=None, sp
 
 
 __all__ = [
-    "BicyclePlant", "PlantConfig", "RunResult", "oval_track", "twisty_track",
+    "BicyclePlant", "PlantConfig", "RunResult", "oval_track", "twisty_track", "random_track",
     "run_closed_loop", "run_depth_closed_loop", "render_depth", "make_follower_factory", "VehicleState",
 ]

@@ -18,8 +18,7 @@ segmentation_config_path: pilot_vision/models/default/config.yaml
 use_tensorrt: false
 
 # --- Control ---
-control_config_path: pilot_controller/models/default/config.yaml
-control_mode: "pid"
+control_mode: "depth_ftg"     # map-free on synthetic depth
 
 # --- PID Control ---
 pid:

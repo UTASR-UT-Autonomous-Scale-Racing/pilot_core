@@ -6,7 +6,6 @@ Covers:
     - signed_to_unit(): PID/FTG [-1, 1] output → [0, 1], 0.5 = neutral
     - pose_to_bev(): heading convention matches controller bearings
     - ControlWorker PID mode never writes out-of-range values
-    - ControlWorker neural mode passes ``timestamp`` to models that take it
     - ActuatorWorker clamps out-of-range / NaN commands instead of crashing
 """
 
@@ -19,7 +18,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from shared_buffer import ControlBuffer, PoseBuffer, SegmentationBuffer, IMUBuffer, TrackBoundaryBuffer
+from shared_buffer import ControlBuffer, PoseBuffer, TrackBoundaryBuffer
 from workers.control_worker import ControlWorker, pose_to_bev, signed_to_unit
 
 
@@ -133,53 +132,6 @@ class TestControlWorkerPIDContract:
                 b.unlink()
 
 
-class _TimestampModel:
-    def __init__(self):
-        self.calls = []
-
-    def get_action(self, state, mask, timestamp):
-        self.calls.append(timestamp)
-        return 0.5, 0.2
-
-
-class _LegacyModel:
-    def get_action(self, state, mask):
-        return 1.5, -0.2  # deliberately out of range
-
-
-class TestControlWorkerNeural:
-
-    def _run(self, model, monkeypatch):
-        seg = SegmentationBuffer(slots=4, name=f"cc_seg_{_uid()}", create=True)
-        imu = IMUBuffer(slots=4, name=f"cc_imu_{_uid()}", create=True)
-        ctrl = ControlBuffer(slots=4, name=f"cc_ctrl_{_uid()}", create=True)
-        try:
-            import utils
-            monkeypatch.setattr(utils, "load_model_from_config", lambda _p: (model, type(model).__name__))
-            w = ControlWorker(
-                name="control", mode="neural", output_buffer=ctrl,
-                input_buffers={"segments": seg, "imu": imu}, model_config="unused.yaml",
-            )
-            w._logger = MagicMock()
-            w.setup()
-            hdr = seg.write(np.zeros((400, 640), dtype=np.float32))
-            w.step()
-            return hdr, ctrl.read_latest()
-        finally:
-            for b in (seg, imu, ctrl):
-                b.unlink()
-
-    def test_timestamp_passed_when_accepted(self, monkeypatch):
-        model = _TimestampModel()
-        hdr, result = self._run(model, monkeypatch)
-        assert model.calls == [pytest.approx(hdr.produced_ts)]
-        assert result[1:] == pytest.approx((0.5, 0.2))
-
-    def test_legacy_signature_and_clamping(self, monkeypatch):
-        _, result = self._run(_LegacyModel(), monkeypatch)
-        assert result[1:] == pytest.approx((1.0, 0.0))
-
-
 class TestActuatorClamp:
 
     @pytest.mark.parametrize(
@@ -208,19 +160,33 @@ class TestActuatorClamp:
 
 
 class TestPWMMapping:
-    """ControlBuffer [0, 1] → PWM via pilot_controller.Controller."""
+    """ControlBuffer [0, 1] → PWM via control.pwm.PWMMapper."""
 
-    def test_throttle_neutral_brake_forward(self):
-        from pilot_controller.control_output import (
-            Controller, THROTTLE_MAX, THROTTLE_MIN, THROTTLE_NEURAL,
-        )
-        c = Controller()
-        assert c.get_normalized_action_output(0.5, 0.5)[1] == THROTTLE_NEURAL
-        assert c.get_normalized_action_output(0.5, 0.0)[1] == THROTTLE_MIN   # full brake / reverse
-        assert c.get_normalized_action_output(0.5, 1.0)[1] == THROTTLE_MAX
+    def test_throttle_neutral_backward_forward(self):
+        from control.pwm import PWMConfig, PWMMapper
+
+        c = PWMConfig()
+        m = PWMMapper(c)
+        assert m.to_pwm(0.5, 0.5)[1] == c.throttle_neutral
+        assert m.to_pwm(0.5, 0.0)[1] == c.throttle_min      # full backward
+        assert m.to_pwm(0.5, 1.0)[1] == c.throttle_max
 
     def test_steering_full_range(self):
-        from pilot_controller.control_output import Controller, STEER_MAX, STEER_MIN
-        c = Controller()
-        assert c.get_normalized_action_output(0.0, 0.5)[0] == STEER_MIN   # full left
-        assert c.get_normalized_action_output(1.0, 0.5)[0] == STEER_MAX   # full right
+        from control.pwm import PWMConfig, PWMMapper
+
+        c = PWMConfig()
+        m = PWMMapper(c)
+        assert m.to_pwm(0.0, 0.5)[0] == c.steer_min        # full left
+        assert m.to_pwm(1.0, 0.5)[0] == c.steer_max        # full right
+
+    def test_rejects_out_of_range(self):
+        from control.pwm import PWMMapper
+
+        with pytest.raises(ValueError):
+            PWMMapper().to_pwm(1.2, 0.5)
+
+    def test_values_from_config(self):
+        from control.pwm import PWMConfig, PWMMapper
+
+        m = PWMMapper(PWMConfig(throttle_min=1000, throttle_max=2000, throttle_neutral=1500))
+        assert m.to_pwm(0.5, 0.5)[1] == 1500

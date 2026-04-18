@@ -97,7 +97,7 @@ class SLAMWorker(BaseWorker):
             "vocab_path", "ORB_SLAM3/Vocabulary/ORBvoc.txt"
         )
         settings_path = self.config.get(
-            "settings_path", "oak_d_orbslam_settings.yaml"
+            "settings_path", "orbslam_oakd_rgbd.yaml"
         )
 
         try:

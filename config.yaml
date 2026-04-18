@@ -15,8 +15,7 @@ segmentation_config_path: pilot_vision/models/default/config.yaml
 use_tensorrt: false           # Set true on Jetson to load TensorRT engines
 
 # --- Control ---
-control_config_path: pilot_controller/models/default/config.yaml
-control_mode: "pure_pursuit"  # pure_pursuit | stanley | lqr | mpc | policy | depth_ftg | vae | pid | ftg | neural
+control_mode: "pure_pursuit"  # pure_pursuit | stanley | lqr | mpc | policy | depth_ftg | vae | pid | ftg
 
 # --- PID Control (used when control_mode = "pid") ---
 pid:
@@ -25,6 +24,16 @@ pid:
   kd_steer: 0.1
   target_throttle: 0.3
   noise_std: 0.05
+
+# --- PWM (servo / ESC pulse widths, µs) ---
+# Below neutral = left / backward, above neutral = right / forward.
+pwm:
+  steer_min: 1105
+  steer_max: 1825
+  steer_neutral: 1461
+  throttle_min: 1199
+  throttle_max: 1595
+  throttle_neutral: 1397
 
 # --- Track following (control_mode: pure_pursuit | stanley | lqr | mpc | policy) ---
 vehicle_params: vehicle_params.yaml

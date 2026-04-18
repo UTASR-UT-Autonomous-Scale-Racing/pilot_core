@@ -57,14 +57,15 @@ class TestActuatorSafety:
         )
         w._logger = MagicMock()
         w.setup()
-        w._controller = MagicMock(wraps=w._controller)
+        w._pwm = MagicMock(wraps=w._pwm)
         yield w, ctrl, state, armed
         ctrl.unlink()
         state.unlink()
 
     @staticmethod
     def _last_output(w):
-        return w._controller.get_normalized_action_output.call_args[0]
+        # PWMMapper is the only place ControlBuffer values reach the hardware
+        return w._pwm.to_pwm.call_args[0]
 
     def test_neutral_until_armed(self, rig):
         w, ctrl, _, armed = rig

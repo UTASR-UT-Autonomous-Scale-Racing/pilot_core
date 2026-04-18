@@ -1,6 +1,6 @@
 """
 ActuatorWorker — reads normalised control values from ControlBuffer,
-maps them to PWM via ``pilot_controller.Controller``, and writes
+maps them to PWM (:class:`control.pwm.PWMMapper`), and writes
 to the Arduino over I2C and/or publishes to ZMQ for simulator control.
 
 Replaces ``I2CDataProcessor.write()`` in the old pipeline.
@@ -66,7 +66,7 @@ class ActuatorWorker(BaseWorker):
         self._ctrl_buf: ControlBuffer | None = None
         self._bus = None
         self._i2c_address: int = 0
-        self._controller = None
+        self._pwm = None
         self._last_seq = 0
         self._dummy = False
         # ZMQ attributes
@@ -130,9 +130,9 @@ class ActuatorWorker(BaseWorker):
                     if self._zmq_context:
                         self._zmq_context.term()
 
-        # PWM mapper from pilot_controller
-        from pilot_controller.control_output import Controller
-        self._controller = Controller()
+        # PWM mapping (pulse widths from the config ``pwm`` section)
+        from control.pwm import PWMConfig, PWMMapper
+        self._pwm = PWMMapper(PWMConfig(**self.config.get("pwm", {})))
 
         from control.safety import SafetyConfig, SafetySupervisor
         self._supervisor = SafetySupervisor(SafetyConfig(**self.config.get("safety", {})))
@@ -176,7 +176,7 @@ class ActuatorWorker(BaseWorker):
             self._publish_zmq(out.steering, out.throttle, reset)
 
         # Map normalised → PWM, send to I2C (hardware) on change + keep-alive
-        pwm = tuple(self._controller.get_normalized_action_output(steering_norm, throttle_norm))
+        pwm = self._pwm.to_pwm(steering_norm, throttle_norm)
         if not self._dummy and (pwm != self._last_pwm or now - self._last_i2c_write > 0.1):
             self._write_i2c(*pwm)
             self._last_i2c_write = now
@@ -253,9 +253,8 @@ class ActuatorWorker(BaseWorker):
                 self._zmq_context.term()
             self.logger.info("ZMQ publisher closed")
 
-        if self._controller is not None and not self._dummy:
-            from pilot_controller.control_output import STEER_NEURAL, THROTTLE_NEURAL
-            self._write_i2c(STEER_NEURAL, THROTTLE_NEURAL)
+        if self._pwm is not None and not self._dummy:
+            self._write_i2c(*self._pwm.neutral)
         if self._bus is not None:
             self._bus.close()
             self.logger.info("I2C bus closed")

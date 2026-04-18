@@ -15,6 +15,7 @@ Usage:
     python start.py --recording                # enable recording
     python start.py --debug                    # verbose logging
     python start.py --enable-slam              # enable SLAM + mapping pipeline
+    python start.py --config config_cpu.yaml   # workstation profile (map-free depth_ftg)
 """
 
 from __future__ import annotations
@@ -118,6 +119,14 @@ _keyboard = None
 MAX_RESTARTS = 3
 
 
+def _release_buffers() -> None:
+    for buf in _buffers:
+        try:
+            buf.unlink()
+        except Exception:
+            pass
+
+
 def _shutdown(signum=None, frame=None) -> None:
     """Gracefully stop all workers and clean up shared memory."""
     global _shutting_down
@@ -145,12 +154,7 @@ def _shutdown(signum=None, frame=None) -> None:
             p.terminate()
             p.join(timeout=2)
 
-    # Release shared memory
-    for buf in _buffers:
-        try:
-            buf.unlink()
-        except Exception:
-            pass
+    _release_buffers()
 
     logging.info("All workers stopped. Exiting.")
     sys.exit(0)
@@ -254,7 +258,7 @@ def main() -> None:
     enable_slam = config.get("enable_slam", False)
     use_saved_map = config.get("use_saved_map", False)
     saved_map_path = config.get("saved_map_path", "rl/boundaries")
-    control_mode = config.get("control_mode", "neural")
+    control_mode = config.get("control_mode", "pure_pursuit")
     use_zmq = config.get("use_zmq", False)
     use_zmq_pose = config.get("use_zmq_pose", False)
 
@@ -363,9 +367,6 @@ def main() -> None:
     # --- 3. Resolve config values ---
     seg_config_path = config.get(
         "segmentation_config_path", "pilot_vision/models/default/config.yaml"
-    )
-    ctrl_config_path = config.get(
-        "control_config_path", "pilot_controller/models/default/config.yaml"
     )
     resolution = config.get("resolution", [640, 400])
     fps = config.get("fps", 30)
@@ -529,20 +530,14 @@ def main() -> None:
             )
         )
     else:
-        _workers.append(
-            ControlWorker(
-                name="control",
-                mode="neural",
-                input_buffers={
-                    "segments": seg_buf,
-                    "imu": imu_buf,
-                    "pose": pose_buf,
-                },
-                output_buffer=ctrl_buf,
-                model_config=ctrl_config_path,
-                device=device,
-            )
+        needs_pose = control_mode in TRACK_MODES or control_mode in ("pid", "ftg")
+        hint = (
+            " — it needs a pose source: run with --enable-slam (or use_zmq_pose in the simulator)"
+            if needs_pose else
+            " — valid modes: " + ", ".join(sorted(set(TRACK_MODES) | {"depth_ftg", "vae", "pid", "ftg", "lidar_pid"}))
         )
+        _release_buffers()
+        raise SystemExit(f"control_mode {control_mode!r} cannot run with this configuration{hint}")
 
     if has_pose_source:
         _workers.append(
@@ -608,7 +603,7 @@ def main() -> None:
                     "vocabulary", "ORB_SLAM3/Vocabulary/ORBvoc.txt"
                 ),
                 settings_path=slam_cfg.get(
-                    "settings", "oak_d_orbslam_settings.yaml"
+                    "settings", "orbslam_oakd_rgbd.yaml"
                 ),
                 loop_event=loop_event,
                 localize_event=localize_event,

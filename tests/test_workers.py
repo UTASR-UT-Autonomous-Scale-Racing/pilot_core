@@ -14,7 +14,7 @@ Workers tested:
     - VisionWorker (ResNet18 mock stub)
     - SLAMWorker (stub mode — no orbslam3_python required)
     - MappingWorker (synthetic data)
-    - ControlWorker (neural mock + PID mode)
+    - ControlWorker (PID mode)
     - ActuatorWorker (no-hardware stub)
     - RecorderWorker (tempdir)
 """
@@ -886,39 +886,6 @@ class TestControlWorkerPID:
             pb.unlink()
             bb.unlink()
 
-
-class TestControlWorkerNeural:
-
-    def test_smoke_init_neural(self):
-        from workers import ControlWorker
-        cn = f"ctrl_{_uid()}"
-        sn = f"ctrl_s_{_uid()}"
-        imuname = f"ctrl_i_{_uid()}"
-        pn = f"ctrl_p_{_uid()}"
-        cb = ControlBuffer(slots=4, name=cn, create=True)
-        sb = SegmentationBuffer(slots=4, name=sn, create=True)
-        ib = IMUBuffer(slots=8, name=imuname, create=True)
-        pb = PoseBuffer(slots=4, name=pn, create=True)
-        try:
-            w = ControlWorker(
-                name="control",
-                mode="neural",
-                input_buffers={"segments": sb, "imu": ib, "pose": pb},
-                output_buffer=cb,
-                model_config="dummy",
-                device="cpu",
-            )
-            assert w.config["mode"] == "neural"
-        finally:
-            cb.unlink()
-            sb.unlink()
-            ib.unlink()
-            pb.unlink()
-
-
-#
-# --- ActuatorWorker ---
-#
 
 class TestActuatorWorker:
 

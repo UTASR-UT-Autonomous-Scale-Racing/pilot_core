@@ -19,17 +19,12 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 SEGMENTATION_CONFIG=$(grep '^segmentation_config_path:' "$CONFIG_FILE" | awk '{print $2}')
-CONTROL_CONFIG=$(grep '^control_config_path:' "$CONFIG_FILE" | awk '{print $2}')
 
 if [ ! -f "$SEGMENTATION_CONFIG" ]; then
     echo "Error: Segmentation config not found at $SEGMENTATION_CONFIG"
     exit 1
 fi
 
-if [ ! -f "$CONTROL_CONFIG" ]; then
-    echo "Error: Control config not found at $CONTROL_CONFIG"
-    exit 1
-fi
 
 
 echo "-> Successfully verified configuration files."

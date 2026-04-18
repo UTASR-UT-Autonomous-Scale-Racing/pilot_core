@@ -1,19 +1,9 @@
-[submodule "depthai-core"]
-	path = depthai-core
-	url = https://github.com/UTASR-UT-Autonomous-Scale-Racing/depthai-core.git
-	branch = main
 [submodule "ORB_SLAM3"]
 	path = ORB_SLAM3
 	url = https://github.com/UTASR-UT-Autonomous-Scale-Racing/ORB_SLAM3.git
-[submodule "pilot_ingest"]
-	path = pilot_ingest
-	url = https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_ingest.git
 [submodule "pilot_vision"]
 	path = pilot_vision
 	url = https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_vision.git
-[submodule "pilot_controller"]
-	path = pilot_controller
-	url = https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_controller.git
 [submodule "firmware"]
 	path = firmware
 	url = https://github.com/UTASR-UT-Autonomous-Scale-Racing/firmware.git

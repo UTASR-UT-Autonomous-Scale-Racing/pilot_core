@@ -21,7 +21,7 @@ git fetch origin
 git reset --hard origin/$CURRENT_BRANCH
 
 # Update and reset submodules/repos
-for repo in pilot_ingest pilot_vision pilot_controller firmware; do
+for repo in pilot_vision firmware; do
     cd $repo
     BRANCH=$(git rev-parse --abbrev-ref HEAD)
     git fetch origin

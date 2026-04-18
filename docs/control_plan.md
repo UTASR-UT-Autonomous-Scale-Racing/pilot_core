@@ -9,16 +9,14 @@ References: [`references.md`](references.md).
 
 | Controller | Location | State |
 | --- | --- | --- |
-| `MeanIntensity` (default "neural") | `pilot_controller/models/default` | Placeholder: always returns `(0.5, 0.5)`. Runs an IMU-integrating EKF + matplotlib mapper as a side effect. |
-| `RNN` | `pilot_controller/models/rnn/.py` | Stub (`tanh(mean(history))`). File is literally named `.py` / `.yaml`, so it can't be loaded. |
-| RNN trainer | `pilot_controller/Controller/` | Torch GRU/LSTM scaffold that predicts the next *input* vector, not actions. No dataset, not wired in. |
+| `pilot_controller` models (`MeanIntensity`, `RNN`, RNN trainer) | removed submodule | Placeholders (constant output / stubs). The submodule was removed; its PWM mapping now lives in `control/pwm.py` and `neural` mode is gone. |
 | `TrackPIDController` | `workers/track_pid_controller.py` | Runs. Since the sim merge it aligns the heading with the local boundary tangent, but has **no cross-track term**, so lateral drift is never corrected. In a closed-loop test at 0.84 m/s it drifted off the track within about one lap (on track 43% of the time). Also: no `dt`, no anti-windup, constant throttle, Gaussian noise injected into real commands. |
 | `TrackFTGController` | `workers/track_ftg_controller.py` | Implemented, unit-tested, selectable with `control_mode: ftg` (since the merge). Not yet evaluated closed-loop. |
 | RL (PPO) + `LidarWallController` | `rl/`, `workers/lidar_wall_controller.py` (merged) | Gymnasium env over AutoDRIVE, PPO with a 1-D CNN over boundary points; LIDAR wall-centering PID (`control_mode: lidar_pid`). |
 
 Fixed during the release clean-up (so they're not repeated below): the PID [-1,1] vs
 actuator [0,1] range crash, the SLAM Tcw-vs-Twc pose convention, the PID heading
-convention, lost-tracking frames published as the identity pose, and neural models not receiving `timestamp`.
+convention, and lost-tracking frames published as the identity pose.
 
 **What's missing across the board:** a vehicle state estimate (speed in
 particular), a track representation that controllers can query cheaply, a
@@ -32,7 +30,7 @@ These come first. Every controller below depends on them.
 ### P0a. Signed actuation contract (brake + reverse) — **done**
 - `ctrl_buf`: both channels `[0, 1]`, **0.5 = neutral**, car PWM convention
   (steer 0 = full left, 1 = full right; throttle < 0.5 = brake / reverse).
-- `pilot_controller.Controller` maps throttle linearly over
+- `control.pwm.PWMMapper` (formerly `pilot_controller.Controller`) maps throttle linearly over
   `[THROTTLE_MIN, THROTTLE_MAX]`, like steering; 0.5 lands exactly on
   `THROTTLE_NEURAL`. Steering offsets unchanged (intended).
 - Signed controller convention: **+steering = left** (ROS / REP-103), matching
@@ -51,7 +49,7 @@ These come first. Every controller below depends on them.
 ### P1. Vehicle state estimator: new `StateWorker` → `state_buf` — **done** (pose-only EKF, `control/estimator.py`)
 - Implemented as a pose-only EKF (unicycle model) published at 50 Hz. IMU fusion is a follow-up (§6): it would cut the ~150 ms speed-estimate lag, but needs the OAK-D IMU→camera extrinsics.
 - Gives controllers **speed** (currently unknown) and smooth, high-rate pose between SLAM frames; bridges short tracking losses with a bounded covariance.
-- Reuse the idea (not the code) of `pilot_controller/lap_engine.EKFLocalization`, which double-integrates world-frame acceleration and will drift.
+- (The removed `pilot_controller/lap_engine.EKFLocalization` double-integrated world-frame acceleration and drifted; not reused.)
 
 ### P2. Track model: `TrackModel` (library, not a worker) — **done** (`control/track.py`)
 - Built once from `boundary_buf`: order and resample boundaries, compute the centre-line, arc length `s`, curvature `κ(s)` and left/right widths.
@@ -65,7 +63,7 @@ class TrackController(Protocol):
     def reset(self) -> None: ...
     def step(self, state: VehicleState, track: TrackModel) -> Command: ...  # steer, throttle ∈ [-1,1] (P0a)
 ```
-- `ControlWorker` gets a registry keyed by `control_mode` (`pid`, `ftg`, `lidar_pid`, `pure_pursuit`, `stanley`, `policy`, `neural`) instead of the current if/else chain.
+- `ControlWorker` gets a registry keyed by `control_mode` (`pid`, `ftg`, `lidar_pid`, `pure_pursuit`, `stanley`, `lqr`, `mpc`, `policy`, `depth_ftg`, `vae`) instead of the current if/else chain.
 
 ### P4. Closed-loop evaluation harness — **done** (`control/sim.py`, `tests/test_control_bench.py`, `scripts/sim_bench.py`)
 - Pure-Python kinematic bicycle simulator on synthetic tracks (`conftest.track_boundaries`, `synthetic/closed_loop_generator.py`) → `pytest` benchmarks: lap completion, lap time, cross-track RMS / max, steering jerk.
@@ -99,7 +97,7 @@ class TrackController(Protocol):
 ### C5. Learned policy deployment (`policy` mode) — **done** (deployment path; no trained policy yet)
 - Load a trained policy exported to **ONNX** and run it on CPU with onnxruntime (tiny MLP/1-D CNN: well under 1 ms). The observation builder reuses `TrackModel` to produce the sim branch's boundary-point observation.
 - Start from the merged PPO work in `rl/`. Sim-to-real gap is the main risk; gate behind the P0b safety layer and the P4 harness.
-- Optional follow-on: behaviour cloning from `BufferRecorderWorker` recordings of C1/C2 laps (fixes the `pilot_controller` RNN scaffold into an action-predicting model).
+- Optional follow-on: behaviour cloning from `BufferRecorderWorker` recordings of C1/C2 laps (an action-predicting model; see also the VAE model).
 - Effort: **M** for deployment; training effort is open-ended.
 
 ### C6. MPC — **done** (`mpc`, linear time-varying kinematic MPC; plus `lqr`)

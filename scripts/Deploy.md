@@ -33,9 +33,7 @@ pilot_core/
     ├── Dockerfile
     ├── start.py
     ├── config.yaml
-    ├── pilot_ingest/
     ├── pilot_vision/
-    ├── pilot_controller/
     └── ...
 ```
 

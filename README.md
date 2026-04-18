@@ -9,12 +9,12 @@ as a set of Python processes connected by lock-free shared-memory ring buffers.
 ```bash
 git clone https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_core.git
 cd pilot_core
-git submodule update --init pilot_controller pilot_vision pilot_ingest firmware
+git submodule update --init pilot_vision firmware
 
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-python start.py --config config_cpu.yaml            # camera + IMU + vision + control
+python start.py --config config_cpu.yaml            # camera + IMU + map-free depth_ftg control
 python start.py --config config_cpu.yaml --debug    # verbose per-worker logging
 ```
 
@@ -62,8 +62,8 @@ shutdown.
 | `ctrl_buf`     | `steering, throttle` both in **[0, 1]**, **0.5 = neutral**: steer 0 = full left, 1 = full right; throttle < 0.5 = brake / reverse, > 0.5 = forward |
 
 `ctrl_buf` follows the car's PWM convention (below neutral = left / brake-reverse,
-above = right / forward). `pilot_controller.Controller` maps each channel linearly
-over its `[MIN, MAX]` PWM range. Controllers and RL policies work in signed
+above = right / forward). `control.pwm.PWMMapper` maps each channel linearly over
+its `[min, max]` pulse width, set in the config `pwm` section. Controllers and RL policies work in signed
 `[-1, 1]` space with **+steering = left** (ROS / REP-103); `ControlWorker`
 converts with `signed_to_unit()`, and the simulator bridge converts back.
 `ActuatorWorker` clamps anything out of range as a last line of defence.
@@ -83,7 +83,7 @@ track controller drives it:
 | `policy`       | PPO policy exported to ONNX (`rl/export_onnx.py`) | n/a | Needs a trained policy |
 | `depth_ftg`    | Follow-the-Gap on a depth-camera virtual scan | 7 cm | **Map-free**; also usable as the tracking-loss fallback |
 | `vae`          | VAE latent of the depth frame → learned steering head (World Models) | see below | **Map-free**, learned; train with `scripts/train_vae_policy.py` |
-| `pid`, `ftg`, `lidar_pid`, `neural` | Legacy / simulator modes | | |
+| `pid`, `ftg`, `lidar_pid` | Legacy / simulator modes | | |
 
 References for each algorithm: [`docs/references.md`](docs/references.md).
 
@@ -219,7 +219,7 @@ python start.py --config config_zmq.yaml
 With `use_zmq_pose: true` the simulator's ground-truth pose replaces SLAM and a
 LiDAR projection builds the wall map (`L` + ENTER signals loop closure). Set
 `use_saved_map: true` to load boundaries from `saved_map_path` and drive
-immediately. `control_mode` can be `pid`, `ftg`, `lidar_pid` or `neural`.
+immediately. Any track mode works with the simulator's pose; `lidar_pid` uses its LiDAR.
 
 RL training (PPO, needs `pip install gymnasium stable-baselines3 torch`):
 
@@ -263,10 +263,9 @@ pilot_core/
 ├── rl/                   # Gymnasium env + PPO training on AutoDRIVE
 ├── collect_frames.py     # Save simulator camera frames for dataset building
 ├── scripts/              # Launch, deploy and setup helpers
-├── src/ include/ utility/  # Legacy C++ pipeline (scripts/READMECPP.md)
 ├── config*.yaml          # Runtime profiles
 ├── vehicle_params.yaml   # Vehicle geometry/limits (F1TENTH placeholders)
-└── submodules: pilot_controller, pilot_vision, pilot_ingest, firmware, ORB_SLAM3, depthai-core
+└── submodules: pilot_vision (segmentation models), firmware (Arduino), ORB_SLAM3
 ```
 
 ## Scripts
@@ -281,4 +280,3 @@ pilot_core/
 | `sim_bench.py`                | Closed-loop controller benchmarks (no hardware)          |
 | `setup.sh`                    | Init all submodules                                      |
 | `branch_checkout.sh [branch]` | Check out a branch in pilot_core and all submodules      |
-| `build.sh` / `runCpp.sh` / `replay.sh` | Legacy C++ pipeline                             |

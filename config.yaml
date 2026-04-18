@@ -16,7 +16,7 @@ use_tensorrt: false           # Set true on Jetson to load TensorRT engines
 
 # --- Control ---
 control_config_path: pilot_controller/models/default/config.yaml
-control_mode: "pure_pursuit"  # pure_pursuit | stanley | lqr | mpc | policy | depth_ftg | pid | ftg | neural
+control_mode: "pure_pursuit"  # pure_pursuit | stanley | lqr | mpc | policy | depth_ftg | vae | pid | ftg | neural
 
 # --- PID Control (used when control_mode = "pid") ---
 pid:
@@ -26,7 +26,7 @@ pid:
   target_throttle: 0.3
   noise_std: 0.05
 
-# --- Track following (control_mode: pure_pursuit | stanley) ---
+# --- Track following (control_mode: pure_pursuit | stanley | lqr | mpc | policy) ---
 vehicle_params: vehicle_params.yaml
 track_control:
   spacing: 0.05                 # m, centre-line sample spacing
@@ -75,6 +75,12 @@ depth_ftg:
   aim_distance: 0.7             # m
   cruise_speed: 0.6             # m/s
   stop_distance: 0.35           # m — obstacle this close ahead → neutral
+
+# --- VAE control model (control_mode: vae, map-free) ---
+vae:
+  model: vae_policy.onnx        # from scripts/train_vae_policy.py (+ .json sidecar)
+  cruise_speed: 0.8             # m/s
+  steer_slowdown: 0.5           # speed *= 1 - steer_slowdown * |steering|
 
 # --- State estimator (pose EKF) ---
 estimator:

@@ -1,6 +1,6 @@
 # Control models: assessment and implementation plan
 
-Status: **all controllers implemented** (P0–P4, C1–C6 plus LQR), tested in the
+Status: **all controllers implemented** (P0–P4, C1–C6, plus LQR and a VAE model), tested in the
 closed-loop bench and on the local camera/SLAM pipeline. Not yet run on the car.
 Remaining: on-car calibration (§6) and training an RL policy for C5.
 References: [`references.md`](references.md).
@@ -143,6 +143,15 @@ class TrackController(Protocol):
 | twisty | MPC | 0.8 / 2.6 cm | 0 % | 1.29 / 1.43 m/s |
 | oval | depth FTG (map-free) | 5.1 / 15.2 cm | 0 % | 0.52 / 0.53 m/s |
 | twisty | depth FTG (map-free) | 6.8 / 12.7 cm | 0 % | 0.51 / 0.52 m/s |
+| oval | VAE (map-free, learned) | 7.3 / 19.1 cm | 0 % | 0.73 / 0.78 m/s |
+| twisty | VAE (map-free, learned) | 10.9 / 26.5 cm | 0 % | 0.71 / 0.79 m/s |
+
+VAE model (`vae`): trained by `scripts/train_vae_policy.py` in about 11 min on 4 cores
+(21,600 depth frames from 16 random tracks, mirrored; LQR expert with DART noise).
+The VAE reconstructs depth to 13 cm RMS, and the steering head's error is 0.038 on held-out frames. The
+closed-loop results above are on the oval / twisty tracks, which were **not** in the training
+set. The model learns rendered depth, so for the car the same pipeline must be retrained
+on recorded real depth frames with expert labels.
 
 MPC steers about half as busily as LQR (steering rate RMS 1.5 vs 2.8 /s) at the same accuracy.
 The depth FTG uses only rendered depth images (no pose, no map). On the real OAK-D it
@@ -173,7 +182,8 @@ Findings fixed along the way:
    `v_max` (e.g. 0.6 m/s) on the mapped track.
 4. **Measure the camera height and pitch** for `depth_ftg` (level camera assumed).
 5. **Follow-ups:** IMU in the EKF (lower speed lag); gap hysteresis for `depth_ftg`;
-   train a PPO policy (`rl/train.py`) and export it for `policy` mode. Note that
+   train a PPO policy (`rl/train.py`) and export it for `policy` mode; retrain
+   the VAE model on real recorded depth frames. Note that
    `train.py` defines `TrackCNNExtractor` but doesn't pass it to PPO (it trains a plain MLP).
 
 ## 7. Sequencing

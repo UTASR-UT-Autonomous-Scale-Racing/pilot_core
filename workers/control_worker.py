@@ -138,6 +138,7 @@ class ControlWorker(BaseWorker):
             "lidar_pid": (self._setup_lidar_pid, self._step_lidar_pid),
             **{m: (self._setup_track, self._step_track) for m in TRACK_MODES},
             "depth_ftg": (self._setup_depth_ftg, self._step_depth_ftg),
+            "vae": (self._setup_vae, self._step_depth_ftg),
         }
 
     def _setup_neural(self) -> None:
@@ -320,6 +321,19 @@ class ControlWorker(BaseWorker):
         vehicle = VehicleParams.load(self.config.get("vehicle_params", "vehicle_params.yaml"))
         cfg = DepthFTGConfig(**self.config.get("depth_ftg_config", {}))
         return DepthGapFollower(vehicle, K, cfg)
+
+    def _setup_vae(self) -> None:
+        from control.vae import VAEPolicyConfig, VAEPolicyFollower
+
+        self._frame_buf = self.config["frame_buffer"]
+        self._last_frame_seq = 0
+        cfg = dict(self.config.get("vae_config", {}))
+        model = cfg.pop("model", "vae_policy.onnx")
+        self._depth_follower = VAEPolicyFollower(model, VAEPolicyConfig(**cfg))
+        self.logger.info(
+            f"ControlWorker ready — vae mode (map-free, model={model}, "
+            f"latent={self._depth_follower.meta.get('latent_dim')})"
+        )
 
     def _setup_depth_ftg(self) -> None:
         self._depth_follower = self._make_depth_follower()

@@ -82,6 +82,7 @@ track controller drives it:
 | `mpc`          | Linear time-varying kinematic MPC (OSQP, ~2 ms/solve) | 0.8 cm | Steering-angle/rate constraints, delay compensation |
 | `policy`       | PPO policy exported to ONNX (`rl/export_onnx.py`) | n/a | Needs a trained policy |
 | `depth_ftg`    | Follow-the-Gap on a depth-camera virtual scan | 7 cm | **Map-free**; also usable as the tracking-loss fallback |
+| `vae`          | VAE latent of the depth frame → learned steering head (World Models) | see below | **Map-free**, learned; train with `scripts/train_vae_policy.py` |
 | `pid`, `ftg`, `lidar_pid`, `neural` | Legacy / simulator modes | | |
 
 References for each algorithm: [`docs/references.md`](docs/references.md).
@@ -116,6 +117,13 @@ model, 15 Hz noisy delayed poses, the same estimator, controller and safety code
 python scripts/sim_bench.py                       # all controllers × tracks
 python scripts/sim_bench.py --mode stanley --plot bench.png
 python scripts/sim_bench.py --mode depth_ftg      # renders depth images, no pose/map
+```
+
+Training the VAE control model (bench demonstrations → VAE → steering head → ONNX):
+
+```bash
+python scripts/train_vae_policy.py --out vae_policy.onnx   # ~15 min on 4 CPU cores
+# then set control_mode: vae (vae.model: vae_policy.onnx)
 ```
 
 Deploying a trained RL policy:

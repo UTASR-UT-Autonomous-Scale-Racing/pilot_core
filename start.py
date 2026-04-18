@@ -389,6 +389,8 @@ def main() -> None:
     )
     depth_ftg_cfg = dict(config.get("depth_ftg", {}))
     depth_ftg_cfg.setdefault("speed_per_throttle", speed_per_throttle)
+    vae_cfg = dict(config.get("vae", {}))
+    vae_cfg.setdefault("speed_per_throttle", speed_per_throttle)
 
     use_synthetic = (
         config.get("synthetic", False) or os.environ.get("PILOT_SYNTHETIC") == "1"
@@ -499,15 +501,16 @@ def main() -> None:
                 depth_ftg_config=depth_ftg_cfg,
             )
         )
-    elif control_mode == "depth_ftg":
+    elif control_mode in ("depth_ftg", "vae"):
         _workers.append(
             ControlWorker(
                 name="control",
-                mode="depth_ftg",
+                mode=control_mode,
                 output_buffer=ctrl_buf,
                 frame_buffer=frame_buf,
                 camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
                 depth_ftg_config=depth_ftg_cfg,
+                vae_config=vae_cfg,
                 vehicle_params=config.get("vehicle_params", "vehicle_params.yaml"),
             )
         )

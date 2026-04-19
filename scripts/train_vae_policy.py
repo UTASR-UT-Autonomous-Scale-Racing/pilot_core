@@ -3,11 +3,8 @@
 Train the VAE control model (control/vae.py) on the closed-loop bench and
 export it to ONNX for ``control_mode: vae``.
 
-    1. Collect: an LQR expert drives random tracks from the true state while
-       depth frames are rendered.  Steering noise is injected into the
-       executed command (DART) so the data contains recoveries; the label is
-       always the expert's clean command.  Frames are mirrored (steering
-       negated) to balance left and right turns.
+    1. Collect expert demonstrations with DART noise (control/imitation.py),
+       or load a cached dataset (--data; shared with train_bc_policy.py).
     2. Train the VAE (unsupervised) on the frames.
     3. Train the controller head on the frozen latent means (behaviour cloning).
     4. Export encoder-mean → head to ONNX (+ JSON sidecar).
@@ -31,51 +28,23 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from control import TrackModel, VehicleParams, VehicleState  # noqa: E402
-from control.controllers import build_track_follower  # noqa: E402
-from control.depth_ftg import Intrinsics  # noqa: E402
-from control.sim import (  # noqa: E402
-    BicyclePlant, PlantConfig, oval_track, random_track, render_depth, run_depth_closed_loop, twisty_track,
+from control import VehicleParams  # noqa: E402
+from control.imitation import (  # noqa: E402
+    CAM_HEIGHT, DepthPolicyConfig, DepthPolicyFollower, bench_intrinsics, collect_depth_demos,
 )
-from control.vae import VAEPolicyConfig, VAEPolicyFollower, preprocess_depth  # noqa: E402
-
-W, H = 160, 100
-CAM_HEIGHT = 0.12
+from control.sim import oval_track, run_depth_closed_loop, twisty_track  # noqa: E402
 
 
-def camera_intrinsics() -> Intrinsics:
-    """OAK-D RGB intrinsics scaled from 640×400 to the rendered 160×100."""
-    K = Intrinsics.from_orbslam_settings("orbslam_oakd_rgbd.yaml")
-    return Intrinsics(K.fx * W / 640, K.fy * H / 400, K.cx * W / 640, K.cy * H / 400)
-
-
-def collect(params, K, n_tracks, seconds, speed, max_range, seed, noise_std=0.3, dt=0.01, rate=15.0):
-    rng = np.random.default_rng(seed)
-    frames, labels = [], []
-    for k in range(n_tracks):
-        outer, inner, _ = random_track(rng)
-        expert = build_track_follower("lqr", TrackModel(outer, inner), params, speed_cfg={"v_max": speed})
-        tr = expert.track
-        car = BicyclePlant(params, PlantConfig(), *tr.points[0], tr.heading[0])
-        noise, t, next_frame = 0.0, 0.0, 0.0
-        while t < seconds:
-            cmd = expert.step(VehicleState(t, car.x, car.y, car.yaw, car.v))
-            if t >= next_frame:
-                d = render_depth(car.x, car.y, car.yaw, [outer, inner], K, W, H, cam_height=CAM_HEIGHT,
-                                 max_range=max_range)
-                frames.append(preprocess_depth(d, max_range))
-                labels.append(cmd.steering)
-                next_frame += 1.0 / rate
-            # DART: correlated steering noise on the executed command only
-            noise = 0.95 * noise + rng.normal(0, noise_std * np.sqrt(1 - 0.95 ** 2))
-            cmd.steering = float(np.clip(cmd.steering + noise, -1, 1))
-            car.step(cmd, t, dt)
-            t += dt
-        print(f"  track {k + 1}/{n_tracks}: {len(frames)} frames")
-    x = np.stack(frames)[:, None]
-    y = np.array(labels, dtype=np.float32)[:, None]
-    # Mirror augmentation: flip left↔right, negate steering
-    return np.concatenate([x, x[..., ::-1]]).astype(np.float32), np.concatenate([y, -y])
+def load_or_collect(args, params, K):
+    if args.data and os.path.exists(args.data):
+        d = np.load(args.data)
+        print(f"      loaded {len(d['x'])} frames from {args.data}")
+        return d["x"], d["y"]
+    x, y = collect_depth_demos(params, K, args.tracks, args.seconds, args.speed, args.max_range, args.seed)
+    if args.data:
+        np.savez_compressed(args.data, x=x, y=y)
+        print(f"      saved dataset → {args.data}")
+    return x, y
 
 
 def train(x, y, latent_dim, epochs, head_epochs, beta, seed):
@@ -144,16 +113,17 @@ def main() -> int:
     ap.add_argument("--beta", type=float, default=1.0)
     ap.add_argument("--max-range", type=float, default=4.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--data", help="dataset cache (.npz): loaded if present, else written")
     ap.add_argument("--out", default="vae_policy.onnx")
     ap.add_argument("--eval-seconds", type=float, default=90.0)
     args = ap.parse_args()
 
     params = VehicleParams.load()
-    K = camera_intrinsics()
+    K = bench_intrinsics()
 
     t0 = time.time()
-    print(f"[1/4] Collecting expert demonstrations on {args.tracks} random tracks …")
-    x, y = collect(params, K, args.tracks, args.seconds, args.speed, args.max_range, args.seed)
+    print("[1/4] Demonstrations …")
+    x, y = load_or_collect(args, params, K)
     print(f"      {len(x)} frames (with mirroring) in {time.time() - t0:.0f}s")
 
     print("[2/4] Training VAE + controller head …")
@@ -168,7 +138,7 @@ def main() -> int:
     })
 
     print("[4/4] Closed-loop evaluation (map-free, held-out tracks) …")
-    follower = VAEPolicyFollower(args.out, VAEPolicyConfig(cruise_speed=args.speed))
+    follower = DepthPolicyFollower(args.out, DepthPolicyConfig(cruise_speed=args.speed))
     for name, (outer, inner, _) in [("oval", oval_track()), ("twisty", twisty_track())]:
         r = run_depth_closed_loop(follower, outer, inner, params, duration=args.eval_seconds,
                                   K=K, camera_height=CAM_HEIGHT)

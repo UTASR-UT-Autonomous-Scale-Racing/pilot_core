@@ -13,8 +13,9 @@ lib/
 orbslam3_python*.so
 
 # --- Runtime output ---
-# Trained models (regenerate with scripts/train_vae_policy.py, rl/export_onnx.py)
+# Trained models / datasets (regenerate with scripts/train_*_policy.py, rl/export_onnx.py)
 *.onnx
+*.npz
 recordings/
 temp/
 /test_output

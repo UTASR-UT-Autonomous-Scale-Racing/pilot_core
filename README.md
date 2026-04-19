@@ -82,7 +82,8 @@ track controller drives it:
 | `mpc`          | Linear time-varying kinematic MPC (OSQP, ~2 ms/solve) | 0.8 cm | Steering-angle/rate constraints, delay compensation |
 | `policy`       | PPO policy exported to ONNX (`rl/export_onnx.py`) | n/a | Needs a trained policy |
 | `depth_ftg`    | Follow-the-Gap on a depth-camera virtual scan | 7 cm | **Map-free**; also usable as the tracking-loss fallback |
-| `vae`          | VAE latent of the depth frame → learned steering head (World Models) | see below | **Map-free**, learned; train with `scripts/train_vae_policy.py` |
+| `vae`          | VAE latent of the depth frame → learned steering head (World Models) | 10.9 cm | **Map-free**, learned; train with `scripts/train_vae_policy.py` |
+| `bc`           | Behaviour cloning: end-to-end CNN, depth frame → steering (PilotNet) | 4.3 cm | **Map-free**, learned; train with `scripts/train_bc_policy.py` |
 | `pid`, `ftg`, `lidar_pid` | Legacy / simulator modes | | |
 
 References for each algorithm: [`docs/references.md`](docs/references.md).
@@ -119,11 +120,12 @@ python scripts/sim_bench.py --mode stanley --plot bench.png
 python scripts/sim_bench.py --mode depth_ftg      # renders depth images, no pose/map
 ```
 
-Training the VAE control model (bench demonstrations → VAE → steering head → ONNX):
+Training the learned depth controllers (bench demonstrations → model → ONNX). Both scripts
+can share one cached dataset:
 
 ```bash
-python scripts/train_vae_policy.py --out vae_policy.onnx   # ~15 min on 4 CPU cores
-# then set control_mode: vae (vae.model: vae_policy.onnx)
+python scripts/train_bc_policy.py  --data demos.npz --out bc_policy.onnx    # control_mode: bc
+python scripts/train_vae_policy.py --data demos.npz --out vae_policy.onnx   # control_mode: vae
 ```
 
 Deploying a trained RL policy:

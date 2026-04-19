@@ -1,6 +1,6 @@
 # Control models: assessment and implementation plan
 
-Status: **all controllers implemented** (P0–P4, C1–C6, plus LQR and a VAE model), tested in the
+Status: **all controllers implemented** (P0–P4, C1–C6, plus LQR, a VAE and a BC model), tested in the
 closed-loop bench and on the local camera/SLAM pipeline. Not yet run on the car.
 Remaining: on-car calibration (§6) and training an RL policy for C5.
 References: [`references.md`](references.md).
@@ -143,6 +143,10 @@ class TrackController(Protocol):
 | twisty | depth FTG (map-free) | 6.8 / 12.7 cm | 0 % | 0.51 / 0.52 m/s |
 | oval | VAE (map-free, learned) | 7.3 / 19.1 cm | 0 % | 0.73 / 0.78 m/s |
 | twisty | VAE (map-free, learned) | 10.9 / 26.5 cm | 0 % | 0.71 / 0.79 m/s |
+| oval | BC (map-free, learned) | 4.3 / 6.7 cm | 0 % | 0.74 / 0.78 m/s |
+| twisty | BC (map-free, learned) | 4.3 / 16.0 cm | 0 % | 0.72 / 0.79 m/s |
+
+BC model (`bc`): PilotNet-style CNN trained end to end by `scripts/train_bc_policy.py` (8 min) on the **same** dataset as the VAE model. Its steering error on held-out frames is 0.018 (VAE 0.038), and it tracks tighter with smoother steering. The VAE's advantage is that its encoder can also learn from unlabelled frames.
 
 VAE model (`vae`): trained by `scripts/train_vae_policy.py` in about 11 min on 4 cores
 (21,600 depth frames from 16 random tracks, mirrored; LQR expert with DART noise).

@@ -38,7 +38,7 @@ depth_max_meters: 15.0
 # ======================================================================
 segmentation_config_path: "pilot_vision/models/deeplab/config.yaml"
 
-# Control mode: pure_pursuit | stanley | lqr | mpc | policy | pid | ftg | lidar_pid | depth_ftg | vae
+# Control mode: pure_pursuit | stanley | lqr | mpc | policy | pid | ftg | lidar_pid | depth_ftg | vae | bc
 control_mode: "pid"
 
 # ======================================================================

@@ -8,8 +8,8 @@ Modes (``mode=``):
   ``pure_pursuit`` (default), ``stanley``, ``lqr``, ``mpc``, ``policy``
   (see :mod:`control`).  Optional ``depth_ftg`` fallback while the state
   estimate is stale.
-* Map-free, from depth frames: ``depth_ftg`` (Follow-the-Gap) and ``vae``
-  (learned VAE control model).
+* Map-free, from depth frames: ``depth_ftg`` (Follow-the-Gap), ``vae``
+  (learned VAE control model) and ``bc`` (behaviour-cloning CNN).
 * Legacy / simulator: ``pid`` and ``ftg`` (on raw poses + boundaries),
   ``lidar_pid`` (LiDAR wall centering, simulator).
 
@@ -82,7 +82,7 @@ class ControlWorker(BaseWorker):
     fallback also ``frame_buffer`` / ``camera_settings`` / ``depth_ftg_config``.
 
     Map-free modes: ``frame_buffer``, ``camera_settings`` + ``depth_ftg_config``
-    (``depth_ftg``) or ``vae_config`` (``vae``).
+    (``depth_ftg``), ``vae_config`` (``vae``) or ``bc_config`` (``bc``).
 
     ``pid`` / ``ftg``: ``pose_buffer``, ``boundary_buffer``, ``mapping_done_event``,
     ``pid_config`` / ``ftg_config``, ``bev_axes``, ``forward_axis``.
@@ -124,7 +124,8 @@ class ControlWorker(BaseWorker):
             "lidar_pid": (self._setup_lidar_pid, self._step_lidar_pid),
             **{m: (self._setup_track, self._step_track) for m in TRACK_MODES},
             "depth_ftg": (self._setup_depth_ftg, self._step_depth_ftg),
-            "vae": (self._setup_vae, self._step_depth_ftg),
+            "vae": (self._setup_learned_depth, self._step_depth_ftg),
+            "bc": (self._setup_learned_depth, self._step_depth_ftg),
         }
 
     def _setup_pid(self) -> None:
@@ -289,18 +290,16 @@ class ControlWorker(BaseWorker):
         cfg = DepthFTGConfig(**self.config.get("depth_ftg_config", {}))
         return DepthGapFollower(vehicle, K, cfg)
 
-    def _setup_vae(self) -> None:
-        from control.vae import VAEPolicyConfig, VAEPolicyFollower
+    def _setup_learned_depth(self) -> None:
+        """``vae`` / ``bc``: an exported depth → steering ONNX model."""
+        from control.imitation import DepthPolicyConfig, DepthPolicyFollower
 
         self._frame_buf = self.config["frame_buffer"]
         self._last_frame_seq = 0
-        cfg = dict(self.config.get("vae_config", {}))
-        model = cfg.pop("model", "vae_policy.onnx")
-        self._depth_follower = VAEPolicyFollower(model, VAEPolicyConfig(**cfg))
-        self.logger.info(
-            f"ControlWorker ready — vae mode (map-free, model={model}, "
-            f"latent={self._depth_follower.meta.get('latent_dim')})"
-        )
+        cfg = dict(self.config.get(f"{self._mode}_config", {}))
+        model = cfg.pop("model", f"{self._mode}_policy.onnx")
+        self._depth_follower = DepthPolicyFollower(model, DepthPolicyConfig(**cfg))
+        self.logger.info(f"ControlWorker ready — {self._mode} mode (map-free, model={model})")
 
     def _setup_depth_ftg(self) -> None:
         self._depth_follower = self._make_depth_follower()

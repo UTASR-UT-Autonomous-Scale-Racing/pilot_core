@@ -392,6 +392,8 @@ def main() -> None:
     depth_ftg_cfg.setdefault("speed_per_throttle", speed_per_throttle)
     vae_cfg = dict(config.get("vae", {}))
     vae_cfg.setdefault("speed_per_throttle", speed_per_throttle)
+    bc_cfg = dict(config.get("bc", {}))
+    bc_cfg.setdefault("speed_per_throttle", speed_per_throttle)
 
     use_synthetic = (
         config.get("synthetic", False) or os.environ.get("PILOT_SYNTHETIC") == "1"
@@ -502,7 +504,7 @@ def main() -> None:
                 depth_ftg_config=depth_ftg_cfg,
             )
         )
-    elif control_mode in ("depth_ftg", "vae"):
+    elif control_mode in ("depth_ftg", "vae", "bc"):
         _workers.append(
             ControlWorker(
                 name="control",
@@ -512,6 +514,7 @@ def main() -> None:
                 camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
                 depth_ftg_config=depth_ftg_cfg,
                 vae_config=vae_cfg,
+                bc_config=bc_cfg,
                 vehicle_params=config.get("vehicle_params", "vehicle_params.yaml"),
             )
         )
@@ -534,7 +537,7 @@ def main() -> None:
         hint = (
             " — it needs a pose source: run with --enable-slam (or use_zmq_pose in the simulator)"
             if needs_pose else
-            " — valid modes: " + ", ".join(sorted(set(TRACK_MODES) | {"depth_ftg", "vae", "pid", "ftg", "lidar_pid"}))
+            " — valid modes: " + ", ".join(sorted(set(TRACK_MODES) | {"depth_ftg", "vae", "bc", "pid", "ftg", "lidar_pid"}))
         )
         _release_buffers()
         raise SystemExit(f"control_mode {control_mode!r} cannot run with this configuration{hint}")

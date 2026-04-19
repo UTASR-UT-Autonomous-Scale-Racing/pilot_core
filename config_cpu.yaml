@@ -23,7 +23,7 @@ segmentation_config_path: pilot_vision/models/default/config.yaml
 use_tensorrt: false
 
 # --- Control ---
-control_mode: "depth_ftg"     # depth_ftg / vae run map-free; pure_pursuit | stanley | lqr | mpc | policy need --enable-slam + a mapped track
+control_mode: "depth_ftg"     # depth_ftg / vae / bc run map-free; pure_pursuit | stanley | lqr | mpc | policy need --enable-slam + a mapped track
 
 pid:
   kp_steer: 1.0
@@ -97,6 +97,12 @@ vae:
   model: vae_policy.onnx        # from scripts/train_vae_policy.py (+ .json sidecar)
   cruise_speed: 0.8             # m/s
   steer_slowdown: 0.5           # speed *= 1 - steer_slowdown * |steering|
+
+# --- Behaviour-cloning control model (control_mode: bc, map-free) ---
+bc:
+  model: bc_policy.onnx         # from scripts/train_bc_policy.py (+ .json sidecar)
+  cruise_speed: 0.8             # m/s
+  steer_slowdown: 0.5
 
 # --- State estimator (pose EKF) ---
 estimator:

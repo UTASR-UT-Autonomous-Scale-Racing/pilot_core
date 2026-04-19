@@ -11,12 +11,13 @@ Pipeline:
        band above the ground (removes floor and overhead clutter).
     2. Virtual scan: nearest obstacle range per bearing bin (+ bearing = left).
     3. Follow the Gap: safety bubble around the nearest obstacle → best
-       free gap (largest visible free area) → heading angle.  As in the paper, the gap-centre angle is
-       blended with a goal angle, weighted by the nearest-obstacle distance:
+       free gap (largest visible free area) → heading angle.  As in the
+       paper, the gap-centre angle is blended with a goal angle, weighted by
+       the nearest-obstacle distance:
        ``phi = (alpha/d_min * phi_gap + beta * phi_goal) / (alpha/d_min + beta)``
        (goal = straight ahead; ``beta = 0`` gives pure gap-centre steering).
-       The "deepest point" variant popular in F1TENTH is available via
-       ``strategy="deepest"``, but on a narrow-FOV camera it rides the walls.
+       The F1TENTH "deepest point" variant is available via
+       ``strategy="deepest"``; on a narrow-FOV camera it tends to hug walls.
     4. Steer at ``phi`` with the pure-pursuit curvature law over a short aim
        distance; speed falls with steering and the car stops close to an
        obstacle.
@@ -131,13 +132,12 @@ class DepthGapFollower:
         bearings, ranges = depth_to_scan(depth, self.K, c)
         self.last_scan = (bearings, ranges)
 
-        # Stop if something is right in front of the car
+        # Obstacle directly ahead within stop_distance → neutral (coast).
         ahead = np.abs(bearings) < np.arctan2(p.width, c.stop_distance)
-        if ranges[ahead].min() < c.stop_distance:
+        if ahead.any() and ranges[ahead].min() < c.stop_distance:
             self.last_target = None
             return Command(0.0, 0.0)
 
-        # Follow the Gap
         r = ranges.copy()
         if c.smooth_window > 1:
             r = np.convolve(np.pad(r, c.smooth_window // 2, mode="edge"),

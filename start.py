@@ -64,9 +64,7 @@ from workers import (
 )
 from workers.control_worker import TRACK_MODES
 
-# --------------------------------------------------------------------------
-# Config helpers
-# --------------------------------------------------------------------------
+# --- Config helpers ---
 
 def load_config(path: str) -> Dict[str, Any]:
     """Load YAML config file and return as a dict."""
@@ -106,9 +104,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# --------------------------------------------------------------------------
-# Global state for signal handling
-# --------------------------------------------------------------------------
+# --- Global state for signal handling ---
 
 _workers: List[BaseWorker] = []
 _processes: List[mp.Process] = []
@@ -142,11 +138,9 @@ def _shutdown(signum=None, frame=None) -> None:
     if _keyboard is not None:
         _keyboard.close()
 
-    # Signal all workers to stop
     for w in _workers:
         w.stop()
 
-    # Wait for processes to finish
     for p in _processes:
         p.join(timeout=5)
         if p.is_alive():
@@ -160,9 +154,7 @@ def _shutdown(signum=None, frame=None) -> None:
     sys.exit(0)
 
 
-# --------------------------------------------------------------------------
-# Operator keyboard
-# --------------------------------------------------------------------------
+# --- Operator keyboard ---
 
 class KeyboardControl:
     """Non-blocking single-key input from the terminal.
@@ -216,9 +208,7 @@ class KeyboardControl:
             self._fd = None
 
 
-# --------------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------------
+# --- Main ---
 
 def main() -> None:
     args = parse_args()
@@ -227,7 +217,6 @@ def main() -> None:
     # so that semaphores/locks are properly shared with spawned child processes.
     mp.set_start_method("spawn", force=True)
 
-    # Logging
     log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(
         level=log_level,
@@ -236,7 +225,6 @@ def main() -> None:
     )
     logger = logging.getLogger("start")
 
-    # Load config
     config = load_config(args.config)
     logger.info(f"Loaded config from {args.config}")
 
@@ -247,7 +235,7 @@ def main() -> None:
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
         os.environ.setdefault(var, threads)
 
-    # Merge CLI overrides
+    # CLI flags override config values
     if args.recording:
         config["recording"] = True
     if args.enable_slam:
@@ -266,9 +254,9 @@ def main() -> None:
     buf_cfg = config.get("buffers", {})
     resolution = config.get("resolution", [640, 400])
 
-    # Size the frame buffer for the actual resolution: meta(16) + RGB uint8 + depth float32
-    _h, _w = resolution[0], resolution[1]
-    _frame_max_payload = 16 + _h * _w * 3 + _h * _w * 4
+    # Frame buffer payload: meta(16) + W*H*3 RGB uint8 + W*H depth float32 (metres)
+    width, height = resolution
+    _frame_max_payload = 16 + width * height * 3 + width * height * 4
     frame_buf = FrameBuffer(
         slots=buf_cfg.get("frame", {}).get("slots", 8),
         name="frame_buf",
@@ -280,9 +268,8 @@ def main() -> None:
         name="imu_buf",
         create=True,
     )
-    # Size the seg buffer for the actual frame resolution (metadata=8 bytes + H*W*float32)
-    _seg_h, _seg_w = resolution[0], resolution[1]
-    _seg_max_payload = 8 + _seg_h * _seg_w * 4
+    # Seg buffer payload: meta(8) + W*H float32 mask
+    _seg_max_payload = 8 + width * height * 4
     seg_buf = SegmentationBuffer(
         slots=buf_cfg.get("segmentation", {}).get("slots", 4),
         name="seg_buf",
@@ -462,8 +449,9 @@ def main() -> None:
             )
         )
 
-    # Control worker — mode depends on config
-    # PID mode can use either SLAM or ZMQ ground truth pose
+    # Control worker.  Pose-based modes (pid, ftg, TRACK_MODES) need a pose
+    # source (SLAM or simulator ground truth); depth_ftg / vae / bc run from
+    # frame_buf alone; lidar_pid reads the simulator LIDAR scan.
     if control_mode == "lidar_pid":
         _workers.append(
             ControlWorker(
@@ -575,6 +563,7 @@ def main() -> None:
             armed_event=_armed_event,
             state_buffer=state_buf,
             safety=safety_cfg,
+            pwm=config.get("pwm", {}),
         )
     )
 
@@ -624,7 +613,6 @@ def main() -> None:
                 boundary_buffer=boundary_buf,
                 loop_event=loop_event,
                 mapping_done_event=mapping_done_event,
-                alpha_shape=mapping_cfg.get("alpha_shape", 25.0),
                 boundary_min_points=mapping_cfg.get("boundary_min_points", 50),
                 bev_axes=mapping_cfg.get("bev_axes", [0, 2]),
                 forward_axis=mapping_cfg.get("forward_axis", 2),
@@ -632,17 +620,16 @@ def main() -> None:
             )
         )
 
-    # Optional: Per-buffer recorder workers
+    # Optional per-buffer recorder workers
     if config.get("recording", False):
         rec_cfg = config.get("recording_config", {})
         rec_dir = config.get("recording_path", "/tmp/pilot_recordings")
         rec_sample_k = rec_cfg.get("sample_k", 1)
         rec_top_n = rec_cfg.get("top_n", 0)
 
-        # Map every active buffer to a dedicated BufferRecorderWorker.
-        # Each recorder samples every k-th sequence number and caps at
-        # top_n records (0 = unlimited).  Per-buffer overrides are read
-        # from recording_config.<buffer_name>.{sample_k, top_n}.
+        # One BufferRecorderWorker per active buffer.  Each records every
+        # k-th sequence number, capped at top_n records (0 = unlimited).
+        # Per-buffer overrides: recording_config.<buffer_name>.{sample_k, top_n}.
         rec_buffers: Dict[str, Any] = {
             "frame": frame_buf,
             "imu": imu_buf,
@@ -650,11 +637,10 @@ def main() -> None:
             "pose": pose_buf,
             "control": ctrl_buf,
         }
-        if enable_slam:
-            if pc_buf is not None:
-                rec_buffers["pointcloud"] = pc_buf
-            if boundary_buf is not None:
-                rec_buffers["boundary"] = boundary_buf
+        if pc_buf is not None:
+            rec_buffers["pointcloud"] = pc_buf
+        if boundary_buf is not None:
+            rec_buffers["boundary"] = boundary_buf
 
         for buf_name, buf_obj in rec_buffers.items():
             per_buf_cfg = rec_cfg.get(buf_name, {})
@@ -671,7 +657,7 @@ def main() -> None:
                 )
             )
 
-    # Optional: Web telemetry publisher
+    # Optional web telemetry publisher
     web_cfg = config.get("web_publish", {})
     if web_cfg.get("enabled", False):
         _workers.append(
@@ -685,11 +671,12 @@ def main() -> None:
                 timeout=web_cfg.get("timeout", 2.0),
                 vehicle_id=web_cfg.get("vehicle_id", "pilot_1"),
                 max_trajectory_pts=web_cfg.get("max_trajectory_pts", 500),
+                bev_axes=mapping_cfg.get("bev_axes", [0, 2]),
             )
         )
         logger.info("Web publish worker enabled → %s", web_cfg.get("endpoint"))
 
-    # Optional: ZMQ telemetry publisher (for simulator visualization)
+    # Optional ZMQ telemetry publisher (simulator visualisation)
     zmq_publish_cfg = config.get("zmq_publish", {})
     if use_zmq and zmq_publish_cfg.get("enabled", False):
         _workers.append(

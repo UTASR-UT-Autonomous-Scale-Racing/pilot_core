@@ -1,6 +1,8 @@
 """
 LidarProjectionWorker — builds a world-frame point cloud from 2D LIDAR scans
-combined with ground-truth ZMQ pose (PoseBuffer).
+combined with the simulator's ground-truth pose (PoseBuffer).  Simulator
+only: the world frame is Z-up (ROS / AutoDRIVE), vehicle frame x-forward,
+y-left.
 
 The AutoDRIVE simulator publishes a Hokuyo UST-10LX-equivalent scan:
   - 1080 rays, 270° sweep (angle_min=-2.35619449 rad, increment=0.00436332 rad)
@@ -13,8 +15,11 @@ Pipeline
 2. Read latest PoseBuffer pose (4×4 Twv, world-from-vehicle).
 3. Convert each valid ray to a 2D point in vehicle frame using polar→Cartesian.
 4. Apply LIDAR-to-vehicle offset, then transform to world frame via pose.
-5. Voxel-grid deduplication (10 cm cells) to avoid redundant points.
-6. Write accumulated (N, 3) float32 cloud to PointCloudBuffer.
+5. Voxel-grid deduplication (``voxel_size`` cells) into an accumulated map.
+6. Write the whole accumulated (N, 3) float32 cloud to PointCloudBuffer.
+
+Scans are only projected after the vehicle has moved ``move_threshold``
+metres in the ground plane since the last projection.
 """
 
 from __future__ import annotations
@@ -112,7 +117,7 @@ class LidarProjectionWorker(BaseWorker):
             return
         pose = pose_result[1]  # 4×4 float32 Twv (world-from-vehicle)
 
-        # Move gate: only project when the vehicle has moved enough
+        # Move gate: only project after moving move_threshold in the ground (x, y) plane
         current_pos = pose[:2, 3]
         if self._last_proj_pos is not None:
             if float(np.linalg.norm(current_pos - self._last_proj_pos)) < self._move_threshold:
@@ -124,7 +129,7 @@ class LidarProjectionWorker(BaseWorker):
             return
 
         # Voxel-grid deduplication
-        keys = (pts_world / self._voxel_size).astype(np.int32)
+        keys = np.floor(pts_world / self._voxel_size).astype(np.int64)
         new_count = 0
         for k, pt in zip(map(tuple, keys), pts_world):
             if k not in self._voxel_map:
@@ -158,7 +163,6 @@ class LidarProjectionWorker(BaseWorker):
         -------
         float32 (N, 3) world-frame XYZ points for valid rays only.
         """
-        # Filter valid rays
         valid = (ranges >= self._range_min) & (ranges <= self._range_max)
         if not np.any(valid):
             return np.empty((0, 3), dtype=np.float32)

@@ -3,9 +3,11 @@ Closed-loop evaluation bench: kinematic bicycle plant + simulated SLAM pose
 sensor, driving the *same* estimator → controller → safety chain used on
 the car.  Used by the pytest benchmarks and ``scripts/sim_bench.py``.
 
-Plant model (kinematic bicycle: R. Rajamani, "Vehicle Dynamics and Control",
-Springer, 2012; J. Kong et al., IEEE IV 2015)
------------
+Reference (plant): R. Rajamani, "Vehicle Dynamics and Control", Springer,
+2012; J. Kong et al., IEEE IV 2015.
+
+Plant model:
+
 * Kinematic bicycle referenced at the rear axle (``vehicle_params.yaml``).
 * Steering: rate-limited servo (``max_steering_vel``) behind a transport delay.
 * Drivetrain with no brake: throttle ``u != 0`` drives the speed towards
@@ -27,7 +29,7 @@ from .safety import SafetyConfig, SafetySupervisor
 from .types import Command, VehicleParams, VehicleState
 
 
-# ---------------------------------------------------------------- tracks
+# --- Tracks ---
 
 def _offset_closed(centre: np.ndarray, offset: float) -> np.ndarray:
     d = np.roll(centre, -1, axis=0) - np.roll(centre, 1, axis=0)
@@ -63,13 +65,13 @@ def random_track(rng: np.random.Generator, n: int = 800):
     return _offset_closed(centre, -width / 2), _offset_closed(centre, width / 2), centre
 
 
-# ----------------------------------------------------------------- plant
+# --- Plant ---
 
 @dataclass
 class PlantConfig:
-    speed_per_throttle: float = 3.0
-    tau: float = 0.4
-    coast_decel: float = 0.8
+    speed_per_throttle: float = 3.0    # m/s steady-state speed per unit throttle
+    tau: float = 0.4                   # s, drivetrain time constant
+    coast_decel: float = 0.8           # m/s², deceleration at neutral throttle
     steer_delay: float = 0.05          # s transport delay on steering
     pose_rate: float = 15.0            # Hz
     pose_latency: float = 0.06         # s
@@ -104,7 +106,7 @@ class BicyclePlant:
         self.yaw += self.v / self.p.wheelbase * np.tan(self.delta) * dt
 
 
-# ---------------------------------------------------------------- metrics
+# --- Metrics ---
 
 @dataclass
 class RunResult:
@@ -219,7 +221,7 @@ def run_closed_loop(
     )
 
 
-# ------------------------------------------------------------ depth camera
+# --- Depth camera ---
 
 def render_depth(x, y, yaw, walls, K, width, height, cam_height=0.12, wall_height=0.3, max_range=6.0):
     """Ray-cast a depth image (metres, z-depth) of vertical track walls.
@@ -265,9 +267,13 @@ def run_depth_closed_loop(follower, outer, inner, params, duration=40.0, plant=N
     """Drive a depth-image controller (``follower.step(depth) -> Command``, e.g.
     DepthGapFollower or VAEPolicyFollower) from rendered depth only (no pose,
     no map) and score it against the true track.  ``K`` / ``camera_height``
-    default to the follower's own attributes."""
-    K = K if K is not None else follower.K
-    camera_height = camera_height if camera_height is not None else follower.cfg.camera_height
+    default to the follower's own ``K`` / ``cfg.camera_height`` when it has them
+    (DepthGapFollower); learned followers need them passed explicitly."""
+    K = K if K is not None else getattr(follower, "K", None)
+    if camera_height is None:
+        camera_height = getattr(getattr(follower, "cfg", None), "camera_height", None)
+    if K is None or camera_height is None:
+        raise ValueError("run_depth_closed_loop needs K and camera_height for this follower")
     from .track import TrackModel
 
     plant_cfg = plant or PlantConfig()

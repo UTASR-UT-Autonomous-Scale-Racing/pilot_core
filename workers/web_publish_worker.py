@@ -1,19 +1,19 @@
 """
 WebPublishWorker — optional worker that periodically publishes the car's
 live telemetry (pose, trajectory, track boundaries, control state) to a
-remote HTTP endpoint as JSON.
+remote HTTP endpoint as JSON, e.g. for a pit-lane dashboard.
 
-Designed for a pit-lane dashboard or spectator web-app that visualises
-the vehicle's position on the mapped track in near-real-time.
+Positions are taken as the (x, z) translation of the PoseBuffer pose
+(camera-to-world), i.e. the ground plane of the ORB-SLAM3 camera frame.
 
 Config kwargs
 -------------
 pose_buffer : PoseBuffer
-    Latest SLAM pose.
+    Camera-to-world poses (SLAM).
 boundary_buffer : TrackBoundaryBuffer | None
     Extracted track boundaries (optional — omitted when SLAM disabled).
 control_buffer : ControlBuffer | None
-    Latest steering / throttle (optional).
+    Latest steering / throttle, published as-is in [0, 1] (0.5 = neutral).
 endpoint : str
     Full URL to POST JSON payloads to (e.g. ``http://10.0.0.1:8080/api/telemetry``).
 publish_interval : float
@@ -39,11 +39,7 @@ import numpy as np
 
 from .base_worker import BaseWorker
 
-# ---------------------------------------------------------------------------
-# Lazy imports for typed buffers — they are passed in at runtime via kwargs.
-# We use TYPE_CHECKING to keep type hints available for editors without
-# requiring the imports at runtime (workers receive buffers as kwargs).
-# ---------------------------------------------------------------------------
+# Buffers arrive as kwargs at runtime; these imports are for type hints only.
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -60,11 +56,9 @@ class WebPublishWorker(BaseWorker):
         {
             "vehicle_id": "pilot_1",
             "timestamp": 1718900000.123,
-            "pose": {
-                "x": 1.23, "z": 4.56, "heading_deg": 90.0
-            },
+            "pose": {"x": 1.23, "z": 4.56},
             "trajectory": [[x, z], ...],
-            "control": {"steering": 0.52, "throttle": 0.30},
+            "control": {"steering": 0.52, "throttle": 0.60},
             "track": {
                 "outer": [[x, z], ...],
                 "inner": [[x, z], ...]
@@ -77,28 +71,23 @@ class WebPublishWorker(BaseWorker):
     def __init__(self, name: str = "web_publish", **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
 
-        # Buffer handles (set in setup)
         self._pose_buf: Optional["PoseBuffer"] = None
         self._boundary_buf: Optional["TrackBoundaryBuffer"] = None
         self._ctrl_buf: Optional["ControlBuffer"] = None
 
-        # Config
         self._endpoint: str = ""
         self._interval: float = 1.0
         self._timeout: float = 2.0
         self._vehicle_id: str = "pilot_1"
         self._max_traj: int = 500
 
-        # Internal state
         self._trajectory: List[List[float]] = []
         self._last_pose_seq: int = 0
         self._last_publish: float = 0.0
         self._consecutive_errors: int = 0
         self._MAX_BACKOFF: float = 30.0  # max sleep on repeated failures
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+    # --- Lifecycle ---
 
     def setup(self) -> None:
         self._pose_buf = self.config.get("pose_buffer")
@@ -109,6 +98,7 @@ class WebPublishWorker(BaseWorker):
         self._timeout = float(self.config.get("timeout", 2.0))
         self._vehicle_id = self.config.get("vehicle_id", "pilot_1")
         self._max_traj = int(self.config.get("max_trajectory_pts", 500))
+        self._bev_axes = tuple(self.config.get("bev_axes", [0, 2]))
 
         if not self._endpoint:
             raise ValueError("WebPublishWorker requires a non-empty 'endpoint'")
@@ -119,16 +109,13 @@ class WebPublishWorker(BaseWorker):
         )
 
     def step(self) -> None:
-        # Accumulate trajectory from pose buffer every step
         self._ingest_pose()
 
-        # Only publish at the configured interval
         now = time.monotonic()
         if now - self._last_publish < self._interval:
-            time.sleep(0.05)  # yield CPU
+            time.sleep(0.05)
             return
 
-        # Build & send payload
         payload = self._build_payload()
         self._post(payload)
         self._last_publish = now
@@ -139,25 +126,22 @@ class WebPublishWorker(BaseWorker):
             f"{len(self._trajectory)} trajectory pts accumulated"
         )
 
-    # ------------------------------------------------------------------
-    # Data ingestion helpers
-    # ------------------------------------------------------------------
+    # --- Data ingestion helpers ---
 
     def _ingest_pose(self) -> None:
-        """Read the latest pose and append (X, Z) to the trajectory."""
+        """Read the latest pose and append its ground-plane position to the trajectory."""
         if self._pose_buf is None:
             return
         result = self._pose_buf.read_latest()
         if result is None:
             return
-        header, pose, _ = result
+        header, pose, _, _ = result
         if header.seq_no <= self._last_pose_seq:
             return
         self._last_pose_seq = header.seq_no
 
-        # Extract translation from 4×4 matrix
-        tx, tz = float(pose[0, 3]), float(pose[2, 3])
-        self._trajectory.append([tx, tz])
+        a0, a1 = self._bev_axes
+        self._trajectory.append([float(pose[a0, 3]), float(pose[a1, 3])])
 
         # Cap to the most recent N points
         if len(self._trajectory) > self._max_traj:
@@ -187,9 +171,7 @@ class WebPublishWorker(BaseWorker):
             "inner": _ndarray_to_list(inner),
         }
 
-    # ------------------------------------------------------------------
-    # Payload construction
-    # ------------------------------------------------------------------
+    # --- Payload construction ---
 
     def _build_payload(self) -> Dict[str, Any]:
         """Assemble the JSON-serialisable telemetry dict."""
@@ -198,29 +180,23 @@ class WebPublishWorker(BaseWorker):
             "timestamp": time.time(),
         }
 
-        # Current pose
         if self._trajectory:
             last = self._trajectory[-1]
             payload["pose"] = {"x": last[0], "z": last[1]}
 
-        # Trajectory
         payload["trajectory"] = self._trajectory
 
-        # Control
         ctrl = self._read_control()
         if ctrl is not None:
             payload["control"] = ctrl
 
-        # Track boundaries
         track = self._read_boundaries()
         if track is not None:
             payload["track"] = track
 
         return payload
 
-    # ------------------------------------------------------------------
-    # HTTP transport
-    # ------------------------------------------------------------------
+    # --- HTTP transport ---
 
     def _post(self, payload: Dict[str, Any]) -> None:
         """POST JSON payload to the configured endpoint.
@@ -258,9 +234,7 @@ class WebPublishWorker(BaseWorker):
             )
             time.sleep(backoff)
 
-    # ------------------------------------------------------------------
-    # Convenience property
-    # ------------------------------------------------------------------
+    # --- Logger (also usable before run()) ---
 
     @property
     def logger(self) -> logging.Logger:
@@ -269,9 +243,7 @@ class WebPublishWorker(BaseWorker):
         return self._logger
 
 
-# ======================================================================
-# Module-level helpers
-# ======================================================================
+# --- Module-level helpers ---
 
 def _ndarray_to_list(arr: np.ndarray, decimals: int = 4) -> list:
     """Convert an (N, 2) float32 ndarray to a JSON-friendly nested list.

@@ -20,7 +20,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import sys
@@ -83,38 +82,34 @@ def export(model, vec_normalize, env_kwargs: dict, out_path: str) -> str:
     return out_path
 
 
-def _latest(pattern: str) -> str:
-    files = glob.glob(pattern)
-    if not files:
-        raise FileNotFoundError(pattern)
-    return max(files, key=os.path.getmtime)
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--run", help="run name under rl/checkpoints/ (uses its latest checkpoint)")
+    ap.add_argument("--run", help="run name under rl/checkpoints/ (latest checkpoint unless --step)")
+    ap.add_argument("--step", type=int, help="checkpoint step to export with --run")
     ap.add_argument("--model", help="PPO .zip")
     ap.add_argument("--vecnormalize", help="VecNormalize .pkl")
     ap.add_argument("--config", help="run config.json (ENV_KWARGS)")
-    ap.add_argument("--out", default="policy.onnx")
+    ap.add_argument("--out", default="policy.onnx", help="output ONNX path (default: policy.onnx)")
     args = ap.parse_args()
+
+    # train.py is written to run from rl/ (``from track_env import ...``);
+    # importing it registers TrackCNNExtractor for unpickling.
+    sys.path.insert(0, os.path.join(REPO_ROOT, "rl"))
+    import importlib
+    train = importlib.import_module("train")
 
     if args.run:
         run_dir = os.path.join(REPO_ROOT, "rl", "checkpoints", args.run)
-        args.model = args.model or _latest(os.path.join(run_dir, "*.zip"))
-        args.vecnormalize = args.vecnormalize or _latest(os.path.join(run_dir, "vec_normalize*.pkl"))
+        # Model and VecNormalize stats from the same checkpoint step
+        model_path, vec_path = train._find_checkpoint(run_dir, args.step)
+        args.model = args.model or model_path
+        args.vecnormalize = args.vecnormalize or vec_path
         args.config = args.config or os.path.join(run_dir, "config.json")
     if not (args.model and args.config):
         ap.error("--run or --model/--config required")
 
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import VecNormalize
-
-    # train.py is written to run from rl/ (``from track_env import ...``);
-    # importing it registers TrackCNNExtractor for unpickling.
-    sys.path.insert(0, os.path.join(REPO_ROOT, "rl"))
-    import importlib
-    importlib.import_module("train")
 
     with open(args.config) as f:
         env_kwargs = json.load(f)["ENV_KWARGS"]

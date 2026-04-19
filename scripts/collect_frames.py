@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-collect_frames.py — Save RGB frames from the simulator ZMQ stream to disk.
+scripts/collect_frames.py — Save RGB frames from the simulator ZMQ stream to disk.
 
 Connects to the same ZMQ sensor port as ZMQSensorWorker (default: 5555) and
-writes each sampled frame as a JPEG file.  Run this alongside the simulator
-bridge — pilot_core does NOT need to be running.
+writes each sampled ``front_camera`` frame as frame_NNNNNN.jpg (the JPEG bytes
+are written as received, no re-encoding).  Run this alongside the AutoDRIVE
+simulator bridge; the pilot_core pipeline does NOT need to be running.
 
-Usage:
-    python collect_frames.py                         # defaults
-    python collect_frames.py --output ./dataset/rgb  # custom output dir
-    python collect_frames.py --every 5 --max 2000    # save every 5th frame, cap at 2000
-    python collect_frames.py --host localhost --port 5555
+Usage (from the repo root; --output is relative to the current directory):
+    python scripts/collect_frames.py                         # defaults → ./dataset/rgb
+    python scripts/collect_frames.py --output ./dataset/rgb  # custom output dir
+    python scripts/collect_frames.py --every 5 --max 2000    # every 5th frame, stop at 2000
+    python scripts/collect_frames.py --host localhost --port 5555
 """
 
 import argparse
@@ -30,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect RGB frames from simulator ZMQ stream")
     parser.add_argument("--host",   default="localhost",    help="ZMQ publisher host (default: localhost)")
     parser.add_argument("--port",   type=int, default=5555, help="ZMQ sensor port (default: 5555)")
-    parser.add_argument("--output", default="./dataset/rgb",help="Output directory for JPEG files")
+    parser.add_argument("--output", default="./dataset/rgb",help="Output directory for JPEG files (default: ./dataset/rgb)")
     parser.add_argument("--every",  type=int, default=3,    help="Save every N-th frame (default: 3)")
     parser.add_argument("--max",    type=int, default=0,    help="Stop after saving this many frames (0 = unlimited)")
     return parser.parse_args()
@@ -88,7 +89,7 @@ def main() -> None:
             if frames_seen % args.every != 0:
                 continue
 
-            # Decode and write JPEG directly (no re-encode loss)
+            # The payload is already JPEG: decode base64 and write the bytes as-is
             try:
                 jpeg_bytes = base64.b64decode(fc["data"])
             except Exception as e:

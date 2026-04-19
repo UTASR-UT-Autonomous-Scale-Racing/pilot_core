@@ -9,7 +9,6 @@ from .vision_worker import VisionWorker
 from .control_worker import ControlWorker
 from .actuator_worker import ActuatorWorker
 from .slam_worker import SLAMWorker
-from .recorder_worker import RecorderWorker
 from .buffer_recorder_worker import BufferRecorderWorker
 from .mapping_worker import MappingWorker
 from .track_pid_controller import TrackPIDController
@@ -18,7 +17,6 @@ from .web_publish_worker import WebPublishWorker
 from .state_worker import StateWorker
 from .zmq_sensor_worker import ZMQSensorWorker
 from .zmq_publish_worker import ZMQPublishWorker
-from .depth_projection_worker import DepthProjectionWorker
 from .lidar_projection_worker import LidarProjectionWorker
 from .lidar_wall_controller import LidarWallController
 
@@ -30,7 +28,6 @@ __all__ = [
     "ControlWorker",
     "ActuatorWorker",
     "SLAMWorker",
-    "RecorderWorker",
     "BufferRecorderWorker",
     "MappingWorker",
     "TrackPIDController",
@@ -39,7 +36,6 @@ __all__ = [
     "StateWorker",
     "ZMQSensorWorker",
     "ZMQPublishWorker",
-    "DepthProjectionWorker",
     "LidarProjectionWorker",
     "LidarWallController",
 ]

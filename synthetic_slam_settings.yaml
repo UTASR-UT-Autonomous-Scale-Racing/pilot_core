@@ -1,9 +1,9 @@
 %YAML:1.0
 
-#--
-# Synthetic camera settings for ORB-SLAM3 RGBD mode
-# Matches the intrinsics used by synthetic/closed_loop_generator.py
-#--
+#--------------------------------------------------------------------------------------------
+# ORB-SLAM3 RGB-D settings for the synthetic camera (config_dev_local.yaml).
+# Intrinsics must match synthetic/closed_loop_generator.py.
+#--------------------------------------------------------------------------------------------
 File.version: "1.0"
 
 Camera.type: "PinHole"
@@ -14,7 +14,7 @@ Camera.fy: 456.99
 Camera.cx: 320.0
 Camera.cy: 240.0
 
-# RGBD mode requires Camera1 (same as Camera for mono setup)
+# Same intrinsics under the Camera1.* keys, which the RGB-D loader reads
 Camera1.fx: 456.99
 Camera1.fy: 456.99
 Camera1.cx: 320.0
@@ -34,28 +34,28 @@ Camera.fps: 25
 # Depth is float32 in metres — factor 1.0 means no conversion
 RGBD.DepthMapFactor: 1.0
 
-# Color order (0: BGR)
+# Colour order (0: BGR, 1: RGB)
 Camera.RGB: 0
 
-# Close/Far threshold. Baseline times.
+# Close/far depth threshold, in multiples of the stereo baseline
 ThDepth: 40.0
 Stereo.ThDepth: 40.0
 
-# Approximate stereo baseline (not used for RGBD but required)
+# Virtual stereo baseline (m); only scales the close/far threshold in RGB-D mode
 Stereo.b: 0.075
 
-#--
-# ORB Parameters — keep iniThFAST low to detect features on synthetic textures
-#--
+#--------------------------------------------------------------------------------------------
+# ORB Parameters — low FAST thresholds so features are found on synthetic textures
+#--------------------------------------------------------------------------------------------
 ORBextractor.nFeatures: 1500
 ORBextractor.scaleFactor: 1.2
 ORBextractor.nLevels: 8
 ORBextractor.iniThFAST: 15
 ORBextractor.minThFAST: 5
 
-#--
-# Viewer Parameters (viewer disabled, but required by parser)
-#--
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters (viewer disabled, but required by the parser)
+#--------------------------------------------------------------------------------------------
 Viewer.KeyFrameSize: 0.05
 Viewer.KeyFrameLineWidth: 1.0
 Viewer.GraphLineWidth: 0.9

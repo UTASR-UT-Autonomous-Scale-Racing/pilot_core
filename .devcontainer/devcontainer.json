@@ -4,7 +4,8 @@
     "dockerfile": "Dockerfile",
     "context": ".."
   },
-  //  Runtime: NVIDIA GPU + USB device passthrough
+  // Jetson dev container (see .devcontainer/Dockerfile).
+  // Runtime: NVIDIA GPU + privileged USB device access
   "runArgs": [
     "--runtime=nvidia",
     "--privileged",
@@ -17,7 +18,7 @@
     "type=bind,source=/dev/i2c-1,target=/dev/i2c-1",
     "type=bind,source=/tmp,target=/tmp"
   ],
-  //  Container environment
+  // Container environment
   "containerEnv": {
     "NVIDIA_VISIBLE_DEVICES": "all",
     "NVIDIA_DRIVER_CAPABILITIES": "all",
@@ -25,13 +26,13 @@
     "PYTHONUNBUFFERED": "1",
     "DISPLAY": "${localEnv:DISPLAY}"
   },
-  //  Post-create: submodules, venv, C++ builds
-  "postCreateCommand": "bash .devcontainer/post-create.sh && echo 'source /workspaces/pilot_core/venv/bin/activate' >> ~/.bashrc",
-  //  VS Code settings
+  // Post-create: submodules + Python environment (build ORB-SLAM3 per docs/slam.md)
+  "postCreateCommand": "git submodule update --init && python3 -m venv --system-site-packages .venv && .venv/bin/pip install -r requirements.txt && echo 'source /workspaces/pilot_core/.venv/bin/activate' >> ~/.bashrc",
+  // VS Code settings
   "customizations": {
     "vscode": {
       "settings": {
-        "python.defaultInterpreterPath": "/workspaces/pilot_core/venv/bin/python3",
+        "python.defaultInterpreterPath": "/workspaces/pilot_core/.venv/bin/python3",
         "python.terminal.activateEnvironment": true,
         "python.testing.pytestEnabled": true,
         "python.testing.pytestArgs": [
@@ -53,7 +54,7 @@
       ]
     }
   },
-  //  Workspace folder inside container
+  // Workspace folder inside container
   "workspaceFolder": "/workspaces/pilot_core",
   "remoteUser": "developer"
 }

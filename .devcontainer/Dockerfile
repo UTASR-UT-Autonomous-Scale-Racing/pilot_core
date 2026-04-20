@@ -1,7 +1,7 @@
-# Most libraries included
-# this takes a lot of time
+# .devcontainer/Dockerfile — VS Code dev container for developing on the
+# Jetson (JetPack r36.4.0; the base image is large and slow to pull).
+# Used by .devcontainer/devcontainer.json.
 FROM nvcr.io/nvidia/l4t-jetpack:r36.4.0
-
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -13,23 +13,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-# numpy, opencv, torch, torchvision already included in the base image
+# Python dependencies
 RUN pip3 install --no-cache-dir \
     PyYAML \
     tqdm \
     pandas \
     matplotlib \
     smbus2 \
-    depthai 
-    # onnxruntime-gpu
+    depthai
 
-# Creates application directory
 WORKDIR /app/pilot_core
-
-# Copies all application code
 COPY . /app/pilot_core
 
+# Non-root user with passwordless sudo and access to video / serial / USB devices
 ARG USERNAME=developer
 ARG USER_UID=1000
 ARG USER_GID=1000

@@ -1,6 +1,7 @@
-# Dockerfile.dev-local — lightweight dev container for running pytests locally
-# Does NOT require an NVIDIA GPU, OAK-D camera, or any special hardware.
-# Uses synthetic frame/depth/IMU data instead.
+# Dockerfile.dev-local — lightweight container for running the test suite
+# (and config_dev_local.yaml) on any machine: no NVIDIA GPU, OAK-D or other
+# hardware needed; synthetic frame/depth/IMU data is used instead.
+#   docker compose -f docker-compose.dev-local.yaml up --build
 
 FROM python:3.10-slim
 
@@ -21,14 +22,17 @@ RUN pip install --no-cache-dir \
     pytest-timeout \
     matplotlib \
     pandas \
-    tqdm
+    tqdm \
+    pyzmq \
+    osqp \
+    onnxruntime
 
 WORKDIR /app/pilot_core
 COPY . /app/pilot_core
 
-# Mark as synthetic-only environment
+# Force synthetic sensors (start.py honours PILOT_SYNTHETIC=1)
 ENV PILOT_SYNTHETIC=1
 ENV PYTHONUNBUFFERED=1
 
-# Default: run pytest
+# Default: run the test suite
 CMD ["pytest", "tests/", "-v", "--timeout=60", "-x"]

@@ -1,3 +1,5 @@
+# pilot_core Python dependencies:  pip install -r requirements.txt
+
 # Runtime
 numpy
 scipy
@@ -8,7 +10,7 @@ depthai>=3.0        # OAK-D camera + IMU (v3 API)
 smbus2              # Arduino I2C link (Jetson)
 pyzmq               # AutoDRIVE simulator bridge
 osqp                # QP solver for control_mode: mpc
-onnxruntime         # control_mode: policy (CPU inference)
+onnxruntime         # control_mode: policy / vae / bc (CPU inference)
 
 # Tests
 pytest
@@ -17,5 +19,6 @@ pytest-timeout
 # ORB-SLAM3 Python wrapper build (see README)
 pybind11
 
-# RL training / policy export (dev machine only)
-# stable-baselines3 gymnasium onnx
+# Not installed by default (dev machine only), install manually when needed:
+#   RL training / policy export (rl/):        pip install "stable-baselines3[extra]" gymnasium onnx torch
+#   BC / VAE training (scripts/train_*.py):   pip install torch

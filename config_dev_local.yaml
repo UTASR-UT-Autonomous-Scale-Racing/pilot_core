@@ -1,17 +1,18 @@
-# config_dev_local.yaml — Configuration for dev-local (no hardware) testing
-# Uses synthetic frame/depth/IMU data.
+# config_dev_local.yaml — No-hardware profile: synthetic frames/depth/IMU,
+# CPU inference, no actuator output.  Used by the dev-local container
+# (Dockerfile.dev-local / .devcontainer/dev-local).
+#
+#   python start.py --config config_dev_local.yaml
 
 # --- Pipeline ---
-fps: 10
-resolution: [640, 400]
+fps: 10                       # synthetic frame rate (Hz)
+resolution: [640, 400]        # [width, height] of frames (px)
 
 # --- Sensor / Hardware ---
+synthetic: true               # synthetic frames/depth/IMU instead of the OAK-D
 use_oakd_imu: false
-i2c_address: null
+i2c_address: null             # null → actuator/IMU run in dummy mode (no writes)
 i2c_bus: null
-
-# --- Synthetic ---
-synthetic: true
 
 # --- Vision ---
 segmentation_config_path: pilot_vision/models/default/config.yaml
@@ -20,36 +21,33 @@ use_tensorrt: false
 # --- Control ---
 control_mode: "depth_ftg"     # map-free on synthetic depth
 
-# --- PID Control ---
+# --- PID Control (control_mode: pid) ---
 pid:
-  kp_steer: 1.0
-  ki_steer: 0.0
-  kd_steer: 0.1
-  target_throttle: 0.3
-  noise_std: 0.0
+  kp_steer: 1.0               # proportional steering gain
+  ki_steer: 0.0               # integral steering gain
+  kd_steer: 0.1               # derivative steering gain
+  target_throttle: 0.3        # base throttle, signed [-1, 1]
+  noise_std: 0.0              # std of Gaussian noise added to steering
 
 # --- SLAM ---
-enable_slam: false
+enable_slam: false              # run ORB-SLAM3 + mapping (also: start.py --enable-slam)
 slam:
   vocabulary: ORB_SLAM3/Vocabulary/ORBvoc.txt
-  settings: synthetic_slam_settings.yaml
-  sensor: RGBD
+  settings: synthetic_slam_settings.yaml   # intrinsics of the synthetic camera
 
-# --- Mapping ---
+# --- Mapping (BEV boundary extraction) ---
 mapping:
-  alpha_shape: 25.0
-  boundary_min_points: 10
-  origin_keyframe: 0
+  boundary_min_points: 10       # wall points required before boundaries are extracted
 
 # --- Recording ---
-recording: false
+recording: false                # record buffers to disk (also: start.py --recording)
 recording_path: /tmp/pilot_recordings
 
-# --- Web Telemetry (disabled in dev) ---
+# --- Web Telemetry (optional HTTP publisher) ---
 web_publish:
   enabled: false
 
-# --- Shared Buffers ---
+# --- Shared Buffers (ring-buffer slots per stream) ---
 buffers:
   frame:
     slots: 4
@@ -67,5 +65,4 @@ buffers:
     slots: 2
 
 # --- Deployment ---
-device: "cpu"
-tensorrt_workspace_mb: 0
+device: "cpu"                   # torch device for inference

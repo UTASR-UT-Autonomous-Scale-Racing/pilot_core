@@ -1,3 +1,6 @@
+# docker-compose.dev-local.yaml — run the test suite in the no-hardware
+# dev-local container (Dockerfile.dev-local).
+#   docker compose -f docker-compose.dev-local.yaml up --build
 version: "3.8"
 
 services:
@@ -10,7 +13,7 @@ services:
       - PILOT_SYNTHETIC=1
       - PYTHONUNBUFFERED=1
     volumes:
-      # Bind-mount source for iterative dev (optional — rebuild image otherwise)
+      # Bind-mount the source so edits are picked up without rebuilding
       - .:/app/pilot_core
     working_dir: /app/pilot_core
     command: >

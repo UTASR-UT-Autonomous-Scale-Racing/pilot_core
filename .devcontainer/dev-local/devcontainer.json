@@ -4,6 +4,7 @@
     "dockerfile": "../../Dockerfile.dev-local",
     "context": "../.."
   },
+  // No-hardware dev container: synthetic sensors, CPU only (Dockerfile.dev-local).
   "runArgs": [
     "--privileged",
     "--network=host",

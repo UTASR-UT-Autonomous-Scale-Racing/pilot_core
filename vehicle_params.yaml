@@ -1,17 +1,20 @@
-# vehicle_params.yaml — Physical vehicle parameters for controllers and the
-# evaluation simulator.
+# vehicle_params.yaml — Physical vehicle parameters for the controllers and
+# the evaluation simulator (loaded by control.types.VehicleParams).
 #
 # PLACEHOLDER VALUES: copied from the F1TENTH simulator
 # (https://github.com/f1tenth/f1tenth_simulator/blob/master/params.yaml)
 # until the UTASR car is measured.  Replace each value as it is measured and
 # note it in the comment.
+#
+# Keys marked [ref] are not read by the code yet (VehicleParams ignores
+# unknown keys); they are kept for a future dynamic model.
 
 # --- Geometry ---
 wheelbase: 0.3302             # m, front-to-rear axle
 width: 0.2032                 # m
-l_cg2rear: 0.17145            # m, centre of gravity to rear axle
-l_cg2front: 0.15875           # m, centre of gravity to front axle
-height_cg: 0.074              # m
+l_cg2rear: 0.17145            # m, centre of gravity to rear axle [ref]
+l_cg2front: 0.15875           # m, centre of gravity to front axle [ref]
+height_cg: 0.074              # m [ref]
 
 # --- Limits ---
 max_speed: 7.0                # m/s
@@ -21,11 +24,11 @@ max_accel: 7.51               # m/s²
 max_decel: 8.26               # m/s²
 
 # --- Dynamics (single-track model) ---
-mass: 3.47                    # kg
-moment_inertia: 0.04712       # kg·m²
+mass: 3.47                    # kg [ref]
+moment_inertia: 0.04712       # kg·m² [ref]
 friction_coeff: 0.523         # -
-C_S_front: 4.718              # 1/rad, cornering stiffness
-C_S_rear: 5.4562              # 1/rad
+C_S_front: 4.718              # 1/rad, cornering stiffness [ref]
+C_S_rear: 5.4562              # 1/rad [ref]
 
 # --- Actuation ---
-steering_delay_steps: 5       # F1TENTH "buffer_length": steering command delay
+steering_delay_steps: 5       # F1TENTH "buffer_length": steering command delay [ref]

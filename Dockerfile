@@ -1,4 +1,7 @@
-# Most libraries included
+# Dockerfile — runtime image for the car (Jetson, L4T r35.2.1).
+# Built and run by scripts/start.sh:
+#   docker build -t utasr-image -f Dockerfile .
+# The base image already ships numpy, OpenCV, torch and torchvision.
 FROM nvcr.io/nvidia/l4t-ml:r35.2.1-py3
 
 # Install system dependencies
@@ -11,8 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-# numpy, opencv, torch, torchvision already included in the base image
+# Python dependencies not in the base image
 RUN pip3 install --no-cache-dir \
     PyYAML \
     tqdm \
@@ -21,12 +23,11 @@ RUN pip3 install --no-cache-dir \
     smbus2 \
     "depthai>=3.0" \
     scipy \
+    pyzmq \
+    osqp \
     onnxruntime-gpu
 
-# Creates application directory
 WORKDIR /app/pilot_core
-
-# Copies all application code
 COPY . /app/pilot_core
 
 # Flush output to the terminal immediately

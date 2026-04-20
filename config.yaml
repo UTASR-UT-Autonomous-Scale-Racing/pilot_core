@@ -1,42 +1,45 @@
-# Configuration file for Pilot Core
-
+# config.yaml — On-car profile (Jetson): OAK-D camera, CUDA inference,
+# Arduino actuator over I2C, ORB-SLAM3 mapping.
+#
+#   python start.py                      # uses this file by default
+#   scripts/run.sh / scripts/start.sh    # native / Docker launch on the Jetson
 
 # --- Pipeline ---
-fps: 30
-resolution: [640, 400]
+fps: 30                       # camera frame rate (Hz)
+resolution: [640, 400]        # [width, height] of camera frames (px)
 
 # --- Sensor / Hardware ---
-use_oakd_imu: false
-i2c_address: 0x08
-i2c_bus: 1
+use_oakd_imu: false           # true: stream the OAK-D IMU via the camera worker; false: Arduino IMU over I2C
+i2c_address: 0x08             # Arduino I2C address (null → actuator/IMU run in dummy mode)
+i2c_bus: 1                    # /dev/i2c-<bus>
 
 # --- Vision ---
 segmentation_config_path: pilot_vision/models/default/config.yaml
-use_tensorrt: false           # Set true on Jetson to load TensorRT engines
+use_tensorrt: false           # true on the Jetson to load TensorRT engines
 
 # --- Control ---
 control_mode: "pure_pursuit"  # pure_pursuit | stanley | lqr | mpc | policy | depth_ftg | vae | bc | pid | ftg
 
-# --- PID Control (used when control_mode = "pid") ---
+# --- PID Control (control_mode: pid) ---
 pid:
-  kp_steer: 1.0
-  ki_steer: 0.0
-  kd_steer: 0.1
-  target_throttle: 0.3
-  noise_std: 0.05
+  kp_steer: 1.0               # proportional steering gain
+  ki_steer: 0.0               # integral steering gain
+  kd_steer: 0.1               # derivative steering gain
+  target_throttle: 0.3        # base throttle, signed [-1, 1]
+  noise_std: 0.05             # std of Gaussian noise added to steering
 
 # --- PWM (servo / ESC pulse widths, µs) ---
 # Below neutral = left / backward, above neutral = right / forward.
 pwm:
-  steer_min: 1105
-  steer_max: 1825
-  steer_neutral: 1461
-  throttle_min: 1199
-  throttle_max: 1595
-  throttle_neutral: 1397
+  steer_min: 1105             # full left
+  steer_max: 1825             # full right
+  steer_neutral: 1461         # straight
+  throttle_min: 1199          # full backward
+  throttle_max: 1595          # full forward
+  throttle_neutral: 1397      # neutral (coast)
 
 # --- Track following (control_mode: pure_pursuit | stanley | lqr | mpc | policy) ---
-vehicle_params: vehicle_params.yaml
+vehicle_params: vehicle_params.yaml   # physical vehicle parameters (relative to repo root)
 track_control:
   spacing: 0.05                 # m, centre-line sample spacing
   pure_pursuit:
@@ -44,8 +47,8 @@ track_control:
     lookahead_max: 2.0          # m
     k_v: 0.5                    # s, look-ahead growth with speed
   stanley:
-    k: 1.0
-    k_soft: 1.0                 # m/s
+    k: 1.0                      # cross-track error gain
+    k_soft: 1.0                 # m/s, softening speed (avoids division by ~0 at low speed)
   lqr:
     q_lateral: 4.0              # weight on lateral error²
     q_heading: 1.0              # weight on heading error²
@@ -53,26 +56,26 @@ track_control:
   mpc:
     horizon: 20                 # steps
     dt: 0.05                    # s per step (1 s horizon)
-    q_lateral: 10.0
-    q_heading: 2.0
-    r_steer: 1.0
-    r_rate: 20.0                # steering-rate smoothness
-    delay: 0.05                 # s actuation delay compensated
+    q_lateral: 10.0             # weight on lateral error²
+    q_heading: 2.0              # weight on heading error²
+    r_steer: 1.0                # weight on steering²
+    r_rate: 20.0                # weight on steering rate² (smoothness)
+    delay: 0.05                 # s, actuation delay compensated
   policy:
     model: policy.onnx          # from rl/export_onnx.py (+ policy.json sidecar)
   fallback: null                # "depth_ftg": drive map-free while the state estimate is stale
   fallback_after: 0.3           # s without a fresh state before the fallback engages
   speed:
     v_max: 1.3                  # m/s — keep below safety.speed_cap
-    lat_accel_fraction: 0.6     # of friction_coeff * g in corners
+    lat_accel_fraction: 0.6     # fraction of friction_coeff * g allowed in corners
     accel: 1.5                  # m/s²
     decel: 1.0                  # m/s² (coasting + limited backward input)
     longitudinal:
       speed_per_throttle: 3.0   # m/s per unit throttle — CALIBRATE on the car
-      kp: 0.25
-      ki: 0.15
+      kp: 0.25                  # speed PI proportional gain
+      ki: 0.15                  # speed PI integral gain
       max_backward: 0.3         # most backward input used to slow down
-      min_speed_for_backward: 0.3
+      min_speed_for_backward: 0.3   # m/s, below this no backward input is used
 
 # --- Map-free depth Follow-the-Gap (control_mode: depth_ftg, or track fallback) ---
 depth_ftg:
@@ -95,12 +98,12 @@ vae:
 bc:
   model: bc_policy.onnx         # from scripts/train_bc_policy.py (+ .json sidecar)
   cruise_speed: 0.8             # m/s
-  steer_slowdown: 0.5
+  steer_slowdown: 0.5           # speed *= 1 - steer_slowdown * |steering|
 
 # --- State estimator (pose EKF) ---
 estimator:
-  pos_std: 0.03                 # m
-  yaw_std: 0.03                 # rad
+  pos_std: 0.03                 # m, pose position measurement noise
+  yaw_std: 0.03                 # rad, pose heading measurement noise
   stale_after: 0.5              # s without a pose → stop driving
 
 # --- Safety supervisor (ActuatorWorker) ---
@@ -115,39 +118,27 @@ safety:
   throttle_rate: 4.0            # units/s
 
 # --- SLAM ---
-enable_slam: true
+enable_slam: true               # run ORB-SLAM3 + mapping (also: start.py --enable-slam)
 slam:
   vocabulary: ORB_SLAM3/Vocabulary/ORBvoc.txt
   settings: orbslam_oakd_rgbd.yaml    # regenerate: scripts/gen_orbslam_settings.py
-  sensor: RGBD
 
 # --- Mapping (BEV boundary extraction) ---
 mapping:
-  alpha_shape: 25.0
-  boundary_min_points: 50
-  origin_keyframe: 0
+  boundary_min_points: 50       # wall points required before boundaries are extracted
 
 # --- Recording ---
-recording: false
+recording: false                # record buffers to disk (also: start.py --recording)
 recording_path: /tmp/pilot_recordings
-
-# --- Web Telemetry Publisher (optional) ---
-web_publish:
-  enabled: false
-  endpoint: "http://localhost:8080/api/telemetry"
-  interval: 1.0               # Seconds between POSTs
-  timeout: 2.0                # HTTP timeout per request
-  vehicle_id: "pilot_1"
-  max_trajectory_pts: 500     # Cap trajectory points per payload
 recording_config:
-  sample_k: 1                 # Global: save every k-th sample (1 = all)
-  top_n: 0                    # Global: max records per buffer (0 = unlimited)
-  # Per-buffer overrides (inherit global if omitted):
+  sample_k: 1                   # global: save every k-th sample (1 = all)
+  top_n: 0                      # global: max records per buffer (0 = unlimited)
+  # Per-buffer overrides (inherit the global values if omitted):
   frame:
-    sample_k: 2               # Frames are large — save every 2nd
+    sample_k: 2                 # frames are large — save every 2nd
     top_n: 5000
   imu:
-    sample_k: 1               # IMU is tiny — save everything
+    sample_k: 1                 # IMU is tiny — save everything
     top_n: 0
   segmentation:
     sample_k: 2
@@ -159,13 +150,22 @@ recording_config:
     sample_k: 1
     top_n: 0
   pointcloud:
-    sample_k: 5               # Point clouds are heavy
+    sample_k: 5                 # point clouds are heavy
     top_n: 2000
   boundary:
     sample_k: 10
     top_n: 500
 
-# --- Shared Buffers ---
+# --- Web Telemetry (optional HTTP publisher) ---
+web_publish:
+  enabled: false
+  endpoint: "http://localhost:8080/api/telemetry"
+  interval: 1.0                 # s between POSTs
+  timeout: 2.0                  # s, HTTP timeout per request
+  vehicle_id: "pilot_1"
+  max_trajectory_pts: 500       # cap on trajectory points per payload
+
+# --- Shared Buffers (ring-buffer slots per stream) ---
 buffers:
   frame:
     slots: 8
@@ -183,5 +183,4 @@ buffers:
     slots: 2
 
 # --- Deployment ---
-device: "cuda:0"              # Primary CUDA device
-tensorrt_workspace_mb: 1024   # TensorRT builder workspace
+device: "cuda:0"                # torch device for inference

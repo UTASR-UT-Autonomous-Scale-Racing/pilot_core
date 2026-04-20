@@ -18,7 +18,7 @@ class DTypeTag(IntEnum):
     IMU = 2            # 9-float IMU vector
     SEGMENTATION = 3   # Segmentation mask
     POSE = 4           # 4x4 pose + map points
-    CONTROL = 5        # Normalized steering + throttle
+    CONTROL = 5        # Steering + throttle in [0, 1] (0.5 = neutral)
     LIDAR = 6          # 1080-float32 range scan
     STATE = 7          # Estimated vehicle state (BEV)
 

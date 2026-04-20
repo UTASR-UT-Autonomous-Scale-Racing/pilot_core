@@ -1,17 +1,18 @@
 """
-synthetic — Procedural generators for synthetic FPV camera frames, depth maps,
-and IMU data.  Used when no OAK-D camera or real hardware is available
-(e.g. in the dev-local Docker container for testing).
+synthetic — procedural camera, depth and IMU data for running without
+hardware (tests, ``PILOT_SYNTHETIC=1``, the dev Docker container).
 
-Generators produce data that mimics the view from an FPV camera going
-straight down a corridor with track walls on each side.
+The frame generator mimics an FPV camera driving straight down a corridor
+between two track walls; frames are RGB uint8 + depth float32 in metres.
+:mod:`synthetic.closed_loop_generator` provides a closed elliptical track
+with ground-truth poses for SLAM tests.
 
 Public API
 ----------
 SyntheticFrameGenerator
-    .next()  → (rgb, depth)       # uint8 (H,W,3), float32 (H,W) metres
+    .next() / .next_fast()  → (rgb, depth)   # uint8 (H,W,3), float32 (H,W) metres
 SyntheticIMUGenerator
-    .next()  → imu_vector          # float32 (9,)
+    .next()  → imu_vector                    # float32 (9,), IMUBuffer layout
 """
 
 from __future__ import annotations
@@ -59,12 +60,12 @@ class SyntheticFrameGenerator:
         self.corridor_length = corridor_length
         self.speed = speed
 
-        # Camera intrinsics (simple pinhole)
+        # Pinhole intrinsics
         self.fx = width * 0.8
         self.fy = width * 0.8
         self.cx = width / 2.0
         self.cy = height / 2.0
-        self.camera_height = 0.15  # 15 cm (scale car)
+        self.camera_height = 0.15  # m
 
         self._frame_idx = 0
         self._t0 = time.monotonic()
@@ -83,7 +84,6 @@ class SyntheticFrameGenerator:
         t = time.monotonic() - self._t0
 
         rgb = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-        depth = np.full((self.height, self.width), self.corridor_length, dtype=np.float32)
 
         # Vanishing point
         vp_x = self.width // 2
@@ -109,7 +109,7 @@ class SyntheticFrameGenerator:
             [int(self.width * 0.15), self.height],
         ], dtype=np.int32)
         cv2.fillPoly(rgb, [left_pts], left_wall_colour)
-        # Vertical stripe texture on left wall
+        # Stripe texture scrolls with t * speed
         for i in range(0, self.height, 40):
             y = (i + scroll) % self.height
             if y < vp_y:
@@ -128,7 +128,6 @@ class SyntheticFrameGenerator:
             [int(self.width * 0.85), self.height],
         ], dtype=np.int32)
         cv2.fillPoly(rgb, [right_pts], right_wall_colour)
-        # Vertical stripe texture on right wall
         for i in range(0, self.height, 40):
             y = (i + scroll) % self.height
             if y < vp_y:
@@ -158,32 +157,27 @@ class SyntheticFrameGenerator:
     def _generate_depth_map(self, vp_x: int, vp_y: int) -> np.ndarray:
         """Compute a per-pixel depth map for the corridor scene.
 
-        Uses a simple geometric model:
-        - Floor pixels: depth from camera height and pixel row
-        - Wall pixels: depth from wall distance and pixel column
-        - Sky/far pixels: corridor_length
+        Approximate model (not a true projection): floor depth falls off
+        with pixel row, wall depth with pixel column, and everything above
+        the vanishing point is ``corridor_length``.
         """
         depth = np.full((self.height, self.width), self.corridor_length, dtype=np.float32)
 
         for row in range(self.height):
             for col in range(self.width):
-                # Below vanishing point → floor or wall
                 if row > vp_y + 20:
                     frac = (row - vp_y) / max(self.height - vp_y, 1)
                     floor_depth = self.camera_height / max(frac * 0.3, 0.01)
                     floor_depth = min(floor_depth, self.corridor_length)
 
-                    # Check if pixel is in left wall region
                     wall_x_frac = (col - vp_x) / max(self.width / 2, 1)
                     left_boundary = -0.15 / max(frac, 0.01) * 0.5
                     right_boundary = 0.15 / max(frac, 0.01) * 0.5
 
                     if wall_x_frac < left_boundary:
-                        # Left wall
                         wall_depth = self.wall_distance / max(abs(wall_x_frac), 0.01) * 0.5
                         depth[row, col] = min(wall_depth, self.corridor_length)
                     elif wall_x_frac > right_boundary:
-                        # Right wall
                         wall_depth = self.wall_distance / max(abs(wall_x_frac), 0.01) * 0.5
                         depth[row, col] = min(wall_depth, self.corridor_length)
                     else:
@@ -192,9 +186,10 @@ class SyntheticFrameGenerator:
         return depth
 
     def next_fast(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Fast vectorized version of next() — no per-pixel loop.
+        """Vectorised variant of :meth:`next` (same output format).
 
-        Returns same format as next() but uses numpy broadcasting for speed.
+        Uses the same depth model; the RGB image is flat-shaded with a
+        scrolling dashed centre line instead of the wall stripes.
         """
         self._frame_idx += 1
         t = time.monotonic() - self._t0
@@ -205,12 +200,11 @@ class SyntheticFrameGenerator:
         vp_x = self.width // 2
         vp_y = self.height // 2 - int(self.height * 0.05)
 
-        # Create coordinate grids
         rows = np.arange(self.height)
         cols = np.arange(self.width)
         row_grid, col_grid = np.meshgrid(rows, cols, indexing='ij')
 
-        # Floor region: below vanishing point
+        # Floor / wall region: below the vanishing point
         floor_mask = row_grid > (vp_y + 20)
         frac = np.where(
             floor_mask,
@@ -218,14 +212,12 @@ class SyntheticFrameGenerator:
             0.01,
         )
 
-        # Floor depth
         floor_depth = np.clip(
             self.camera_height / np.maximum(frac * 0.3, 0.01),
             0.0,
             self.corridor_length,
         )
 
-        # Wall regions (perspective)
         wall_x_frac = (col_grid - vp_x).astype(np.float32) / max(self.width / 2, 1)
         wall_boundary = 0.15 / np.maximum(frac, 0.01) * 0.5
 
@@ -243,18 +235,13 @@ class SyntheticFrameGenerator:
         depth[left_wall] = wall_depth[left_wall]
         depth[right_wall] = wall_depth[right_wall]
 
-        # RGB rendering (simplified but fast)
-        # Floor
         rgb[floor_only] = [60, 60, 60]
-        # Left wall
         rgb[left_wall] = [100, 120, 140]
-        # Right wall
         rgb[right_wall] = [100, 120, 140]
-        # Sky
         sky_mask = ~floor_mask
         rgb[sky_mask] = [50, 50, 50]
 
-        # Add dashed centre line on floor
+        # Dashed centre line on the floor, scrolling with t * speed
         scroll = int((t * self.speed * 30) % 40)
         centre_band = floor_only & (np.abs(col_grid - vp_x) < 3)
         dash = ((row_grid + scroll) % 20) < 10
@@ -266,17 +253,17 @@ class SyntheticFrameGenerator:
 class SyntheticIMUGenerator:
     """Generate synthetic IMU data simulating straight-line driving.
 
-    Produces 9-float vectors: [qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw]
-
-    For straight driving: quaternion ≈ identity, small accelerometer noise,
-    throttle ≈ constant, steering ≈ centre.
+    Produces 9-float vectors in the IMUBuffer layout
+    ``[qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw]``: quaternion
+    ≈ identity, gravity on z plus noise, constant raw throttle / steering.
 
     Parameters
     ----------
     throttle : float
-        Simulated raw throttle (default 1500 — neutral PWM).
+        Simulated raw throttle feedback (default 1500).
     steering : float
-        Simulated raw steering (default 1461 — neutral PWM).
+        Simulated raw steering feedback (default 1461, the steering neutral
+        pulse width in µs).
     accel_noise : float
         Gaussian noise std for accelerometer readings in m/s² (default 0.05).
     """
@@ -301,13 +288,12 @@ class SyntheticIMUGenerator:
         """
         self._step += 1
 
-        # Identity quaternion with tiny perturbation
         qw = 1.0
         qx = np.random.normal(0, 0.001)
         qy = np.random.normal(0, 0.001)
         qz = np.random.normal(0, 0.001)
 
-        # Accelerometer: gravity on Z + noise
+        # Accelerometer at rest: gravity on +z
         ax = np.random.normal(0, self.accel_noise)
         ay = np.random.normal(0, self.accel_noise)
         az = 9.81 + np.random.normal(0, self.accel_noise)

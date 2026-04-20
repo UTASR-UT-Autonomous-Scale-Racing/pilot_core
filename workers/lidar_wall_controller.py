@@ -12,9 +12,11 @@ Hokuyo UST-10LX ray layout (1080 rays, 0.25° per ray):
     Positive angles = LEFT side (y > 0 in vehicle frame, ROS convention)
     Negative angles = RIGHT side (y < 0 in vehicle frame)
 
-Forward-facing sectors used for wall estimation:
-    front_left  = rays 540 → (540 + half_sector)   [0° … +sector°]
-    front_right = rays (540 − half_sector) → 540    [−sector° … 0°]
+Forward-facing sectors used for wall estimation (``half_rays = sector_deg / 0.25``):
+    front_left  = rays 540 → (540 + half_rays)   [0° … +sector_deg]
+    front_right = rays (540 − half_rays) → 540   [−sector_deg … 0°]
+
+Output is signed [-1, 1] with steering +1 = LEFT.
 """
 
 from __future__ import annotations
@@ -58,8 +60,7 @@ class LidarWallController:
         self.range_max = range_max
         self.slow_corner_factor = slow_corner_factor
 
-        # Convert sector half-angle to ray indices
-        # 1 ray = 0.25°, centre ray = 540
+        # Sector half-angle → ray indices (0.25° per ray, centre ray = 540)
         half_rays = int(sector_deg / 0.25)
         self._left_start = 540
         self._left_end = min(540 + half_rays, 1080)

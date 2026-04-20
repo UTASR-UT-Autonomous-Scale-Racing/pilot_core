@@ -2,18 +2,15 @@
 VisionWorker — reads frames from FrameBuffer, runs segmentation model
 inference, and writes masks into SegmentationBuffer.
 
-The segmentation model class (from ``pilot_vision``) is loaded dynamically
-from a YAML config file — the same ``load_model_from_config`` mechanism
-used by the existing codebase.
-
-On Jetson Orin this will use CUDA / TensorRT for inference.
+The model class (from ``pilot_vision``) is loaded from a YAML config via
+:func:`utils.load_model_from_config` and must provide
+``get_mask(depth, rgb) -> mask | None``.
 """
 
 from __future__ import annotations
 
 import time
 from typing import Any
-
 
 from .base_worker import BaseWorker
 from shared_buffer import FrameBuffer, SegmentationBuffer
@@ -31,9 +28,10 @@ class VisionWorker(BaseWorker):
     model_config : str
         Path to the segmentation model YAML config file.
     device : str
-        CUDA device string (e.g. ``"cuda:0"``).  Ignored on CPU-only machines.
+        Device string (e.g. ``"cuda:0"``); currently only logged — the model
+        config decides where inference runs.
     use_tensorrt : bool
-        If True, attempt to load a TensorRT engine (default False).
+        Currently unused (default False).
     """
 
     def __init__(self, name: str = "vision", **kwargs: Any) -> None:
@@ -48,7 +46,6 @@ class VisionWorker(BaseWorker):
         self._frame_buf = self.config["input_buffer"]
         self._seg_buf = self.config["output_buffer"]
 
-        # Load the segmentation model from config
         model_config_path = self.config["model_config"]
         from utils import load_model_from_config
 
@@ -69,22 +66,16 @@ class VisionWorker(BaseWorker):
 
         header, rgb, depth = result
 
-        # Skip if we already processed this frame
         if header.seq_no <= self._last_seq:
             time.sleep(0.001)
             return
         self._last_seq = header.seq_no
 
-        # self.logger.debug(f"Running get_mask on frame seq={header.seq_no} rgb={rgb.shape}")
-
-        # Run segmentation — interface: model.get_mask(depth_frame, rgb_frame)
+        # Model interface: get_mask(depth_frame, rgb_frame)
         mask = self._model.get_mask(depth, rgb)
 
         if mask is not None:
             self._seg_buf.write(mask)
-        #     self.logger.debug(f"Wrote mask to seg_buf shape={mask.shape} max={mask.max():.3f}")
-        # else:
-        #     self.logger.warning("get_mask returned None")
 
     def teardown(self) -> None:
         self.logger.info("VisionWorker shutting down")

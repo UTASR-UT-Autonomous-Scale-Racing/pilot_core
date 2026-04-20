@@ -4,9 +4,9 @@ PWM mapping for the car's servo (steering) and ESC (throttle).
 ControlBuffer values in ``[0, 1]`` map linearly onto each channel's
 ``[min, max]`` pulse width (µs): below neutral = left / backward, above
 neutral = right / forward.  The pulse widths are set in the ``pwm`` section
-of the config; the defaults are the car's current values (formerly
-``pilot_controller/control_output.py``).  For throttle, 0.5 lands exactly
-on neutral; the steering neutral sits slightly off the midpoint by design.
+of the config; the defaults are calibrated for the car.  For throttle, 0.5
+lands exactly on neutral; the steering neutral sits slightly off the
+midpoint by design.
 """
 
 from __future__ import annotations

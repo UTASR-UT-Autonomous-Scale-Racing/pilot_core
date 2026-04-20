@@ -50,7 +50,7 @@ def speed_profile(
 
 @dataclass
 class LongitudinalConfig:
-    speed_per_throttle: float = 3.0   # m/s of steady-state speed per unit throttle (calibrate!)
+    speed_per_throttle: float = 3.0   # m/s of steady-state speed per unit throttle (calibrate on the car)
     kp: float = 0.25                  # throttle per m/s of speed error
     ki: float = 0.15
     integral_limit: float = 0.15      # anti-windup clamp on the I-term (throttle units)

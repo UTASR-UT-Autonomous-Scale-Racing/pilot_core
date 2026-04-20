@@ -4,6 +4,8 @@ Closed-loop controller bench (no hardware): drive the track controllers on a
 kinematic-bicycle model through the same estimator → controller → safety
 chain used on the car, and print lap / tracking metrics.
 
+Usage (run from the repo root; the depth_ftg mode reads
+orbslam_oakd_rgbd.yaml from the current directory):
     python scripts/sim_bench.py                          # all controllers, both tracks
     python scripts/sim_bench.py --mode stanley --track twisty --duration 90
     python scripts/sim_bench.py --v-max 1.2 --plot bench.png
@@ -16,7 +18,8 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 
 from control import VehicleParams  # noqa: E402
 from control.controllers import LATERAL_CONTROLLERS  # noqa: E402
@@ -50,7 +53,7 @@ def main() -> int:
                 from control.depth_ftg import DepthGapFollower, Intrinsics
 
                 # OAK-D RGB intrinsics scaled to the 160×100 rendered depth image
-                K = Intrinsics.from_orbslam_settings("orbslam_oakd_rgbd.yaml")
+                K = Intrinsics.from_orbslam_settings(os.path.join(REPO_ROOT, "orbslam_oakd_rgbd.yaml"))
                 K = Intrinsics(K.fx / 4, K.fy / 4, K.cx / 4, K.cy / 4)
                 r = run_depth_closed_loop(DepthGapFollower(params, K), outer, inner, params,
                                           duration=args.duration)

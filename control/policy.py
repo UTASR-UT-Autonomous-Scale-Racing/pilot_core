@@ -27,7 +27,7 @@ import numpy as np
 from .types import Command, VehicleState, wrap_angle
 
 
-# --- identical to workers/boundary_resampler.py (the training pipeline) ---
+# --- Observation helpers (must stay identical to workers/boundary_resampler.py) ---
 
 def smooth_boundary(points: np.ndarray, window: int) -> np.ndarray:
     if len(points) < window or window <= 1:
@@ -59,7 +59,7 @@ def boundary_obs(pos, heading, outer, inner, n_ahead) -> np.ndarray:
     return np.concatenate([((o_pts - pos) @ R_inv.T).ravel(), ((i_pts - pos) @ R_inv.T).ravel()]).astype(np.float32)
 
 
-# --------------------------------------------------------------------------
+# --- Policy ---
 
 @dataclass
 class PolicyMeta:

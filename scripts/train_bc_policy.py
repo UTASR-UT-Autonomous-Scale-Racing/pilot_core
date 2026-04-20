@@ -9,6 +9,7 @@ export it to ONNX for ``control_mode: bc``.
     3. Export to ONNX (+ JSON sidecar).
     4. Evaluate closed loop, map-free, on the held-out oval and twisty tracks.
 
+Usage (needs torch and onnxruntime):
     python scripts/train_bc_policy.py                          # → bc_policy.onnx
     python scripts/train_bc_policy.py --data demos.npz --epochs 40
 
@@ -80,15 +81,15 @@ def train(x, y, epochs, seed):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--tracks", type=int, default=16)
+    ap.add_argument("--tracks", type=int, default=16, help="random training tracks to drive (default: 16)")
     ap.add_argument("--seconds", type=float, default=45.0, help="expert driving per track")
     ap.add_argument("--speed", type=float, default=0.8, help="expert / cruise speed (m/s)")
-    ap.add_argument("--epochs", type=int, default=30)
-    ap.add_argument("--max-range", type=float, default=4.0)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--data", help="dataset cache (.npz): loaded if present, else written")
-    ap.add_argument("--out", default="bc_policy.onnx")
-    ap.add_argument("--eval-seconds", type=float, default=90.0)
+    ap.add_argument("--epochs", type=int, default=30, help="training epochs (default: 30)")
+    ap.add_argument("--max-range", type=float, default=4.0, help="depth clip / normalisation range, m (default: 4.0)")
+    ap.add_argument("--seed", type=int, default=0, help="RNG seed for tracks, noise and training")
+    ap.add_argument("--data", help="dataset cache (.npz): loaded if present (collection flags are then ignored), else written")
+    ap.add_argument("--out", default="bc_policy.onnx", help="output ONNX path (+ .json sidecar)")
+    ap.add_argument("--eval-seconds", type=float, default=90.0, help="simulated seconds per evaluation run")
     args = ap.parse_args()
 
     params = VehicleParams.load()

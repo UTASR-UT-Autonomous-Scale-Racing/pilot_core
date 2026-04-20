@@ -10,6 +10,7 @@ export it to ONNX for ``control_mode: vae``.
     4. Export encoder-mean → head to ONNX (+ JSON sidecar).
     5. Evaluate closed loop, map-free, on the held-out oval and twisty tracks.
 
+Usage (needs torch and onnxruntime):
     python scripts/train_vae_policy.py                    # → vae_policy.onnx
     python scripts/train_vae_policy.py --tracks 24 --epochs 40 --out models/vae.onnx
 
@@ -104,18 +105,18 @@ def train(x, y, latent_dim, epochs, head_epochs, beta, seed):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--tracks", type=int, default=16)
+    ap.add_argument("--tracks", type=int, default=16, help="random training tracks to drive (default: 16)")
     ap.add_argument("--seconds", type=float, default=45.0, help="expert driving per track")
     ap.add_argument("--speed", type=float, default=0.8, help="expert / cruise speed (m/s)")
-    ap.add_argument("--latent", type=int, default=16)
-    ap.add_argument("--epochs", type=int, default=30)
-    ap.add_argument("--head-epochs", type=int, default=100)
-    ap.add_argument("--beta", type=float, default=1.0)
-    ap.add_argument("--max-range", type=float, default=4.0)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--data", help="dataset cache (.npz): loaded if present, else written")
-    ap.add_argument("--out", default="vae_policy.onnx")
-    ap.add_argument("--eval-seconds", type=float, default=90.0)
+    ap.add_argument("--latent", type=int, default=16, help="VAE latent dimension (default: 16)")
+    ap.add_argument("--epochs", type=int, default=30, help="training epochs (default: 30)")
+    ap.add_argument("--head-epochs", type=int, default=100, help="controller-head epochs (default: 100)")
+    ap.add_argument("--beta", type=float, default=1.0, help="KL weight in the VAE loss (default: 1.0)")
+    ap.add_argument("--max-range", type=float, default=4.0, help="depth clip / normalisation range, m (default: 4.0)")
+    ap.add_argument("--seed", type=int, default=0, help="RNG seed for tracks, noise and training")
+    ap.add_argument("--data", help="dataset cache (.npz): loaded if present (collection flags are then ignored), else written")
+    ap.add_argument("--out", default="vae_policy.onnx", help="output ONNX path (+ .json sidecar)")
+    ap.add_argument("--eval-seconds", type=float, default=90.0, help="simulated seconds per evaluation run")
     args = ap.parse_args()
 
     params = VehicleParams.load()

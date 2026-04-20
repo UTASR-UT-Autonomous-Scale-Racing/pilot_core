@@ -1,8 +1,16 @@
 """
-ZMQSensorWorker — Subscribe to sensor data from autodrive_bridge via ZMQ
-and populate multiple shared ring buffers (frame, imu, pose).
+ZMQSensorWorker — subscribes to the JSON sensor feed from autodrive_bridge
+and fills the frame, IMU, pose and LIDAR buffers.  Used instead of
+CameraWorker + IMUWorker in simulator mode.
 
-This worker replaces CameraWorker + IMUWorker when running in simulator mode.
+Conventions:
+    * frame_buf: RGB uint8 + depth float32 in metres (8-bit depth images are
+      scaled linearly, 0 = near, 255 = ``depth_max_meters``).
+    * Simulator commands are signed [-1, 1] with steering +1 = LEFT; they are
+      mapped to [0, 1] (0.5 = neutral, steering 0 = full left) in the IMU
+      vector's last two slots.
+    * The simulator's ground-truth vehicle-to-world pose (ROS / Z-up frame,
+      quaternion sent as [x, y, z, w]) goes to PoseBuffer with its speed.
 """
 
 from __future__ import annotations
@@ -12,7 +20,6 @@ import json
 import time
 from typing import Any
 
-import os
 
 import numpy as np
 
@@ -45,6 +52,12 @@ class ZMQSensorWorker(BaseWorker):
         Shared IMUBuffer to write IMU data
     pose_buffer : PoseBuffer, optional
         Shared PoseBuffer to write ground truth poses from simulator
+    lidar_buffer : LidarBuffer, optional
+        Shared LidarBuffer for the 1080-ray 2D scan
+    depth_max_meters : float
+        Depth mapped to pixel value 255 for 8-bit depth images (default 10.0)
+    collision_counter, lap_counter, checkpoint_counter : mp.Value, optional
+        Shared integers mirrored from simulator telemetry (for the gym env)
     """
 
     def __init__(self, name: str = "zmq_sensor", **kwargs: Any) -> None:
@@ -58,13 +71,11 @@ class ZMQSensorWorker(BaseWorker):
         self._frame_count = 0
         self._last_report_time = 0
         self._depth_max_meters: float = 10.0
-        self._depth_logged = False  # log raw depth range once for calibration
-        self._pos_logged = False   # log raw simulator position once for scale check
+        self._depth_logged = False
+        self._pos_logged = False
         self._collision_counter = None   # mp.Value('i') shared with gym env
         self._lap_counter = None         # mp.Value('i') shared with gym env
         self._checkpoint_counter = None  # mp.Value('i') shared with gym env
-        self._outer_boundary: np.ndarray | None = None
-        self._inner_boundary: np.ndarray | None = None
 
     def setup(self) -> None:
         if zmq is None:
@@ -73,12 +84,11 @@ class ZMQSensorWorker(BaseWorker):
         host = self.config.get("host", "localhost")
         port = self.config.get("port", 5555)
 
-        # Initialize ZMQ subscriber
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.SUB)
         self._socket.setsockopt(zmq.RCVHWM, 10)
-        self._socket.setsockopt(zmq.RCVTIMEO, 100)  # 100ms timeout
-        self._socket.setsockopt(zmq.CONFLATE, 1)  # Keep only latest message
+        self._socket.setsockopt(zmq.RCVTIMEO, 100)  # ms
+        self._socket.setsockopt(zmq.CONFLATE, 1)  # keep only the latest message
 
         try:
             self._socket.connect(f"tcp://{host}:{port}")
@@ -88,7 +98,6 @@ class ZMQSensorWorker(BaseWorker):
             self.logger.error(f"Failed to connect to {host}:{port}: {e}")
             raise
 
-        # Get buffer references
         self._frame_buf = self.config["frame_buffer"]
         self._imu_buf = self.config["imu_buffer"]
         self._pose_buf = self.config.get("pose_buffer")
@@ -98,37 +107,14 @@ class ZMQSensorWorker(BaseWorker):
         self._lap_counter = self.config.get("lap_counter")
         self._checkpoint_counter = self.config.get("checkpoint_counter")
 
-        # Load and resample boundary lines for distance logging (optional)
-        boundary_dir = self.config.get("boundary_save_path", "rl/boundaries")
-        boundary_spacing = float(self.config.get("boundary_spacing", 0.1))
-        try:
-            from workers.boundary_resampler import resample_uniform, smooth_boundary
-            outer_path = os.path.join(boundary_dir, "outer_line.npy")
-            inner_path = os.path.join(boundary_dir, "inner_line.npy")
-            if os.path.exists(outer_path) and os.path.exists(inner_path):
-                outer: np.ndarray = resample_uniform(smooth_boundary(np.load(outer_path)[:, :2], 15), boundary_spacing)
-                inner: np.ndarray = resample_uniform(smooth_boundary(np.load(inner_path)[:, :2], 15), boundary_spacing)
-                self._outer_boundary = outer
-                self._inner_boundary = inner
-                self.logger.info(
-                    f"Loaded+resampled boundaries: {outer.shape[0]} outer, "
-                    f"{inner.shape[0]} inner pts (spacing={boundary_spacing}m)"
-                )
-            else:
-                self.logger.info("No boundary files found — distance logging disabled")
-        except Exception as e:
-            self.logger.warning(f"Could not load boundaries: {e}")
-
         self._last_report_time = time.time()
         self.logger.info(f"ZMQSensorWorker ready (depth_max_meters={self._depth_max_meters})")
 
     def step(self) -> None:
         try:
-            # Receive sensor data (non-blocking)
             msg_json = self._socket.recv_string(zmq.NOBLOCK)
             data = json.loads(msg_json)
 
-            # Process and write to buffers
             self._process_frame_data(data)
             self._process_imu_data(data)
             self._process_pose_data(data)
@@ -137,7 +123,6 @@ class ZMQSensorWorker(BaseWorker):
 
             self._frame_count += 1
 
-            # Report stats every second
             now = time.time()
             if now - self._last_report_time >= 1.0:
                 elapsed = now - self._last_report_time
@@ -147,7 +132,6 @@ class ZMQSensorWorker(BaseWorker):
                 self._last_report_time = now
 
         except zmq.Again:
-            # No data available, continue
             time.sleep(0.001)
         except json.JSONDecodeError as e:
             self.logger.warning(f"Failed to decode JSON: {e}")
@@ -166,7 +150,7 @@ class ZMQSensorWorker(BaseWorker):
             front_cam = data['front_camera']
             img_bytes = base64.b64decode(front_cam['data'])
 
-            # Decode based on encoding field (JPEG from bridge, or raw bytes legacy)
+            # 'jpeg' (bridge default) or raw uint8 bytes with a 'shape' field
             encoding = front_cam.get('encoding', 'raw')
             if encoding == 'jpeg':
                 nparr = np.frombuffer(img_bytes, dtype=np.uint8)
@@ -177,7 +161,6 @@ class ZMQSensorWorker(BaseWorker):
                 if len(rgb.shape) == 2:
                     rgb = np.stack([rgb, rgb, rgb], axis=-1)
 
-            # Get depth frame if available
             depth = None
             if 'depth_camera' in data and data['depth_camera']:
                 try:
@@ -186,16 +169,16 @@ class ZMQSensorWorker(BaseWorker):
                     depth_encoding = depth_cam.get('encoding', 'raw')
 
                     if depth_encoding in ('jpeg', 'png'):
-                        # JPEG grayscale → linear float32 depth in metres.
-                        # Pixel value 0=near, 255=far_clip.  Tune depth_max_meters
-                        # in config_zmq.yaml to match the simulator camera far clip.
+                        # 8-bit grayscale → linear depth in metres: 0 = near,
+                        # 255 = far clip.  depth_max_meters must match the
+                        # simulator camera's far clip.
                         nparr = np.frombuffer(depth_bytes, dtype=np.uint8)
                         depth = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE).astype(np.float32)
                         depth = depth / 255.0 * self._depth_max_meters
-                        # Log raw pixel range once so the user can verify the scale
+                        # Log the pixel → metres mapping of the first frame
                         if not self._depth_logged:
                             raw_u8 = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
-                            self.logger.info(
+                            self.logger.debug(
                                 f"[depth calibration] raw uint8 pixel range: "
                                 f"min={int(raw_u8.min())} max={int(raw_u8.max())} "
                                 f"mean={float(raw_u8.mean()):.1f}  "
@@ -205,7 +188,7 @@ class ZMQSensorWorker(BaseWorker):
                             )
                             self._depth_logged = True
                     else:
-                        # Legacy raw uint16 path
+                        # Raw uint16 depth, written without unit conversion
                         depth_flat = np.frombuffer(depth_bytes, dtype=np.uint16)
                         try:
                             depth = depth_flat.reshape(depth_cam['shape'][:2]).astype(np.float32)
@@ -222,7 +205,6 @@ class ZMQSensorWorker(BaseWorker):
             else:
                 depth = np.zeros(rgb.shape[:2], dtype=np.float32)
 
-            # Write to frame buffer
             self._frame_buf.write(rgb, depth)
 
         except Exception as e:
@@ -231,7 +213,6 @@ class ZMQSensorWorker(BaseWorker):
     def _process_imu_data(self, data: dict) -> None:
         """Extract and write IMU data to IMUBuffer."""
         try:
-            # Get quaternion orientation
             if 'orientation_quat' in data:
                 # Bridge sends [x, y, z, w] (ROS); IMU vector layout is [w, x, y, z]
                 x, y, z, w = data['orientation_quat']
@@ -239,17 +220,15 @@ class ZMQSensorWorker(BaseWorker):
             else:
                 quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
-            # Get linear acceleration
             if 'linear_acceleration' in data:
                 lin_acc = np.array(data['linear_acceleration'], dtype=np.float32)
             else:
                 lin_acc = np.zeros(3, dtype=np.float32)
 
-            # Get throttle and steering (normalized to [0, 1])
+            # Simulator throttle / steering are signed [-1, 1]
             throttle = float(data.get('throttle', 0.0))
             steering = float(data.get('steering', 0.0))
 
-            # Convert from [-1, 1] to [0, 1]
             throttle_norm = (throttle + 1.0) / 2.0
             steering_norm = (1.0 - steering) / 2.0  # simulator +1 = left → buffer 0 = left
             throttle_norm = np.clip(throttle_norm, 0.0, 1.0)
@@ -273,17 +252,11 @@ class ZMQSensorWorker(BaseWorker):
             return
 
         if not self._pos_logged:
-            self.logger.info(
+            self.logger.debug(
                 f"[sim position check] raw position={data['position']} "
                 f"orientation_quat={data['orientation_quat']}"
             )
             self._pos_logged = True
-
-        try:
-            pos = np.array(data['position'], dtype=np.float32)
-
-        except Exception as e:
-            self.logger.warning(f"Boundary distance check failed: {e}")
 
         if self._pose_buf is None:
             return
@@ -292,11 +265,10 @@ class ZMQSensorWorker(BaseWorker):
             pos = np.array(data['position'], dtype=np.float32)
             quat = np.array(data['orientation_quat'], dtype=np.float32)
 
-            # Create 4x4 pose matrix
             pose = np.eye(4, dtype=np.float32)
             pose[0:3, 3] = pos
 
-            # Convert quaternion — bridge sends [x, y, z, w] (ROS convention)
+            # Quaternion → rotation matrix; bridge sends [x, y, z, w] (ROS)
             x, y, z, w = quat[0], quat[1], quat[2], quat[3]
 
             R = np.array([

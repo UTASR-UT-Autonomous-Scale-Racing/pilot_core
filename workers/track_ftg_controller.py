@@ -18,8 +18,9 @@ The classic Follow-the-Gap pipeline then runs on that scan:
 Reference: V. Sezer, M. Gokasan, "A novel obstacle avoidance algorithm:
 'Follow the Gap Method'", Robotics and Autonomous Systems 60(9), 2012.
 
-Output: (steering, throttle) both in [-1, 1], with optional Gaussian
-noise for stochastic sampling — matching TrackPIDController's API.
+Output: (steering, throttle) both in [-1, 1], steering +1 = LEFT, with
+optional Gaussian noise for stochastic sampling — same API as
+TrackPIDController.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ class TrackFTGController:
         Total field-of-view in degrees centred on the heading
         (default 270 — like a typical LiDAR).
     max_range : float
-        Clamp / reject distances beyond this (BEV units, default 5.0).
+        Clamp / reject distances beyond this (metres, default 5.0).
     bubble_radius_deg : float
         Half-width of the safety bubble in degrees (default 30).
     smooth_window : int
@@ -96,12 +97,9 @@ class TrackFTGController:
         # Pre-compute angular bins (relative to heading = 0)
         half_fov = self.fov / 2.0
         self._beam_angles = np.linspace(-half_fov, half_fov, num_beams)
-        # Width of one angular bin (used for bubble masking)
         self._beam_step = self._beam_angles[1] - self._beam_angles[0] if num_beams > 1 else self.fov
 
-    # ------------------------------------------------------------------
-    # Public API (matches TrackPIDController)
-    # ------------------------------------------------------------------
+    # --- Public API (matches TrackPIDController) ---
 
     def step(
         self,
@@ -115,9 +113,9 @@ class TrackFTGController:
         Parameters
         ----------
         current_bev : np.ndarray
-            ``(2,)`` current vehicle position in BEV (X, Z).
+            ``(2,)`` current vehicle position in the BEV plane.
         heading_rad : float
-            Vehicle heading angle in the BEV (X, Z) plane.
+            Vehicle heading in the BEV plane (see :func:`workers.bev.pose_to_bev`).
         outer_line : np.ndarray
             ``(N, 2)`` ordered outer boundary vertices.
         inner_line : np.ndarray
@@ -145,7 +143,7 @@ class TrackFTGController:
         # 6. Convert beam index → steering angle relative to heading
         steer_angle = self._beam_angles[best_idx]
 
-        # Normalise: map [-half_fov, +half_fov] → [-1, +1]
+        # Map [-half_fov, +half_fov] → [-1, +1]; positive bearing = left
         half_fov = self.fov / 2.0
         raw_steer = float(np.clip(steer_angle / half_fov, -1.0, 1.0))
 
@@ -167,9 +165,7 @@ class TrackFTGController:
     def reset(self) -> None:
         """No internal state to reset (reactive controller)."""
 
-    # ------------------------------------------------------------------
-    # Virtual LiDAR scan from BEV boundary polylines
-    # ------------------------------------------------------------------
+    # --- Virtual LiDAR scan from BEV boundary polylines ---
 
     def _build_virtual_scan(
         self,
@@ -195,24 +191,19 @@ class TrackFTGController:
 
             # Bearing of each point relative to heading
             bearings = np.arctan2(deltas[:, 1], deltas[:, 0]) - heading
-            # Wrap to [-pi, pi)
             bearings = (bearings + np.pi) % (2 * np.pi) - np.pi
 
             for bearing, dist in zip(bearings, dists):
                 if abs(bearing) > half_fov:
                     continue  # outside FOV
-                # Map bearing → beam index
                 idx = int(round((bearing + half_fov) / self._beam_step))
                 idx = np.clip(idx, 0, self.num_beams - 1)
-                # Keep the nearest hit
                 if dist < ranges[idx]:
                     ranges[idx] = dist
 
         return ranges
 
-    # ------------------------------------------------------------------
-    # Pre-processing
-    # ------------------------------------------------------------------
+    # --- Pre-processing ---
 
     def _preprocess(self, ranges: np.ndarray) -> np.ndarray:
         """Smooth with a moving average and clamp to max_range."""
@@ -221,14 +212,11 @@ class TrackFTGController:
             ranges = np.convolve(ranges, kernel, mode="same")
         return np.clip(ranges, 0.0, self.max_range)
 
-    # ------------------------------------------------------------------
-    # Safety bubble
-    # ------------------------------------------------------------------
+    # --- Safety bubble ---
 
     def _apply_bubble(self, ranges: np.ndarray) -> np.ndarray:
         """Zero out beams within ``bubble_radius`` of the closest hit."""
         closest_idx = int(np.argmin(ranges))
-        # Number of beams covered by the bubble radius
         n_bubble = max(1, int(round(self.bubble_radius / self._beam_step)))
         lo = max(0, closest_idx - n_bubble)
         hi = min(self.num_beams, closest_idx + n_bubble + 1)
@@ -236,9 +224,7 @@ class TrackFTGController:
         ranges[lo:hi] = 0.0
         return ranges
 
-    # ------------------------------------------------------------------
-    # Gap detection
-    # ------------------------------------------------------------------
+    # --- Gap detection ---
 
     @staticmethod
     def _find_max_gap(ranges: np.ndarray) -> tuple[int, int]:
@@ -256,7 +242,6 @@ class TrackFTGController:
                 if cur_len > best_len:
                     best_start, best_len = cur_start, cur_len
                 cur_len = 0
-        # Final run
         if cur_len > best_len:
             best_start, best_len = cur_start, cur_len
 
@@ -281,9 +266,7 @@ class TrackFTGController:
         gap_slice = ranges[start_i: end_i + 1]
         return int(start_i + np.argmax(gap_slice))
 
-    # ------------------------------------------------------------------
-    # Introspection helpers (useful for debug / visualisation)
-    # ------------------------------------------------------------------
+    # --- Introspection helpers (useful for debug / visualisation) ---
 
     @property
     def beam_angles(self) -> np.ndarray:

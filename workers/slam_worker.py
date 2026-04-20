@@ -26,7 +26,7 @@ import numpy as np
 from .base_worker import BaseWorker
 from shared_buffer import FrameBuffer, PoseBuffer
 
-# Optional imports — the point-cloud buffer may not exist if not enabled
+# Optional — only needed when a point-cloud buffer is supplied
 try:
     from shared_buffer.pointcloud_buffer import PointCloudBuffer
 except ImportError:
@@ -65,9 +65,15 @@ class SLAMWorker(BaseWorker):
     settings_path : str
         Path to camera settings YAML for ORB_SLAM3.
     loop_event : multiprocessing.Event | None
-        Event to set when a loop closure is detected.
+        Set when ORB-SLAM3 reports a map change (loop closure / global BA).
     localize_event : multiprocessing.Event | None
-        Event that, once set, switches to localization-only mode.
+        Once set, switches ORB-SLAM3 to localization-only mode.
+    warmup_frames : int
+        Number of initial frames to skip while stereo depth settles
+        (default 15).
+
+    Without ``orbslam3_python`` installed the worker runs as a stub that
+    publishes identity poses and no point cloud.
     """
 
     def __init__(self, name: str = "slam", **kwargs: Any) -> None:
@@ -118,7 +124,7 @@ class SLAMWorker(BaseWorker):
             self._slam = None
 
     def step(self) -> None:
-        # --- Check if we should switch to localization-only mode ---
+        # --- Switch to localization-only mode once mapping is done ---
         if (
             not self._localization_activated
             and self._localize_event is not None
@@ -149,10 +155,10 @@ class SLAMWorker(BaseWorker):
         if self._frame_count <= self._warmup_frames:
             return
 
-        # One-time depth sanity check — print actual values SLAMWorker receives
+        # Log the depth statistics of the first tracked frame (expects metres)
         if self._frame_count == self._warmup_frames + 1:
             nonzero = depth[depth > 0]
-            self.logger.info(
+            self.logger.debug(
                 f"[SLAM depth check] shape={depth.shape} dtype={depth.dtype} "
                 f"min={float(depth.min()):.4f} max={float(depth.max()):.4f} "
                 f"mean_nonzero={float(nonzero.mean()) if len(nonzero) else 0:.4f}m "
@@ -160,7 +166,6 @@ class SLAMWorker(BaseWorker):
             )
 
         if self._slam is not None:
-            # --- Real SLAM tracking ---
             Tcw = self._slam.track_rgbd(rgb, depth, header.produced_ts)
             state = self._slam.get_tracking_state()
             tracking_ok = state == _TRACKING_OK
@@ -174,7 +179,7 @@ class SLAMWorker(BaseWorker):
             if tracking_ok:
                 self._pose_buf.write(Twc)
 
-            # Log tracking state + position every 30 frames for diagnostics
+            # Periodic tracking diagnostics
             if self._frame_count % 30 == 0:
                 tx, ty, tz = (float(v) for v in Twc[:3, 3])
                 all_pts = np.asarray(self._slam.get_all_map_points(), dtype=np.float32)
@@ -210,11 +215,11 @@ class SLAMWorker(BaseWorker):
                     else:
                         self.logger.debug(f"Periodic PC publish: {len(all_pts)} pts")
 
-            # Signal loop closure on actual SLAM loop closure event
+            # map_changed() fires once per loop closure / global BA
             if map_changed and self._loop_event is not None:
                 self._loop_event.set()
         else:
-            # --- Stub mode — identity pose ---
+            # Stub mode (no orbslam3_python)
             identity = np.eye(4, dtype=np.float32)
             self._pose_buf.write(identity)
 

@@ -6,8 +6,12 @@ Payload layout (contiguous bytes):
     [4 bytes]  uint32  rgb_width
     [4 bytes]  uint32  depth_height
     [4 bytes]  uint32  depth_width
-    [H*W*3]    uint8   RGB data   (row-major, BGR as from OpenCV)
-    [H*W*2]    uint16  Depth data (millimetres or raw disparity)
+    [H*W*3]    uint8   RGB data   (row-major, RGB channel order)
+    [H*W*4]    float32 Depth data (metres; the camera workers write float32)
+                or
+    [H*W*2]    uint16  Depth data (raw, e.g. millimetres)
+
+The reader infers the depth dtype from the remaining payload size.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ import numpy as np
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader
 
-# Default geometry — 640×480 RGB (3ch uint8) + 640×480 depth (float32)
+# Slot sizing — 640×480 RGB (3ch uint8) + 640×480 depth (float32)
 _DEFAULT_RGB_SHAPE = (480, 640, 3)
 _DEFAULT_DEPTH_SHAPE = (480, 640)
 
@@ -76,8 +80,7 @@ class FrameBuffer:
         rgb : np.ndarray
             Shape ``(H, W, 3)``, dtype ``uint8``.
         depth : np.ndarray
-            Shape ``(H, W)``, dtype ``uint16`` or ``float32``.
-            If float32 the raw bytes are stored as-is; the reader must know.
+            Shape ``(H, W)``, dtype ``float32`` (metres) or ``uint16``.
         """
         rh, rw = rgb.shape[:2]
         dh, dw = depth.shape[:2]
@@ -94,7 +97,8 @@ class FrameBuffer:
         Returns
         -------
         (header, rgb, depth) or *None* if no frame has been written.
-        ``rgb`` is ``(H, W, 3) uint8``; ``depth`` is ``(H, W) uint16``.
+        ``rgb`` is ``(H, W, 3) uint8``; ``depth`` is ``(H, W)`` ``float32``
+        or ``uint16``, as written.
         """
         result = self._rb.read_latest()
         if result is None:
@@ -109,7 +113,7 @@ class FrameBuffer:
         )
 
         depth_offset = _META_SIZE + rgb_size
-        # Infer depth dtype from remaining size
+        # Depth dtype is inferred from the remaining size (4 B/px → float32)
         remaining = len(payload) - depth_offset
         depth_pixels = dh * dw
         if remaining == depth_pixels * 4:

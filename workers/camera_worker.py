@@ -1,19 +1,14 @@
 """
-CameraWorker — captures RGB + aligned Depth frames from an OAK-D camera via
-DepthAI v3 and writes them into a FrameBuffer.
+CameraWorker — captures RGB + depth frames from an OAK-D camera (DepthAI v3)
+and writes them into frame_buf.
 
-Uses the DepthAI v3 builder API with three camera nodes (RGB + stereo pair)
-and a StereoDepth node for depth estimation:
-    color  = pipeline.create(dai.node.Camera).build(CAM_A)
-    left   = pipeline.create(dai.node.Camera).build(CAM_B)
-    right  = pipeline.create(dai.node.Camera).build(CAM_C)
-    stereo = pipeline.create(dai.node.StereoDepth)
+Pipeline: colour camera (CAM_A) + stereo pair (CAM_B/CAM_C) → StereoDepth,
+with depth aligned to the undistorted RGB image and the two streams
+time-synchronised.  frame_buf receives RGB uint8 and depth float32 in metres.
 
 When an ``imu_buffer`` is supplied, the on-board IMU (BNO086 / BMI270) is
 added to the *same* pipeline.  A DepthAI device can only be opened by one
-process, so the OAK-D IMU must live here rather than in a separate worker.
-
-This worker does **no** model inference — it only captures and publishes frames.
+process, so the OAK-D IMU must be streamed here rather than by IMUWorker.
 """
 
 from __future__ import annotations
@@ -37,11 +32,11 @@ except ImportError:
 class CameraWorker(BaseWorker):
     """Worker process that captures OAK-D RGB+Depth frames via DepthAI v3.
 
-    Falls back to synthetic FPV frames when depthai is unavailable or
-    ``synthetic=True`` is passed in config (dev-local mode).
+    Falls back to synthetic FPV frames when depthai is unavailable,
+    ``synthetic=True`` is passed, or ``PILOT_SYNTHETIC=1`` is set.
 
-    Config kwargs (passed via ``start.py``)
-    ----------------------------------------
+    Config kwargs
+    -------------
     output_buffer : FrameBuffer
         Shared FrameBuffer to write into.
     fps : int
@@ -105,7 +100,6 @@ class CameraWorker(BaseWorker):
             dai.CameraBoardSocket.CAM_C, sensorFps=fps
         )
 
-        # StereoDepth node
         stereo = self._pipeline.create(dai.node.StereoDepth)
         stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.DEFAULT)
         stereo.setLeftRightCheck(True)
@@ -129,7 +123,7 @@ class CameraWorker(BaseWorker):
             rgb_out.link(stereo.inputAlignTo)
             depth_out = stereo.depth
 
-        # Sync RGB + depth so we get matched pairs
+        # Pair RGB and depth frames whose timestamps are within half a frame period
         sync = self._pipeline.create(dai.node.Sync)
         sync.setSyncThreshold(timedelta(seconds=1.0 / (2 * fps)))
         rgb_out.link(sync.inputs["rgb"])

@@ -10,8 +10,8 @@ Modes (``mode=``):
   estimate is stale.
 * Map-free, from depth frames: ``depth_ftg`` (Follow-the-Gap), ``vae``
   (learned VAE control model) and ``bc`` (behaviour-cloning CNN).
-* Legacy / simulator: ``pid`` and ``ftg`` (on raw poses + boundaries),
-  ``lidar_pid`` (LiDAR wall centering, simulator).
+* Baseline controllers: ``pid`` and ``ftg`` (on raw PoseBuffer poses +
+  boundaries), ``lidar_pid`` (LiDAR wall centering, simulator only).
 
 Output contract: every value written to ControlBuffer is normalised to
 ``[0, 1]`` with **0.5 = neutral** on both channels, matching
@@ -34,7 +34,7 @@ from .base_worker import BaseWorker
 from .bev import pose_to_bev
 from shared_buffer import ControlBuffer, PoseBuffer
 
-# Optional — only needed in boundary-PID mode
+# Optional — only needed in the pid / ftg modes
 try:
     from shared_buffer.track_boundary_buffer import TrackBoundaryBuffer
 except ImportError:
@@ -94,14 +94,14 @@ class ControlWorker(BaseWorker):
         self._mode: str = "pure_pursuit"
         self._pose_buf: PoseBuffer | None = None
         self._ctrl_buf: ControlBuffer | None = None
-        # Boundary-PID-mode state
+        # pid / ftg mode state
         self._boundary_buf: Optional[Any] = None
         self._pid = None
         self._mapping_done_event: Optional[mp.Event] = None
         self._outer_line: Optional[np.ndarray] = None
         self._inner_line: Optional[np.ndarray] = None
         self._last_pose_seq = 0
-        # LIDAR-wall-mode state
+        # lidar_pid mode state
         self._lidar_buf: Optional[Any] = None
         self._lidar_wall_ctrl = None
         self._last_lidar_seq = 0
@@ -191,7 +191,7 @@ class ControlWorker(BaseWorker):
     def step(self) -> None:
         self._step_fn()
 
-    # --- Track-following modes (pure_pursuit, stanley) ---
+    # --- Track-following modes (TRACK_MODES) ---
 
     def _setup_track(self) -> None:
         from control.types import VehicleParams
@@ -351,10 +351,9 @@ class ControlWorker(BaseWorker):
                 f"-> buffer ({steer_unit:.3f}, {throttle_unit:.3f})"
             )
 
-    # --- Boundary PID / FTG modes ---
+    # --- pid / ftg modes (raw pose + boundaries) ---
 
     def _step_pid(self) -> None:
-        # Wait for mapping to complete
         if (
             self._mapping_done_event is not None
             and not self._mapping_done_event.is_set()
@@ -376,7 +375,6 @@ class ControlWorker(BaseWorker):
             time.sleep(0.05)
             return
 
-        # Read latest pose
         pose_result = self._pose_buf.read_latest()
         if pose_result is None:
             time.sleep(0.005)
@@ -390,12 +388,11 @@ class ControlWorker(BaseWorker):
 
         current_bev, heading = pose_to_bev(pose, self._bev_axes, self._forward_axis)
 
-        # PID step — returns raw [-1, 1]; normalize to [0, 1] for ControlBuffer
+        # Controller output is signed [-1, 1] (steering +1 = left)
         steer_raw, throttle_raw = self._pid.step(
             current_bev, heading, self._outer_line, self._inner_line
         )
 
-        # Controllers work in signed space; convert to the ControlBuffer contract
         steer_unit, throttle_unit = signed_to_unit(steer_raw, throttle_raw)
         self._ctrl_buf.write(steer_unit, throttle_unit)
 

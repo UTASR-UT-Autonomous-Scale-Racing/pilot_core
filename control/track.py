@@ -88,7 +88,7 @@ class TrackModel:
         walls = np.vstack([_resample_closed(outer, spacing / 2), _resample_closed(inner, spacing / 2)])
         self.half_width, _ = cKDTree(walls).query(self.points)
 
-    # ------------------------------------------------------------------ build
+    # --- Build ---
 
     def _set_centre(self, centre: np.ndarray) -> None:
         self.points = centre
@@ -126,7 +126,7 @@ class TrackModel:
             return True
         return False
 
-    # ---------------------------------------------------------------- queries
+    # --- Queries ---
 
     def project(self, x: float, y: float, hint: int | None = None, window: int = 40) -> Projection:
         """Project ``(x, y)`` onto the centre-line.
@@ -147,7 +147,7 @@ class TrackModel:
                 _, idx = self._tree.query(pos)
         idx = int(idx)
 
-        # Refine along the segment to the better neighbour
+        # Refine: project onto the tangent at the nearest sample
         p0 = self.points[idx]
         h = self.heading[idx]
         t = np.array([np.cos(h), np.sin(h)])
@@ -157,7 +157,7 @@ class TrackModel:
         return Projection(idx, s, lateral, float(h), float(self.curvature[idx]))
 
     def index_at(self, s: float) -> int:
-        """Nearest sample index at arc length ``s`` (wraps around)."""
+        """Index of the sample at or before arc length ``s`` (wraps around)."""
         return int(np.searchsorted(self.s, s % self.length, side="right") - 1) % self._n
 
     def point_at(self, s: float) -> np.ndarray:

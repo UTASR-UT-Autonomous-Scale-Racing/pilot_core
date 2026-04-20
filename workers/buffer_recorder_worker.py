@@ -2,10 +2,9 @@
 BufferRecorderWorker — generic per-buffer recorder that saves raw bytes
 with a binary metadata header to disk.
 
-One instance is spawned for **each** buffer that should be recorded.  The
-worker reads the buffer at a configurable sample interval (``sample_k``)
-and writes the raw payload bytes prefixed with a fixed-size metadata header
-to a binary file.
+One instance is spawned for **each** buffer that should be recorded.  Each
+sampled slot is written as a fixed-size record header followed by the raw
+payload bytes.  All integers are little-endian.
 
 Disk layout per record
 ----------------------
@@ -26,17 +25,16 @@ Each file is named ``<buffer_name>_<session_ts>.bin`` and carries a one-time
     [4  bytes]  uint32    sample_k  (configured sample interval)
     [4  bytes]  uint32    top_n     (max distinct samples kept)
     [8  bytes]  float64   session_start_ts
-    [34 bytes]  reserved  (zero-padded to 64)
+    [36 bytes]  reserved  (zero-filled)
 
 ``top_n``
 ---------
-Each recorder instance keeps a counter of how many records it has written.
-When it reaches ``top_n`` it wraps and overwrites the oldest file records
-from the beginning (the file pointer seeks back).  Set ``top_n=0`` to
-disable the cap and record indefinitely.
+After ``top_n`` records the file pointer seeks back to the first record
+and overwrites from there (the file is not truncated).  ``top_n=0``
+disables the cap and records indefinitely.
 
 ``sample_k``
--------------
+------------
 The worker only writes a record when ``(seq_no % sample_k) == 0``, giving
 a decimated recording that matches the configured cadence.
 """
@@ -54,18 +52,20 @@ from shared_buffer.schema import SlotHeader, SCHEMA_VERSION
 
 # --- Binary protocol constants ---
 FILE_MAGIC = b"PLTREC\x00\x01"             # 8 bytes
-FILE_HEADER_FMT = "<8sHHIId30s"            # magic(8) schema(2) dtype(2) sample_k(4) top_n(4) session_ts(8) reserved(30) = 58 → padded to 64
-FILE_HEADER_SIZE = 64                      # fixed on-disk size (struct is 58, we pad 6 extra)
+# magic(8) schema(2) dtype(2) sample_k(4) top_n(4) session_ts(8) reserved(30) = 58 bytes
+FILE_HEADER_FMT = "<8sHHIId30s"
+FILE_HEADER_SIZE = 64                      # on-disk size; struct is zero-padded by 6 bytes
 
-RECORD_HEADER_FMT = "<QddIHH"             # seq_no, produced_ts, read_ts, payload_size, schema_ver, dtype_tag
-RECORD_HEADER_SIZE = struct.calcsize(RECORD_HEADER_FMT)  # 34 bytes
+# seq_no, produced_ts, read_ts, payload_size, schema_ver, dtype_tag
+RECORD_HEADER_FMT = "<QddIHH"
+RECORD_HEADER_SIZE = struct.calcsize(RECORD_HEADER_FMT)  # 32 bytes
 
 
 class BufferRecorderWorker(BaseWorker):
     """Generic worker that records a single shared-memory buffer to disk.
 
-    Config kwargs (passed through ``**kwargs`` → ``self.config``)
-    ---------------------------------------------------------------
+    Config kwargs
+    -------------
     buffer : SharedRingBuffer | typed buffer wrapper
         The buffer to read from.  May be a raw ``SharedRingBuffer`` or a
         typed wrapper like ``FrameBuffer`` — the worker accesses the
@@ -79,7 +79,8 @@ class BufferRecorderWorker(BaseWorker):
     top_n : int
         Maximum number of records written before wrapping (0 = unlimited).
     dtype_tag : int
-        Numeric ``DTypeTag`` value to embed in headers (default 0).
+        Numeric ``DTypeTag`` value for the file header (default: the
+        buffer's own ``dtype_tag``).
     """
 
     def __init__(self, name: str = "buf_recorder", **kwargs: Any) -> None:
@@ -134,18 +135,16 @@ class BufferRecorderWorker(BaseWorker):
 
         header, payload = result
 
-        # Already seen this sequence number?
         if header.seq_no <= self._last_seq:
             time.sleep(0.001)
             return
 
         self._last_seq = header.seq_no
 
-        # Decimation: only record every k-th sample
         if header.seq_no % self._sample_k != 0:
             return
 
-        # Top-N wrap: rewind to beginning of data area
+        # top_n reached: rewind to the first record and overwrite
         if self._top_n > 0 and self._records_written >= self._top_n:
             self._fp.seek(self._data_start_offset)
             self._records_written = 0
@@ -177,7 +176,6 @@ class BufferRecorderWorker(BaseWorker):
             self._session_ts,
             b"\x00" * 30,
         )
-        # Pad to exactly FILE_HEADER_SIZE
         header_bytes += b"\x00" * (FILE_HEADER_SIZE - struct_size)
         self._fp.write(header_bytes)
 

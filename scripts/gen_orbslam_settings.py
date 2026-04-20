@@ -8,7 +8,8 @@ factory calibration, matching exactly what CameraWorker publishes:
     * RGB colour order (CameraWorker converts from DepthAI's BGR)
     * depth in metres (CameraWorker divides by 1000) → DepthMapFactor 1.0
 
-Calibration is per unit — rerun this whenever the camera is swapped.
+Calibration is per unit — rerun this whenever the camera is swapped.  Needs
+the OAK-D connected.  --config and --output are relative to the repo root.
 
 Usage:
     python scripts/gen_orbslam_settings.py                       # uses config.yaml

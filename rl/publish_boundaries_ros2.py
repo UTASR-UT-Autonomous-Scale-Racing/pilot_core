@@ -1,15 +1,17 @@
 """
-Standalone ROS2 node that loads saved boundary .npy files, resamples them
-to uniform arc-length spacing, and publishes them as a MarkerArray for rviz.
+Standalone ROS2 node that loads saved boundary .npy files (outer_line.npy /
+inner_line.npy, as written by the mapping worker), smooths and resamples them
+to uniform arc-length spacing, and publishes them as a MarkerArray for RViz.
 
-Usage (inside bridge container, with boundaries copied in):
+Usage (in any ROS2 environment, e.g. the autodrive bridge container, with the
+boundary files copied in):
     python3 publish_boundaries_ros2.py \
         --outer outer_line.npy --inner inner_line.npy \
         --spacing 0.1 --rate 1.0
 
-Topic: /autodrive/roboracer_1/stack/boundary  (same as MappingWorker live output)
-Red  = outer wall
-Blue = inner wall
+Topic: /pilot/saved_boundary  (visualization_msgs/MarkerArray, frame "world")
+    red  points = outer wall
+    blue points = inner wall
 """
 
 import argparse
@@ -22,6 +24,7 @@ from geometry_msgs.msg import Point
 
 
 def resample_uniform(points: np.ndarray, spacing: float) -> np.ndarray:
+    """Resample an (N, 2) polyline to points ``spacing`` metres apart along its arc length."""
     if len(points) < 2:
         return points.astype(np.float32)
     diffs = np.diff(points, axis=0)
@@ -41,13 +44,15 @@ def smooth_boundary(points: np.ndarray, window: int = 15) -> np.ndarray:
     if len(points) < window:
         return points.astype(np.float32)
     kernel = np.ones(window) / window
-    # Pad with edge values to avoid shrinking the array
+    # mode='same' keeps the array length (the ends are zero-padded)
     px = np.convolve(points[:, 0], kernel, mode='same')
     py = np.convolve(points[:, 1], kernel, mode='same')
     return np.stack([px, py], axis=1).astype(np.float32)
 
 
 class BoundaryPublisher(Node):
+    """Periodically publishes the outer/inner boundaries as POINTS markers."""
+
     def __init__(self, outer: np.ndarray, inner: np.ndarray, rate_hz: float = 1.0):
         super().__init__('boundary_publisher')
         self._outer = outer
@@ -90,9 +95,9 @@ class BoundaryPublisher(Node):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--outer', default='outer_line.npy')
-    parser.add_argument('--inner', default='inner_line.npy')
+    parser = argparse.ArgumentParser(description="Publish saved track boundaries to RViz.")
+    parser.add_argument('--outer', default='outer_line.npy', help='outer boundary .npy (N, >=2)')
+    parser.add_argument('--inner', default='inner_line.npy', help='inner boundary .npy (M, >=2)')
     parser.add_argument('--spacing', type=float, default=0.25,
                         help='Uniform arc-length spacing in metres (default 0.25)')
     parser.add_argument('--smooth', type=int, default=15,

@@ -6,8 +6,10 @@ The OAK-D on-board IMU is *not* handled here: a DepthAI device can only be
 opened by one process, so it is streamed by :class:`CameraWorker` instead
 (``use_oakd_imu: true`` in the config wires this up in ``start.py``).
 
-Replaces ``pilot_ingest.I2CDataProcessor.read()`` loop and the IMU portion
-of ``SegmentProcessor.read_stream()``.
+IMUBuffer vector layout (9 x float32):
+``[qw, qx, qy, qz, ax, ay, az, throttle, steering]`` — orientation
+quaternion, accelerometer in m/s², then the Arduino's raw throttle /
+steering feedback values.
 """
 
 from __future__ import annotations
@@ -91,10 +93,12 @@ class IMUWorker(BaseWorker):
         self.logger.info(f"I2C IMU ready on bus {bus}, address 0x{address:02x}")
 
     def _step_i2c(self) -> None:
+        # 32-byte little-endian block: 7 x float32 (qw, qx, qy, qz, ax, ay, az;
+        # accel in milli-g) + 2 x uint16 (throttle, steering feedback)
         raw = bytes(self._bus.read_i2c_block_data(self._i2c_address, 0, 32))
         values = struct.unpack("<fffffffHH", raw)
         w, x, y, z, ax, ay, az, throttle, steering = values
-        # Convert accelerometer from milli-g → m/s²
+        # milli-g → m/s²
         ax *= 0.00980665
         ay *= 0.00980665
         az *= 0.00980665

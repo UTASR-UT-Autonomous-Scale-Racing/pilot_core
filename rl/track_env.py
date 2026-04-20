@@ -18,20 +18,18 @@ Observation ((n_ahead+1)*4 + 1 floats, vehicle-local frame):
 Action (2 floats):
     [steering, throttle]  — steering in [-1, 1], throttle in [0, 1]
 
-Reward:
-    +forward velocity each step
-    +speed each step
-    +5 per checkpoint passed
-    +10 on lap completion
-    -5 on collision
-    -small centering penalty (1/d_wall)
-    -smoothness penalty on action deltas
+Reward (per step):
+    +0.5 * speed (m/s)
+    +2 per checkpoint passed
+    +2 on lap completion
+    -20 on collision or when stuck
+    -0.1 / max(d_wall, 0.05)   centring penalty, d_wall = distance to the nearest boundary (m)
 
 Termination:
-    terminated=True  on wall collision (ZMQ counter from simulator)
+    terminated=True  on wall collision (counter mirrored from the simulator over ZMQ)
     terminated=True  on lap completion
-    terminated=True  if stuck (throttle > 0.2 but speed < 0.1 for 3+ consecutive steps)
-    truncated=True   after max_steps
+    terminated=True  if stuck (speed < 0.1 m/s for 10 consecutive steps)
+    truncated=True   after max_steps (scaled by policy_hz / 10, see TrackEnv)
 """
 
 from __future__ import annotations
@@ -78,12 +76,19 @@ class TrackEnv(gym.Env):
     n_ahead : int
         Number of boundary points ahead of the closest to include in obs.
         Total points per boundary = n_ahead + 1.
+    boundary_smooth_window : int
+        Moving-average window (points) applied to raw boundaries before resampling.
     max_steps : int
-        Episode length before truncation.
+        Episode length before truncation, expressed in steps at 10 Hz; the
+        actual step limit is ``max_steps * policy_hz / 10`` so the episode
+        duration in seconds is independent of ``policy_hz``.
     policy_hz : float
         Target frequency of the RL control loop.  The env sleeps for
         1/policy_hz seconds after writing each action, then reads the
         latest state accumulated by ZMQSensorWorker during that interval.
+    vis_zmq_port : int or None
+        Port for a ZMQ PUSH socket that streams the observed boundary points
+        (consumed by rl/vis_obs_ros2.py).  None disables it.
     """
 
     metadata = {"render_modes": []}
@@ -160,7 +165,7 @@ class TrackEnv(gym.Env):
         )
 
         # Gymnasium spaces
-        obs_size = (n_ahead + 1) * 4 + 1  # (11 outer + 11 inner) × 2 coords + speed
+        obs_size = (n_ahead + 1) * 4 + 1  # (outer + inner points) × 2 coords + speed
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
         )
@@ -180,9 +185,8 @@ class TrackEnv(gym.Env):
         self._prev_collisions: int = 0
         self._prev_laps: int = 0
         self._prev_checkpoints: int = 0
-        self._prev_action: np.ndarray = np.zeros(2, dtype=np.float32)  # [steering, throttle]
         self._collision_grace_steps: int = 0  # ignore collisions for N steps after reset
-        self._stuck_steps: int = 0            # consecutive steps with throttle>0.2 but speed~0
+        self._stuck_steps: int = 0            # consecutive steps with speed < 0.1 m/s
 
         self._processes: list[mp.Process] = []
 
@@ -252,13 +256,9 @@ class TrackEnv(gym.Env):
         self._prev_collisions = self._collision_count.value
         self._prev_laps = self._lap_count.value
         self._prev_checkpoints = self._checkpoint_count.value
-        self._prev_action = np.zeros(2, dtype=np.float32)
         # Grace period: ignore collisions for first N steps after reset
         self._collision_grace_steps = 3
         self._stuck_steps = 0
-
-        # temporary hard code
-        # self._policy_dt = 1/20.0
 
         obs = self._build_obs(pos, heading, speed=0.0)
         return obs, {}
@@ -268,9 +268,9 @@ class TrackEnv(gym.Env):
 
         steering, throttle = float(action[0]), float(action[1])
 
-        # ControlBuffer expects [0, 1] where 0.5 = neutral, 1.0 = full forward, 0.0 = full reverse
-        # steering: [-1, 1] (+1 = left) → ControlBuffer [0, 1] (1 = right);
-        # throttle: [0, 1] → [0.5, 1.0] (forward only)
+        # Convert to the ControlBuffer [0, 1] contract (0.5 = neutral):
+        # steering [-1, 1] (+1 = left) → [0, 1] (1 = right);
+        # throttle [0, 1] → [0.5, 1.0] (forward only)
         steer_norm, throttle_norm = signed_to_unit(steering, max(throttle, 0.0))
         self._ctrl_buf.write(steer_norm, throttle_norm)
 
@@ -286,7 +286,7 @@ class TrackEnv(gym.Env):
 
         pos, heading, speed = result
 
-        # Stuck detection: throttle applied but car isn't moving → pinned against wall
+        # Stuck detection: car not moving (e.g. pinned against a wall)
         if speed < 0.1:
             self._stuck_steps += 1
         else:
@@ -299,18 +299,18 @@ class TrackEnv(gym.Env):
 
         self._step_count += 1
 
-        # Checkpoint reward — make these more significant to provide denser signal
+        # Checkpoint reward — dense progress signal
         current_checkpoints = self._checkpoint_count.value
         new_checkpoints = max(0, current_checkpoints - self._prev_checkpoints)
         reward += new_checkpoints * 2.0
         self._prev_checkpoints = current_checkpoints
 
-        # Lap completed = full loop bonus (reduced to lower variance)
+        # Lap completion bonus
         current_laps = self._lap_count.value
         lap_completed = current_laps > self._prev_laps
         self._prev_laps = current_laps
         if lap_completed:
-            reward += 2.0  # was 100.0 — checkpoints now provide more of the signal
+            reward += 2.0
 
         # Collision — detected from Unity's WallCollisionCounter via ZMQ
         # Grace period: ignore collisions for first few steps after reset to avoid
@@ -326,18 +326,11 @@ class TrackEnv(gym.Env):
         if collided or stuck:
             reward -= 20.0
 
-        # Centering reward — min distance to either wall, larger = more centered
+        # Centring penalty — grows as the car approaches either wall
         assert self._outer is not None and self._inner is not None
         d_outer = float(np.linalg.norm(self._outer - pos, axis=1).min())
         d_inner = float(np.linalg.norm(self._inner - pos, axis=1).min())
         reward -= 1/max(min(d_outer, d_inner), 0.05) * 0.1
-
-        # Action smoothness — penalize sudden steering/throttle changes
-        steer_delta = abs(steering - float(self._prev_action[0]))
-        throttle_delta = abs(throttle - float(self._prev_action[1]))
-        # reward -= steer_delta * 0.1
-        # reward -= throttle_delta * 0.05
-        self._prev_action = np.array([steering, throttle], dtype=np.float32)
 
         terminated = collided or lap_completed or stuck
         truncated = self._step_count >= self._max_steps

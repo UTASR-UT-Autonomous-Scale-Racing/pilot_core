@@ -35,7 +35,7 @@ class SafetyConfig:
     command_timeout: float = 0.150   # s
     speed_cap: float = 1.5           # m/s
     cap_margin: float = 0.2          # m/s — forward throttle tapers to 0 over this band
-    speed_per_throttle: Optional[float] = 3.0   # m/s per unit throttle (calibrate); None disables the bound
+    speed_per_throttle: Optional[float] = 3.0   # m/s per unit throttle (calibrate on the car); None disables the bound
     max_throttle: float = 1.0        # forward throttle cap
     max_throttle_no_speed: float = 0.4
     steering_rate: float = 7.6       # signed units/s (~max_steering_vel / max_steering_angle)

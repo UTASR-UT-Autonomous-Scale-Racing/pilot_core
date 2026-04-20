@@ -14,11 +14,13 @@
  *       .deactivate_localization_mode()    -> None
  *       .get_tracking_state()              -> int
  *       .shutdown()                        -> None
+ *       .trajectory_length()               -> int
  *
- *   Constants:
- *       orbslam3_python.RGBD  = 2
- *       orbslam3_python.STEREO = 1
- *       orbslam3_python.MONOCULAR = 0
+ *   Sensor-type constants (ORB_SLAM3::System::eSensor):
+ *       MONOCULAR = 0, STEREO = 1, RGBD = 2,
+ *       IMU_MONOCULAR = 3, IMU_STEREO = 4, IMU_RGBD = 5
+ *
+ * Build: see orbslam3_wrapper/CMakeLists.txt (and docs/slam.md).
  */
 
 #include <pybind11/pybind11.h>
@@ -56,12 +58,12 @@ public:
                /*bUseViewer=*/false),
           last_loop_flag_(false) {}
 
-    /*  tracking*/
+    /* --- tracking --- */
 
     /**
      * Run one RGBD tracking step.
      *
-     * @param rgb   uint8 numpy array (H, W, 3)  — BGR or RGB
+     * @param rgb   uint8 numpy array (H, W, 3)  — colour order per Camera.RGB in the settings
      * @param depth float32 numpy array (H, W)   — depth in metres
      * @param ts    timestamp (seconds)
      * @return 4×4 float32 world-to-camera SE3 pose Tcw (identity/stale when
@@ -100,10 +102,11 @@ public:
         return out;
     }
 
-    /*  map queries  */
+    /* --- map queries --- */
 
     /**
      * Returns true once after any loop closure or global BA.
+     * Shares ORB-SLAM3's MapChanged() state with is_loop_detected().
      */
     bool map_changed() {
         return sys_.MapChanged();
@@ -142,7 +145,8 @@ public:
     }
 
     /**
-     * Get poses for all keyframes as (K, 4, 4) float32 numpy array.
+     * Get camera-to-world poses (Twc) for all keyframes as a (K, 4, 4)
+     * float32 numpy array.
      */
     py::array_t<float> get_all_keyframe_poses() {
         ORB_SLAM3::Atlas *atlas = sys_.mpAtlas;
@@ -174,7 +178,7 @@ public:
     }
 
     /**
-     * Get the full trajectory (one 4×4 pose per TrackRGBD call) as a list.
+     * Get the full trajectory (one 4×4 Tcw pose per TrackRGBD call) as a list.
      */
     py::list get_trajectory() {
         py::list out;
@@ -189,7 +193,7 @@ public:
         return out;
     }
 
-    /*  loop closure*/
+    /* --- loop closure --- */
 
     /**
      * Check if a loop closure has been detected.
@@ -205,13 +209,13 @@ public:
         return false;
     }
 
-    /*  mode control*/
+    /* --- mode control --- */
 
     void activate_localization_mode() { sys_.ActivateLocalizationMode(); }
     void deactivate_localization_mode() { sys_.DeactivateLocalizationMode(); }
     int get_tracking_state() { return sys_.GetTrackingState(); }
 
-    /*  lifecycle  */
+    /* --- lifecycle --- */
 
     void shutdown() { sys_.Shutdown(); }
 

@@ -1,16 +1,18 @@
 """
 ROS2 node that bridges the TrackEnv observation ZMQ publisher → RViz MarkerArray.
 
-Run this inside any ROS2 environment (e.g. the autodrive_devkit container or
-the Dockerfile.sim container) while train.py is running on the same host.
+TrackEnv (rl/track_env.py) pushes the boundary points it puts into each
+observation (world frame) over a ZMQ PUSH socket (``vis_zmq_port``, default
+5558).  Run this node in any ROS2 environment (e.g. the autodrive_devkit
+container) on the same host while rl/train.py is running.
 
 Usage:
-    python3 rl/vis_obs_ros2.py [--port 5558] [--rate 15]
+    python3 rl/vis_obs_ros2.py [--port 5558] [--frame-id world]
 
-Topics published:
-    /pilot/obs_outer   — yellow spheres: outer boundary obs points
-    /pilot/obs_inner   — cyan spheres:   inner boundary obs points
-    /pilot/obs_pos     — white sphere:   current vehicle position
+Topic published: /pilot/obs_points (visualization_msgs/MarkerArray)
+    ns "obs_outer" — yellow line strip (drawn from the message's "inner" points)
+    ns "obs_inner" — cyan line strip   (drawn from the message's "outer" points)
+    ns "obs_pos"   — white sphere: current vehicle position
 """
 
 import argparse
@@ -44,6 +46,8 @@ def _make_line_marker(frame_id: str, ns: str, mid: int,
 
 
 class ObsVisNode(Node):
+    """Polls the TrackEnv ZMQ socket and republishes each message as markers."""
+
     def __init__(self, zmq_port: int, frame_id: str):
         super().__init__("obs_vis")
         self._frame_id = frame_id
@@ -96,7 +100,8 @@ class ObsVisNode(Node):
         now = self.get_clock().now().to_msg()
         ma = MarkerArray()
 
-        # Inner obs points (stored as outer in npy) — yellow line
+        # "inner" points → yellow "obs_outer" marker.  Labels are swapped on
+        # purpose: the saved boundary .npy files name the walls the other way round.
         mo = _make_line_marker(self._frame_id, "obs_outer", 0, 1.0, 1.0, 0.0)
         mo.header.stamp = now
         for pt in inner:
@@ -105,7 +110,7 @@ class ObsVisNode(Node):
             mo.points.append(p)
         ma.markers.append(mo)
 
-        # Outer obs points (stored as inner in npy) — cyan line
+        # "outer" points → cyan "obs_inner" marker
         mi = _make_line_marker(self._frame_id, "obs_inner", 1, 0.0, 1.0, 1.0)
         mi.header.stamp = now
         for pt in outer:
@@ -134,7 +139,7 @@ class ObsVisNode(Node):
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Visualise TrackEnv observations in RViz.")
     parser.add_argument("--port", type=int, default=5558,
                         help="ZMQ PULL port (must match vis_zmq_port in TrackEnv)")
     parser.add_argument("--frame-id", default="world",

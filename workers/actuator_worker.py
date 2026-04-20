@@ -1,9 +1,15 @@
 """
-ActuatorWorker — reads normalised control values from ControlBuffer,
-maps them to PWM (:class:`control.pwm.PWMMapper`), and writes
-to the Arduino over I2C and/or publishes to ZMQ for simulator control.
+ActuatorWorker — reads the newest command from ControlBuffer, passes it
+through the safety supervisor, maps it to PWM
+(:class:`control.pwm.PWMMapper`) and writes it to the Arduino over I2C
+and/or publishes it to the simulator over ZMQ.
 
-Replaces ``I2CDataProcessor.write()`` in the old pipeline.
+Conventions:
+    * ControlBuffer values are in [0, 1] with 0.5 = neutral
+      (steering 0 = full left, 1 = full right; throttle < 0.5 backward,
+      > 0.5 forward).
+    * Internally, and on the ZMQ wire, commands are signed [-1, 1] with
+      steering +1 = LEFT (AutoDRIVE convention).
 """
 
 from __future__ import annotations
@@ -52,6 +58,10 @@ class ActuatorWorker(BaseWorker):
         Vehicle state for the speed cap (fallback throttle cap without it).
     safety : dict
         :class:`control.SafetyConfig` overrides.
+    pwm : dict
+        :class:`control.pwm.PWMConfig` overrides (pulse widths).
+    reset_event : mp.Event | None
+        When set, the next ZMQ message carries ``reset: true`` (then cleared).
     rate_hz : float
         Output loop rate (default 50).
 
@@ -69,13 +79,10 @@ class ActuatorWorker(BaseWorker):
         self._pwm = None
         self._last_seq = 0
         self._dummy = False
-        # ZMQ attributes
         self._zmq_enabled = False
         self._zmq_context = None
         self._zmq_pub = None
-        # Reset signal — set this mp.Event to send reset:true on the next ZMQ publish
         self._reset_event = None
-        # Safety / output loop
         self._supervisor = None
         self._armed_event = None
         self._state_buf = None
@@ -88,7 +95,6 @@ class ActuatorWorker(BaseWorker):
     def setup(self) -> None:
         self._ctrl_buf = self.config["input_buffer"]
 
-        # Setup I2C hardware
         i2c_address = self.config.get("i2c_address")
         i2c_bus = self.config.get("i2c_bus")
 
@@ -106,7 +112,6 @@ class ActuatorWorker(BaseWorker):
 
         self._reset_event = self.config.get("reset_event")
 
-        # Setup ZMQ publisher for simulator
         self._zmq_enabled = self.config.get("zmq_enabled", False)
         if self._zmq_enabled:
             if zmq is None:
@@ -120,7 +125,7 @@ class ActuatorWorker(BaseWorker):
                     self._zmq_pub.setsockopt(zmq.SNDHWM, 10)
                     self._zmq_pub.setsockopt(zmq.LINGER, 1000)
                     self._zmq_pub.bind(f"tcp://*:{zmq_port}")
-                    time.sleep(0.5)  # Allow socket to initialize
+                    time.sleep(0.5)  # give subscribers time to connect before the first send
                     self.logger.info(f"ZMQ control publisher bound to port {zmq_port}")
                 except Exception as e:
                     self.logger.warning(f"Failed to bind ZMQ publisher: {e}")
@@ -219,7 +224,13 @@ class ActuatorWorker(BaseWorker):
         self._last_status = key
 
     def _write_i2c(self, steering: int, throttle: int) -> None:
-        """Send PWM values to the Arduino over I2C."""
+        """Send PWM values to the Arduino over I2C.
+
+        Payload is the ASCII decimal steering pulse width (µs) immediately
+        followed by the throttle pulse width (e.g. ``"14611397"``; both are
+        4-digit with the default PWM config), sent as an SMBus block write
+        to register 0.
+        """
         data_str = str(steering) + str(throttle)
         data_bytes = bytearray(data_str, encoding="utf-8")
         try:
@@ -242,7 +253,7 @@ class ActuatorWorker(BaseWorker):
             self.logger.debug(f"ZMQ publish failed: {e}")
 
     def teardown(self) -> None:
-        # Send neutral commands before shutting down
+        # Leave the actuators at neutral on exit
         if self._zmq_enabled and self._zmq_pub is not None:
             try:
                 self._publish_zmq(0.0, 0.0)

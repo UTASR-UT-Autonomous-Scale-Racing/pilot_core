@@ -15,18 +15,18 @@ Usage
     # Monitor all resumes of a run together:
     tensorboard --logdir rl/logs/PPO_1
 
-    # Start a fresh run but transplant policy weights from PPO_N
-    # (keeps learned steering/throttle behavior, resets value function):
-    python rl/train.py --policy-from PPO_5
+    # Merge mode: start a new run with the policy network (and its
+    # VecNormalize stats) from one run and the value network from another.
+    # --policy-from and --value-from must be given together.
+    python rl/train.py --policy-from PPO_5 --value-from PPO_3
 
-    # Start a fresh run transplanting policy from one run and value from another:
-    python rl/train.py --policy-from PPO_5 --value-from PPO_5
+    # Merge mode with explicit checkpoint steps:
+    python rl/train.py --policy-from PPO_5 --policy-step 75000 \
+                       --value-from PPO_3 --value-step 50000
 
-    # Start a fresh run with policy from a specific step:
-    python rl/train.py --policy-from PPO_5 --step 75000
-
-    # Typical use after reward function change — keep learned behavior, fresh value:
-    python rl/train.py --policy-from PPO_5
+Outputs go to rl/checkpoints/PPO_N/ (model zips, VecNormalize .pkl files,
+config.json) and rl/logs/PPO_N/run_K/ (TensorBoard + Monitor CSV).
+Export a trained checkpoint for the car with rl/export_onnx.py.
 
 Requirements
 ------------
@@ -35,8 +35,9 @@ Requirements
 The script expects:
   - autodrive_bridge running in Docker (sensor data on :5555, control on :5556)
   - Simulator open with vehicle set to Autonomous mode
-  - Pre-saved boundary files at rl/boundaries/outer_line.npy + inner_line.npy
-    (run a mapping lap first with enable_slam: true, then set use_saved_map: true)
+  - Pre-saved boundary files BOUNDARY_PATH/outer_line.npy + inner_line.npy
+    (default rl/boundaries_easy; produced by a mapping run with
+    config_zmq.yaml, see mapping.boundary_save_path there)
 """
 
 import argparse
@@ -66,19 +67,23 @@ from track_env import TrackEnv
 class TrackCNNExtractor(BaseFeaturesExtractor):
     """1D CNN over the ordered boundary-point sequence in the observation.
 
+    Optional: not enabled by default (PPO_KWARGS uses a plain MlpPolicy).  To
+    use it, add ``features_extractor_class=TrackCNNExtractor`` and
+    ``features_extractor_kwargs=dict(n_ahead=...)`` to POLICY_KWARGS.
+
     Obs layout (from boundary_obs + speed):
         obs[0  : 2*(n_ahead+1)]  — outer boundary, interleaved (x,y) per point
         obs[2*(n_ahead+1) : 4*(n_ahead+1)]  — inner boundary, interleaved (x,y)
         obs[-1]                  — speed
 
-    The 21 points per wall form a spatial sequence (closest → furthest ahead).
+    The n_ahead+1 points per wall form a spatial sequence (closest → furthest ahead).
     A 1D CNN over this sequence learns curvature patterns with weight sharing,
     unlike MLP which treats all features as unordered.
     """
 
     def __init__(self, observation_space, n_ahead: int = 20, features_dim: int = 64):
         super().__init__(observation_space, features_dim=features_dim)
-        self._seq_len = n_ahead + 1  # e.g. 21
+        self._seq_len = n_ahead + 1
 
         # 4 channels: outer_x, outer_y, inner_x, inner_y  ×  seq_len points
         self.cnn = nn.Sequential(
@@ -134,18 +139,18 @@ ENV_KWARGS = dict(
 
 POLICY_KWARGS = dict(
     net_arch=dict(
-        pi=[256, 256],        # policy network — keep small for fast inference
-        vf=[256, 256],        # value network — larger to handle return variance
+        pi=[256, 256],        # policy network hidden layers (exported to ONNX)
+        vf=[256, 256],        # value network hidden layers (training only)
     ),
-    log_std_init=-0.5
+    log_std_init=-0.5,    # initial log std of the Gaussian action noise
 )
 
 PPO_KWARGS = dict(
     policy           = "MlpPolicy",
     policy_kwargs    = POLICY_KWARGS,
-    device           = "cpu",   # uses CUDA if available, falls back to CPU
+    device           = "cpu",   # small MLP: CPU is typically as fast as GPU
     learning_rate    = 3e-4,
-    n_steps          = 1024,  # ~34 episodes per rollout vs 17 — stabilizes value function
+    n_steps          = 1024,  # env steps collected per PPO update
     batch_size       = 256,
     n_epochs         = 5,
     gamma            = 0.99,
@@ -370,7 +375,6 @@ def main() -> None:
         for d in [pol_dir, val_dir]:
             if not os.path.isdir(d):
                 raise FileNotFoundError(f"Run directory not found: {d}")
-
 
         pol_model_path, pol_vec_path = _find_checkpoint(pol_dir, args.policy_step)
         val_model_path, _            = _find_checkpoint(val_dir, args.value_step)

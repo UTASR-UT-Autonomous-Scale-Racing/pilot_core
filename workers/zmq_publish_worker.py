@@ -1,8 +1,11 @@
 """
-ZMQPublishWorker — Publishes telemetry data from various buffers back to
-the simulator for visualization and logging.
+ZMQPublishWorker — publishes telemetry from the shared buffers back to the
+simulator for visualisation and logging.
 
-Uses topic-based publishing to allow selective subscription.
+Each message is a single string ``"<topic> <json>"`` on a PUB socket, so
+subscribers can filter by topic: ``control`` (signed [-1, 1], steering
++1 = LEFT), ``telemetry`` (pose), ``segmentation``, ``map`` (boundaries)
+and ``pointcloud``.
 """
 
 from __future__ import annotations
@@ -48,12 +51,11 @@ class ZMQPublishWorker(BaseWorker):
         Segmentation masks for overlay
     boundary_buffer : TrackBoundaryBuffer, optional
         Track boundaries for map visualization
+    pointcloud_buffer : PointCloudBuffer, optional
+        World-frame point cloud (base64 float32 XYZ)
     publish : dict
-        Configuration for what to publish:
-            control: bool
-            pose: bool
-            segmentation: bool
-            boundary: bool
+        Which streams to publish (each a bool): control, pose,
+        segmentation, boundary, pointcloud.
     """
 
     def __init__(self, name: str = "zmq_publish", **kwargs: Any) -> None:
@@ -81,7 +83,6 @@ class ZMQPublishWorker(BaseWorker):
 
         port = self.config.get("port", 5557)
 
-        # Initialize ZMQ publisher
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.PUB)
         self._socket.setsockopt(zmq.SNDHWM, 10)
@@ -94,14 +95,12 @@ class ZMQPublishWorker(BaseWorker):
             self.logger.error(f"Failed to bind to port {port}: {e}")
             raise
 
-        # Get buffer references
         self._ctrl_buf = self.config.get("control_buffer")
         self._pose_buf = self.config.get("pose_buffer")
         self._seg_buf = self.config.get("seg_buffer")
         self._boundary_buf = self.config.get("boundary_buffer")
         self._pc_buf = self.config.get("pointcloud_buffer")
 
-        # Get publish configuration
         self._publish_config = self.config.get("publish", {
             "control": True,
             "pose": False,
@@ -109,39 +108,37 @@ class ZMQPublishWorker(BaseWorker):
             "boundary": False,
         })
 
-        # Allow sockets to initialize
+        # Give subscribers time to connect before the first send
         time.sleep(0.5)
         self.logger.info(f"Publishing: {list(k for k, v in self._publish_config.items() if v)}")
 
     def step(self) -> None:
         self._frame_count += 1
 
-        # High-frequency data (every frame)
+        # Every iteration
         if self._publish_config.get("control", False) and self._ctrl_buf:
             self._publish_control()
 
         if self._publish_config.get("pose", False) and self._pose_buf:
             self._publish_pose()
 
-        # Medium-frequency data (every few frames)
+        # Every 2nd iteration
         if self._frame_count % 2 == 0:
             if self._publish_config.get("segmentation", False) and self._seg_buf:
                 self._publish_segmentation()
 
-        # Low-frequency data (every few frames)
         if self._frame_count % 2 == 0:
             if self._publish_config.get("boundary", False) and self._boundary_buf:
                 self._publish_boundary()
             if self._publish_config.get("pointcloud", False) and self._pc_buf:
                 self._publish_pointcloud()
 
-        time.sleep(0.01)  # Small delay to avoid busy loop
+        time.sleep(0.01)
 
     def _publish_control(self) -> None:
         """Publish control commands (for logging/echo)."""
         try:
             result = self._ctrl_buf.read_latest()
-            # print(f"Read control buffer: {result is not None}")
             if result is None:
                 return
 
@@ -161,8 +158,6 @@ class ZMQPublishWorker(BaseWorker):
                 'throttle': float(throttle),
             })
 
-            # print(f"Publishing control: {message}")
-
             self._socket.send_string(f"control {message}", zmq.NOBLOCK)
 
         except Exception as e:
@@ -172,7 +167,6 @@ class ZMQPublishWorker(BaseWorker):
         """Publish vehicle pose and trajectory."""
         try:
             result = self._pose_buf.read_latest()
-            # print(f"Read pose buffer: {result is not None}")
             if result is None:
                 return
 
@@ -181,7 +175,6 @@ class ZMQPublishWorker(BaseWorker):
                 return
             self._last_seq['pose'] = header.seq_no
 
-            # Extract position and orientation
             position = pose[0:3, 3].tolist()
 
             message = json.dumps({
@@ -190,8 +183,6 @@ class ZMQPublishWorker(BaseWorker):
                 'position': position,
                 'pose_matrix': pose.flatten().tolist(),
             })
-
-            # print(f"Publishing pose: {message}")
 
             self._socket.send_string(f"telemetry {message}", zmq.NOBLOCK)
 
@@ -202,7 +193,6 @@ class ZMQPublishWorker(BaseWorker):
         """Publish segmentation masks."""
         try:
             result = self._seg_buf.read_latest()
-            # print(f"[seg] buf read: {result is not None}")
             if result is None:
                 return
 
@@ -211,7 +201,7 @@ class ZMQPublishWorker(BaseWorker):
                 return
             self._last_seq['segmentation'] = header.seq_no
 
-            # Encode mask as base64 (compressed)
+            # Raw uint8 bytes, base64-encoded (not compressed)
             mask_bytes = mask.astype(np.uint8).tobytes()
             mask_b64 = base64.b64encode(mask_bytes).decode('utf-8')
 
@@ -222,8 +212,6 @@ class ZMQPublishWorker(BaseWorker):
                 'shape': mask.shape,
                 'dtype': 'uint8',
             })
-
-            # print(f"Publishing segmentation: seq={header.seq_no}, shape={mask.shape}")
 
             self._socket.send_string(f"segmentation {message}", zmq.NOBLOCK)
 
@@ -236,7 +224,6 @@ class ZMQPublishWorker(BaseWorker):
         """Publish track boundaries."""
         try:
             result = self._boundary_buf.read_latest()
-            # print(f"Read boundary buffer: {result is not None}")
             if result is None:
                 return
 

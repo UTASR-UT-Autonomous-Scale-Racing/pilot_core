@@ -2,7 +2,7 @@
 PoseBuffer — typed wrapper for SLAM pose + map-point data.
 
 Payload layout:
-    [64 bytes]  float32[4][4]   pose matrix (row-major)
+    [64 bytes]  float32[4][4]   pose matrix (row-major, camera-to-world)
     [4 bytes]   uint32          num_map_points  (N)
     [N*12 bytes] float32[N][3]  map point positions (x, y, z)
     [4 bytes]   float32         speed (m/s)
@@ -61,9 +61,12 @@ class PoseBuffer:
         Parameters
         ----------
         pose : np.ndarray
-            Shape ``(4, 4)``, dtype float32.
+            Shape ``(4, 4)``, dtype float32, camera-to-world.
         map_points : np.ndarray, optional
-            Shape ``(N, 3)``, dtype float32.  May be *None* or empty.
+            Shape ``(N, 3)``, dtype float32.  May be *None* or empty;
+            truncated to 2048 points.
+        speed : float
+            Speed in m/s (0.0 when unknown).
         """
         pose_bytes = pose.astype(np.float32).tobytes()
 

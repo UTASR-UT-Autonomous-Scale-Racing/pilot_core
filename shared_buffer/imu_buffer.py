@@ -2,8 +2,12 @@
 IMUBuffer — typed wrapper for IMU sensor vectors.
 
 Payload layout:
-    [9 × float32]  w, x, y, z, ax, ay, az, throttle_raw, steering_raw
+    [9 × float32]  qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw
     Total = 36 bytes
+
+Orientation quaternion, accelerometer in m/s², then the Arduino's raw
+throttle / steering feedback.  The OAK-D IMU path has no such feedback and
+fills the last two slots with gyro x / y (rad/s) instead.
 """
 
 from __future__ import annotations
@@ -47,7 +51,7 @@ class IMUBuffer:
         )
 
     def write(self, imu_vector: np.ndarray) -> SlotHeader:
-        """Write a 9-float IMU vector [w, x, y, z, ax, ay, az, throttle, steering].
+        """Write a 9-float IMU vector (layout in the module docstring).
 
         Parameters
         ----------

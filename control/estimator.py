@@ -47,7 +47,7 @@ class PoseEKF:
         self.t = None
         self.last_pose_t = None
 
-    # ------------------------------------------------------------- internals
+    # --- Internals ---
 
     def _predict(self, dt: float) -> None:
         if dt <= 0:
@@ -82,7 +82,7 @@ class PoseEKF:
             self._predict(t - self.t)
         self.t = t
 
-    # --------------------------------------------------------------- inputs
+    # --- Inputs ---
 
     def update_pose(self, t: float, x: float, y: float, yaw: float) -> None:
         if self.x is None:
@@ -107,7 +107,7 @@ class PoseEKF:
         H[0, 3] = 1.0
         self._update(np.array([v]), H, np.array([[self.cfg.speed_std ** 2]]))
 
-    # --------------------------------------------------------------- output
+    # --- Output ---
 
     def valid(self, t: float) -> bool:
         return self.last_pose_t is not None and (t - self.last_pose_t) <= self.cfg.stale_after

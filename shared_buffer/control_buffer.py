@@ -2,15 +2,16 @@
 ControlBuffer — typed wrapper for normalised steering + throttle.
 
 Payload layout:
-    [4 bytes]  float32  steering  (normalised 0.0–1.0)
-    [4 bytes]  float32  throttle  (normalised 0.0–1.0)
+    [4 bytes]  float32  steering  (0.0–1.0; 0.5 = straight, below = left)
+    [4 bytes]  float32  throttle  (0.0–1.0; 0.5 = neutral, below = backward)
+
+Values map linearly onto PWM pulse widths (see :mod:`control.pwm`).
 """
 
 from __future__ import annotations
 
 import struct
 from typing import Optional, Tuple
-
 
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader

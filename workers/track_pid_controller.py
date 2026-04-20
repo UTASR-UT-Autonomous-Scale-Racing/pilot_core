@@ -1,12 +1,14 @@
 """
-TrackPIDController — minimal PID that steers the vehicle along the
-centre-line of extracted track boundaries.
+TrackPIDController — minimal PID that aligns the vehicle heading with the
+local track direction, estimated from the nearest outer / inner boundary
+points.
 
 Reference (PID): K. J. Åström, R. M. Murray, "Feedback Systems",
 Princeton University Press, 2008.
 
-Output: (steering, throttle) both in [-1, 1], stochastically sampled
-from the PID output with configurable Gaussian noise.
+Output: (steering, throttle) both in [-1, 1], steering +1 = LEFT,
+stochastically sampled from the PID output with configurable Gaussian
+noise.
 """
 
 from __future__ import annotations
@@ -65,9 +67,9 @@ class TrackPIDController:
         Parameters
         ----------
         current_bev : np.ndarray
-            ``(2,)`` current vehicle position in BEV (X, Z).
+            ``(2,)`` current vehicle position in the BEV plane.
         heading_rad : float
-            Vehicle heading angle in the BEV (X, Z) plane.
+            Vehicle heading in the BEV plane (see :func:`workers.bev.pose_to_bev`).
         outer_line : np.ndarray
             ``(N, 2)`` ordered outer boundary vertices.
         inner_line : np.ndarray
@@ -83,7 +85,8 @@ class TrackPIDController:
         closest_outer = outer_line[d_outer.argmin()]
         closest_inner = inner_line[d_inner.argmin()]
 
-        # 2. Normal vector to the desired heading
+        # 2. Track direction = perpendicular to the inner → outer vector,
+        #    oriented to agree with the current heading
         n_dir = closest_outer - closest_inner
         heading_vec = np.array([np.cos(heading_rad), np.sin(heading_rad)])
         target_heading = np.array([-n_dir[1], n_dir[0]])
@@ -91,10 +94,9 @@ class TrackPIDController:
         if np.dot(target_heading, heading_vec) < 0:
             target_heading = -target_heading
 
-        # 3. Cross-track error (signed angular offset)
+        # 3. Heading error (positive = track direction is to the left)
         target_angle = np.arctan2(target_heading[1], target_heading[0])
         error = _angle_diff(target_angle, heading_rad)
-
 
         # 4. PID
         self._integral += error

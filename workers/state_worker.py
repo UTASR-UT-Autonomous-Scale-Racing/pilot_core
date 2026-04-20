@@ -20,9 +20,12 @@ from .bev import pose_to_bev
 
 
 class StateWorker(BaseWorker):
-    """Config kwargs
+    """Fuses PoseBuffer poses into a BEV vehicle state published to StateBuffer.
+
+    Config kwargs
     -------------
     pose_buffer : PoseBuffer
+        Camera-to-world (SLAM) or vehicle-to-world (simulator) poses.
     output_buffer : StateBuffer
     bev_axes, forward_axis : see :func:`workers.bev.pose_to_bev`
     rate_hz : float

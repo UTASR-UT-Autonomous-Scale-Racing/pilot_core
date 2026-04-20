@@ -153,7 +153,7 @@ class TrackFollower:
         return Command(steering, throttle).clipped()
 
 
-# --------------------------------------------------------------------- registry
+# --- Registry ---
 
 def _pure_pursuit(params: VehicleParams, cfg: Dict[str, Any]) -> LateralController:
     return PurePursuit(params, **cfg)

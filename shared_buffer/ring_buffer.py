@@ -19,9 +19,10 @@ protocol so readers never see a torn record:
 3. publishes the header with the new ``seq_no`` last;
 
 the reader copies header + payload, then re-reads ``seq_no`` and retries if
-the writer lapped the slot mid-copy.  Readers atomically *write* ``read_ts``
-(a single 8-byte ``float64`` store, naturally aligned → atomic on x86/ARM64).
-The ``write_index`` is an ``mp.Value('Q')`` protected by its built-in lock.
+the writer lapped the slot mid-copy.  Readers *write* ``read_ts`` as a
+single naturally aligned 8-byte ``float64`` store (atomic on x86/ARM64).
+The write counter is an ``mp.Value('Q')`` owned by the creating handle and
+protected by its built-in lock.
 """
 
 from __future__ import annotations
@@ -49,8 +50,8 @@ class SharedRingBuffer:
     slots : int
         Number of slots in the ring.
     slot_payload_size : int
-        Maximum payload size (bytes) per slot.  Payloads smaller than this
-        are zero-padded; payloads larger will be **truncated** (a bug guard).
+        Maximum payload size (bytes) per slot.  Larger payloads are
+        **truncated** so a write can never overflow into the next slot.
     dtype_tag : DTypeTag
         The type tag written into every slot header.
     create : bool
@@ -75,7 +76,7 @@ class SharedRingBuffer:
         self._total_size = self.slots * self.slot_size
 
         if create:
-            # Clean up stale block if it exists from a previous crash
+            # Remove a stale block left behind by a crashed run
             try:
                 stale = shared_memory.SharedMemory(name=name, create=False)
                 stale.close()
@@ -90,9 +91,7 @@ class SharedRingBuffer:
         else:
             self._shm = shared_memory.SharedMemory(name=name, create=False)
 
-        # Shared write counter — only the producer should increment this.
-        # We use a multiprocessing Value so it's visible across processes.
-        self._seq_counter_name = f"_seq_{name}"
+        # Write counter shared across processes; only the producer increments it.
         if create:
             self._seq = mp.Value("Q", 0, lock=True)  # uint64
         else:
@@ -173,7 +172,7 @@ class SharedRingBuffer:
         for i in range(self.slots):
             offset = self._slot_offset(i)
             raw_header = bytes(self._shm.buf[offset : offset + HEADER_SIZE])
-            # Quick extract of just seq_no (first 8 bytes, little-endian uint64)
+            # seq_no is the first 8 bytes (little-endian uint64)
             (seq_no,) = struct.unpack_from("<Q", raw_header, 0)
             if seq_no > best_seq:
                 best_seq = seq_no
@@ -200,7 +199,7 @@ class SharedRingBuffer:
         if seq_after != header.seq_no:
             return None
 
-        # Stamp read_ts (offset 16 in the header is the read_ts float64)
+        # read_ts is the float64 at header offset 16 (see schema.py)
         now = time.time()
         struct.pack_into("<d", self._shm.buf, offset + 16, now)
         header.read_ts = now
@@ -219,7 +218,6 @@ class SharedRingBuffer:
         self._shm.close()
         self._shm.unlink()
 
-    # convenience for ``with`` blocks
     def __enter__(self):
         return self
 

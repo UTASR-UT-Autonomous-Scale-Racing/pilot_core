@@ -36,10 +36,10 @@ def preprocess_depth(depth: np.ndarray, max_range: float) -> np.ndarray:
     return cv2.resize(d, (INPUT_W, INPUT_H), interpolation=cv2.INTER_AREA)
 
 
-# ------------------------------------------------------------ demonstrations
+# --- Demonstrations ---
 
-RENDER_W, RENDER_H = 160, 100
-CAM_HEIGHT = 0.12
+RENDER_W, RENDER_H = 160, 100   # rendered depth size (px)
+CAM_HEIGHT = 0.12               # m, camera height above ground on the bench
 
 
 def bench_intrinsics(settings: str = "orbslam_oakd_rgbd.yaml"):
@@ -91,7 +91,7 @@ def collect_depth_demos(params, K, n_tracks: int, seconds: float, speed: float, 
     return np.concatenate([x, x[..., ::-1]]).astype(np.float32), np.concatenate([y, -y])
 
 
-# -------------------------------------------------------------------- export
+# --- Export ---
 
 def export_steering_onnx(model, path: str, meta: dict) -> str:
     """Export a torch module ``depth (N,1,H,W) → steering (N,1)`` + JSON sidecar."""
@@ -106,7 +106,7 @@ def export_steering_onnx(model, path: str, meta: dict) -> str:
     return path
 
 
-# ----------------------------------------------------------------- inference
+# --- Inference ---
 
 @dataclass
 class DepthPolicyConfig:

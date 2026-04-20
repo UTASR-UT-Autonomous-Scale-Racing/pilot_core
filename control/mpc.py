@@ -79,7 +79,7 @@ class MPC:
         v = max(abs(state.v), self.v_min)
         A, B = error_model(v, p.wheelbase, dt)
 
-        # Curvature preview along the horizon (+ the delay)
+        # Curvature preview along the horizon, offset by the actuation delay
         s_k = proj.s + v * (self.delay + dt * np.arange(N))
         kappa = np.array([track.curvature[track.index_at(s)] for s in s_k])
         delta_ff = np.arctan(p.wheelbase * kappa)

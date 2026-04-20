@@ -52,7 +52,7 @@ class PointCloudBuffer:
             name=name,
             slots=slots,
             slot_payload_size=payload_size,
-            dtype_tag=DTypeTag.UNKNOWN,  # reuse UNKNOWN or add a new tag
+            dtype_tag=DTypeTag.UNKNOWN,  # no dedicated tag for point clouds
             create=create,
         )
 

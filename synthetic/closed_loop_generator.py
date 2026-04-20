@@ -1,9 +1,12 @@
-"""closed_loop_generator -- Synthetic RGBD + IMU frame generator for ORB-SLAM3.
+"""closed_loop_generator -- synthetic closed-loop RGBD + IMU sequence for ORB-SLAM3.
 
-The camera follows an elliptical path between two elliptical track walls
-(inner and outer) sharing the same centre.  The camera looks forward along
-the direction of travel.  IMU readings are derived analytically from the
-elliptical trajectory.
+The camera follows an elliptical path between two concentric elliptical
+track walls, looking forward along the direction of travel.  IMU readings
+are derived analytically from the trajectory.
+
+World frame: y points down (ground plane y = 0, camera at y = -camera_height);
+the path lies in the XZ plane and ``heading`` is the tangent angle
+``atan2(dz, dx)``.  Poses are camera-to-world; depth is camera-z in metres.
 
 Public API
 ----------
@@ -41,7 +44,7 @@ class ClosedLoopFrameGenerator:
     wall_distance : float
         Half-width of the track (distance from camera path to each wall).
     wall_height : float
-        Height of the track walls in metres (default 0.5).
+        Height of the track walls in metres (default 1.5).
     camera_height : float
         Camera height above ground plane in metres (default 0.15).
     camera_pitch_deg : float
@@ -78,30 +81,27 @@ class ClosedLoopFrameGenerator:
         self.fps = fps
         self.rng = np.random.RandomState(seed)
 
-        # Camera intrinsics (match the SLAM settings YAML)
+        # Pinhole intrinsics; keep in sync with the SLAM settings YAML
         self.fx = 456.99
         self.fy = 456.99
         self.cx = width / 2.0
         self.cy = height / 2.0
 
-        # Pre-generate ground texture (a reusable tile)
+        # Textures are generated once from the seeded RNG
         self._ground_tile = self._make_ground_tile()
-        # Pre-generate random feature dots on the ground
         self._dot_positions = self._make_dot_positions()
-        # Pre-generate wall marker tile for distinctive landmarks
         self._wall_tile = self._make_wall_tile()
 
-        # Camera-path ellipse semi-axes
         self.semi_major = self.straight / 2.0 + self.radius
         self.semi_minor = self.radius
 
-        # Inner and outer wall ellipses (concentric, offset by wall_distance)
+        # Wall ellipses: concentric, semi-axes offset by wall_distance
         self._inner_a = max(self.semi_major - self.wall_dist, 0.1)
         self._inner_b = max(self.semi_minor - self.wall_dist, 0.1)
         self._outer_a = self.semi_major + self.wall_dist
         self._outer_b = self.semi_minor + self.wall_dist
 
-        # Angular velocity for one lap (rad/s)
+        # Parametric rate dθ/dt (rad/s): one lap every n_frames frames
         self.omega = 2.0 * math.pi * self.fps / self.n_frames
 
     def _ellipse_path(self, theta: float) -> Tuple[float, float, float]:
@@ -155,11 +155,9 @@ class ClosedLoopFrameGenerator:
         b = self.semi_minor
         st, ct = math.sin(theta), math.cos(theta)
 
-        # Velocity
         vx = -a * st * omega
         vz = b * ct * omega
 
-        # Acceleration
         ax = -a * ct * omega ** 2
         az = -b * st * omega ** 2
 
@@ -180,7 +178,7 @@ class ClosedLoopFrameGenerator:
     def _make_ground_tile(self) -> np.ndarray:
         """Create a 256×256 RGB texture tile with checkerboard + noise."""
         tile = np.zeros((256, 256, 3), dtype=np.uint8)
-        # Checkerboard (32-pixel squares)
+        # 8×8 checkerboard of 32-px squares
         for row in range(8):
             for col in range(8):
                 if (row + col) % 2 == 0:
@@ -193,11 +191,10 @@ class ClosedLoopFrameGenerator:
                               40 + self.rng.randint(0, 20))
                 tile[row*32:(row+1)*32, col*32:(col+1)*32] = colour
 
-        # Add random noise for more ORB features
+        # Noise and random shapes give ORB more distinctive features
         noise = self.rng.randint(0, 15, (256, 256, 3), dtype=np.uint8)
         tile = np.clip(tile.astype(np.int16) + noise.astype(np.int16), 0, 255).astype(np.uint8)
 
-        # Add random circles and crosses for distinctive features
         for _ in range(40):
             cx = self.rng.randint(10, 246)
             cy = self.rng.randint(10, 246)
@@ -215,7 +212,6 @@ class ClosedLoopFrameGenerator:
         L = self.straight
         R = self.radius
         n_dots = 500
-        # Scatter dots in and around the track
         x = self.rng.uniform(-L / 2 - R - 1, L / 2 + R + 1, n_dots)
         z = self.rng.uniform(-R - 1, R + 1, n_dots)
         return np.column_stack([x, np.zeros(n_dots), z]).astype(np.float32)
@@ -244,7 +240,7 @@ class ClosedLoopFrameGenerator:
                 (col_off + 56, row + 56),
                 col, -1,
             )
-            # Add a border for extra edges
+            # White border for extra edges
             cv2.rectangle(
                 tile,
                 (col_off + 8, row + 8),
@@ -252,7 +248,7 @@ class ClosedLoopFrameGenerator:
                 (255, 255, 255), 1,
             )
 
-        # Add digit text for unique identifiers
+        # Digits make patches uniquely identifiable
         for i in range(8):
             x = (i % 4) * 64 + 22
             y = (i // 4) * 128 + 80
@@ -262,14 +258,12 @@ class ClosedLoopFrameGenerator:
                 (255, 255, 255), 2,
             )
 
-        # Add arrows / crosses
         for _ in range(20):
             cx = self.rng.randint(10, 246)
             cy = self.rng.randint(10, 246)
             col = tuple(int(c) for c in self.rng.randint(130, 255, 3))
             cv2.drawMarker(tile, (cx, cy), col, cv2.MARKER_DIAMOND, 8, 2)
 
-        # Random noise for texture
         noise = self.rng.randint(0, 10, (256, 256, 3), dtype=np.uint8)
         tile = np.clip(tile.astype(np.int16) + noise.astype(np.int16), 0, 255).astype(np.uint8)
 
@@ -293,7 +287,7 @@ class ClosedLoopFrameGenerator:
         dx = ray_world[..., 0]
         dz = ray_world[..., 2]
 
-        # Normalise by semi-axes
+        # Scale by the semi-axes so the cylinder becomes a unit circle
         px, rx = ox / a, dx / a
         pz, rz = oz / b, dz / b
 
@@ -308,7 +302,7 @@ class ClosedLoopFrameGenerator:
         sq = np.sqrt(np.maximum(disc, 0))
         denom = 2.0 * A + 1e-12
 
-        # Try both roots; keep first positive hit within wall height
+        # Near root first; keep the first positive hit within the wall height
         for sign in (-1.0, 1.0):
             t_cand = (-B + sign * sq) / denom
             hit_y = cam_pos[1] + t_cand * ray_world[..., 1]
@@ -337,10 +331,8 @@ class ClosedLoopFrameGenerator:
         c_h = math.cos(heading)
         s_h = math.sin(heading)
 
-        # Camera-to-world rotation R_wc.
-        # Composed as R_yaw @ R_pitch where:
-        #   R_yaw   rotates so camera looks forward along the heading
-        #   R_pitch tilts the camera downward by self.pitch radians
+        # Camera-to-world rotation R_wc = R_yaw @ R_pitch: R_pitch tilts the
+        # camera down by self.pitch, R_yaw points camera +z along the heading.
         cp = math.cos(self.pitch)
         sp = math.sin(self.pitch)
         R_pitch = np.array([
@@ -357,7 +349,7 @@ class ClosedLoopFrameGenerator:
 
         cam_pos = np.array([cam_x, -self.cam_h, cam_z], dtype=np.float64)
 
-        # -- Per-pixel ray directions (camera frame) --------------------
+        # --- Per-pixel ray directions (camera frame) ---
         uu = np.arange(W, dtype=np.float64)
         vv = np.arange(H, dtype=np.float64)
         u_grid, v_grid = np.meshgrid(uu, vv)  # (H, W)
@@ -366,47 +358,44 @@ class ClosedLoopFrameGenerator:
         dy = (v_grid - self.cy) / self.fy
         dz = np.ones_like(dx)
 
-        # Stack into (H, W, 3) and rotate to world frame
         ray_cam = np.stack([dx, dy, dz], axis=-1)                 # (H, W, 3)
         ray_world = np.einsum('ij,hwj->hwi', R_wc, ray_cam)      # (H, W, 3)
 
-        # -- Intersect with ground plane y = 0 -------------------------
+        # --- Intersect with ground plane y = 0 ---
         ry = ray_world[..., 1]  # (H, W)
         with np.errstate(divide='ignore', invalid='ignore'):
             t_ground = np.where(np.abs(ry) > 1e-8, -cam_pos[1] / ry, np.inf)
         t_ground[t_ground <= 0.05] = np.inf
 
-        # -- Intersect with inner elliptical wall ----------------------
+        # --- Intersect with inner elliptical wall ---
         t_inner = self._intersect_elliptic_cyl(
             cam_pos, ray_world, self._inner_a, self._inner_b,
         )
 
-        # -- Intersect with outer elliptical wall ----------------------
+        # --- Intersect with outer elliptical wall ---
         t_outer = self._intersect_elliptic_cyl(
             cam_pos, ray_world, self._outer_a, self._outer_b,
         )
 
-        # -- Find closest hit ------------------------------------------
+        # --- Closest hit ---
         t_all = np.stack([t_ground, t_inner, t_outer], axis=-1)  # (H, W, 3)
         which = np.argmin(t_all, axis=-1)  # 0=ground, 1=inner, 2=outer
         t_min = np.min(t_all, axis=-1)
 
-        # Clamp max depth
-        max_depth = 20.0
+        max_depth = 20.0   # m; rays beyond this count as misses
         no_hit = t_min > max_depth
         t_min[no_hit] = max_depth
 
-        # World-space hit positions
         hit_world = cam_pos[np.newaxis, np.newaxis, :] + \
             t_min[..., np.newaxis] * ray_world
 
-        # -- Depth (in camera Z) ---------------------------------------
+        # --- Depth (in camera Z) ---
         cam_fwd = R_wc[:, 2]
         delta = hit_world - cam_pos[np.newaxis, np.newaxis, :]
         depth = (delta * cam_fwd).sum(axis=-1).astype(np.float32)
         depth[depth < 0.05] = 0.0
 
-        # -- RGB texturing ---------------------------------------------
+        # --- RGB texturing ---
         rgb = np.zeros((H, W, 3), dtype=np.uint8)
 
         # Ground pixels (only between inner & outer ellipse = track surface)
@@ -414,17 +403,15 @@ class ClosedLoopFrameGenerator:
         if gnd_mask.any():
             gx = hit_world[..., 0][gnd_mask]
             gz = hit_world[..., 2][gnd_mask]
-            # Check if on the track (between inner and outer ellipse)
             r_inner = (gx / self._inner_a) ** 2 + (gz / self._inner_b) ** 2
             r_outer = (gx / self._outer_a) ** 2 + (gz / self._outer_b) ** 2
             on_track = (r_inner >= 1.0) & (r_outer <= 1.0)
-            # Track surface: rich checkerboard texture
+            # Track surface textured; off-track ground darkened
             tx = (gx * 50).astype(np.int32) % 256
             tz = (gz * 50).astype(np.int32) % 256
             tx[tx < 0] += 256
             tz[tz < 0] += 256
             colours = self._ground_tile[tz, tx]
-            # Off-track: darker, less textured
             off_col = (colours * 0.3).astype(np.uint8)
             colours = np.where(on_track[:, None], colours, off_col)
             rgb[gnd_mask] = colours
@@ -435,18 +422,17 @@ class ClosedLoopFrameGenerator:
             wx = hit_world[..., 0][iw_mask]
             wz = hit_world[..., 2][iw_mask]
             wy = hit_world[..., 1][iw_mask]
-            # Parametric angle along the ellipse for texture coord
+            # Texture u = parametric angle along the ellipse, v = height
             ang = np.arctan2(wz / self._inner_b, wx / self._inner_a)
             mtx = ((ang * 40).astype(np.int32)) % 256
             mty = ((-wy) * 200).astype(np.int32) % 256
             mtx[mtx < 0] += 256
             mty[mty < 0] += 256
-            # Base warm stripe pattern
             stripe = ((wx * 20 + wz * 20).astype(np.int32)) % 2
             c0 = np.array([140, 100, 80], dtype=np.uint8)
             c1 = np.array([100, 80, 60], dtype=np.uint8)
             base_col = np.where(stripe[:, None] == 1, c0, c1)
-            # Overlay wall marker tile
+            # Bright marker-tile pixels overlay the stripe pattern
             marker_col = self._wall_tile[mty, mtx]
             bright = marker_col.max(axis=1) > 120
             base_col[bright] = marker_col[bright]
@@ -476,7 +462,7 @@ class ClosedLoopFrameGenerator:
         rgb[no_hit] = (30, 30, 30)
         depth[no_hit] = 0.0
 
-        # Gaussian noise for realism
+        # Pixel noise
         noise = self.rng.normal(0, 2, rgb.shape).astype(np.int16)
         rgb = np.clip(rgb.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
@@ -502,15 +488,15 @@ class ClosedLoopFrameGenerator:
             - pose_4x4  : float32 (4, 4) ground-truth camera-to-world SE3
             - timestamp : float, seconds
             - imu       : dict with keys
-                  'accel' : ndarray (3,) accelerometer (m/s²) in body frame
-                  'gyro'  : ndarray (3,) gyroscope (rad/s)  in body frame
+                  'accel' : ndarray (3,) specific force (m/s²), camera frame
+                  'gyro'  : ndarray (3,) angular rate (rad/s), camera frame
         """
         frames: list = []
         dt = 1.0 / self.fps
         total_frames = self.n_frames * n_loops
         omega = self.omega  # constant angular velocity dθ/dt
 
-        # Gravity in world frame (+Y is downward in our convention)
+        # Gravity in the world frame (+y is down)
         g_world = np.array([0.0, 9.81, 0.0], dtype=np.float64)
 
         for i in range(total_frames):
@@ -523,8 +509,7 @@ class ClosedLoopFrameGenerator:
             cp = math.cos(self.pitch)
             sp = math.sin(self.pitch)
 
-            # Camera-to-world rotation: forward-looking along travel
-            # direction with downward pitch.
+            # Same R_wc as in _render_frame_fast
             R_pitch = np.array([
                 [1,  0,   0 ],
                 [0,  cp,  sp],
@@ -551,19 +536,15 @@ class ClosedLoopFrameGenerator:
                 theta, omega,
             )
 
-            # World-to-camera rotation (float64 for precision)
             R_cw = R_wc.astype(np.float64).T
 
-            # Gyroscope: body-frame angular velocity
-            # Rotation is purely about world Y axis at heading_rate
+            # Gyro: the only rotation is yaw about the world y axis
             omega_world = np.array([0.0, heading_rate, 0.0])
             gyro = R_cw @ omega_world
 
-            # Accelerometer: specific force in body frame
-            # a_measured = R_cw @ (a_kinematic - g_world)
+            # Accelerometer measures specific force: R_cw @ (a - g)
             accel = R_cw @ (acc_w - g_world)
 
-            # Add small sensor noise for realism
             gyro  += self.rng.normal(0, 0.005, 3)
             accel += self.rng.normal(0, 0.02, 3)
 

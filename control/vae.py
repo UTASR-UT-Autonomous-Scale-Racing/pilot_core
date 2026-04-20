@@ -33,7 +33,7 @@ __all__ = [
 ]
 
 
-# ------------------------------------------------------------------ training
+# --- Training ---
 
 def build_models(latent_dim: int = 16):
     """Return ``(vae, head)`` torch modules (torch imported lazily)."""

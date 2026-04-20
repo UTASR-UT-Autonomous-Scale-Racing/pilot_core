@@ -3,11 +3,12 @@ TrackBoundaryBuffer — typed wrapper for extracted track boundary lines.
 
 Payload layout:
     [4 bytes]       uint32          outer_count (N_outer)
-    [N_outer*8]     float32[N][2]   outer boundary (X, Z) points
+    [N_outer*8]     float32[N][2]   outer boundary points (BEV plane)
     [4 bytes]       uint32          inner_count (N_inner)
-    [N_inner*8]     float32[N][2]   inner boundary (X, Z) points
+    [N_inner*8]     float32[N][2]   inner boundary points (BEV plane)
 
-Max ~10 000 boundary vertices per side.
+BEV points use the two world ground-plane axes selected by ``bev_axes``.
+At most 10 000 vertices per side (extra points are dropped).
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from .schema import DTypeTag, SlotHeader
 _COUNT_FMT = "<I"
 _COUNT_SIZE = 4
 _MAX_BOUNDARY_PTS = 10_000
-# Two boundaries × max pts × 2 floats × 4 bytes + 2 counts
 _MAX_PAYLOAD = 2 * _COUNT_SIZE + 2 * _MAX_BOUNDARY_PTS * 2 * 4  # ~160 KB
 
 
@@ -97,7 +97,6 @@ class TrackBoundaryBuffer:
         header, payload = result
         offset = 0
 
-        # Outer boundary
         (n_outer,) = struct.unpack_from(_COUNT_FMT, payload, offset)
         offset += _COUNT_SIZE
         if n_outer > 0:
@@ -108,7 +107,6 @@ class TrackBoundaryBuffer:
             outer = np.empty((0, 2), dtype=np.float32)
         offset += n_outer * 2 * 4
 
-        # Inner boundary
         (n_inner,) = struct.unpack_from(_COUNT_FMT, payload, offset)
         offset += _COUNT_SIZE
         if n_inner > 0:

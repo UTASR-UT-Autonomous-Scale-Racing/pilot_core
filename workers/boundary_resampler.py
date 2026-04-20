@@ -3,34 +3,11 @@ boundary_resampler — resample ordered boundary polylines to uniform arc-length
 
 Usage
 -----
-    from workers.boundary_resampler import resample_uniform
+    from workers.boundary_resampler import boundary_obs, resample_uniform
 
-    outer_resampled = resample_uniform(outer_line, spacing=0.1)
-    inner_resampled = resample_uniform(inner_line, spacing=0.1)
-
-Then to build an RL observation from the current vehicle position:
-
-    def boundary_obs(pos, heading_rad, outer, inner, n_ahead=10):
-        # Find closest index on each boundary
-        idx_o = np.linalg.norm(outer - pos, axis=1).argmin()
-        idx_i = np.linalg.norm(inner - pos, axis=1).argmin()
-
-        # Walk forward n_ahead+1 points (wraps around closed track)
-        n = len(outer)
-        o_pts = outer[np.arange(idx_o, idx_o + n_ahead + 1) % n]  # (11, 2)
-
-        m = len(inner)
-        i_pts = inner[np.arange(idx_i, idx_i + n_ahead + 1) % m]  # (11, 2)
-
-        # Transform into vehicle-local frame
-        cos_h, sin_h = np.cos(heading_rad), np.sin(heading_rad)
-        R_inv = np.array([[cos_h, sin_h], [-sin_h, cos_h]])  # rotate world → vehicle
-
-        o_local = (o_pts - pos) @ R_inv.T   # (11, 2)
-        i_local = (i_pts - pos) @ R_inv.T   # (11, 2)
-
-        # Flatten: [o0x,o0y, o1x,o1y, ..., i0x,i0y, ..., i10x,i10y] = 44 floats
-        return np.concatenate([o_local.ravel(), i_local.ravel()]).astype(np.float32)
+    outer = resample_uniform(outer_line, spacing=0.1)
+    inner = resample_uniform(inner_line, spacing=0.1)
+    obs = boundary_obs(pos, heading_rad, outer, inner, n_ahead=10)  # (44,) float32
 """
 
 from __future__ import annotations

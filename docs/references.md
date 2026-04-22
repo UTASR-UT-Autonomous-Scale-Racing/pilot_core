@@ -19,7 +19,10 @@ The paper or book each implementation follows. Each module also cites it in its 
 | Extended Kalman filter | `control/estimator.py` | S. Thrun, W. Burgard, D. Fox, *Probabilistic Robotics*, MIT Press, 2005 |
 | Kinematic bicycle model | `control/sim.py`, `control/lqr.py` | R. Rajamani, *Vehicle Dynamics and Control*, Springer, 2012; Kong et al., IEEE IV 2015 |
 
-Implementation notes that go beyond the papers:
+## Implementation notes
+
+Where the implementation goes beyond the papers:
+
 - **Follow the Gap:** gap centre blended with the goal angle, as in the paper. The best gap is
   scored by visible free area rather than width, so a nearby obstacle face can't win.
   The virtual scan comes from the depth image with a floor/height filter.

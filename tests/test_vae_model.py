@@ -4,6 +4,7 @@ shapes and loss, ONNX export equivalence, follower and ControlWorker mode.
 
 The full training pipeline (scripts/train_vae_policy.py) is too slow for
 the unit suite; its closed-loop results are reported by the script.
+Skipped unless torch, onnx and onnxruntime are installed.
 """
 
 from __future__ import annotations

@@ -1,5 +1,6 @@
 """
-test_shared_buffers.py — Tests for all shared_buffer modules.
+test_shared_buffers.py — The shared-memory buffers in shared_buffer/: the
+slot header, the low-level SharedRingBuffer and every typed buffer.
 
 Categories:
     - Smoke tests: basic instantiation, single write/read
@@ -24,30 +25,22 @@ import pytest
 from shared_buffer import (
     ControlBuffer,
     FrameBuffer,
-    IMUBuffer,
     PointCloudBuffer,
-    PoseBuffer,
-    SegmentationBuffer,
-    TrackBoundaryBuffer,
 )
 from shared_buffer.ring_buffer import SharedRingBuffer
 from shared_buffer.schema import (
     HEADER_SIZE,
-    HEADER_STRUCT,
     SCHEMA_VERSION,
     DTypeTag,
     SlotHeader,
 )
 
 
-# Helper for unique names
 def _uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
-#
 # --- Schema & SlotHeader ---
-#
 
 class TestSlotHeader:
     """Smoke + round-trip tests for the SlotHeader dataclass."""
@@ -79,9 +72,7 @@ class TestSlotHeader:
         assert h.payload_size == 0
 
 
-#
 # --- SharedRingBuffer (low-level) ---
-#
 
 class TestSharedRingBuffer:
 
@@ -140,7 +131,7 @@ class TestSharedRingBuffer:
             rb.write(b"\xff" * 16)
             result = rb.read_latest()
             assert result is not None
-        # close() was called but not unlink — clean up manually
+        # Leaving the context closes but does not unlink — unlink here
         try:
             stale = shared_memory.SharedMemory(name=name, create=False)
             stale.close()
@@ -161,9 +152,7 @@ class TestSharedRingBuffer:
         rb.unlink()
 
 
-#
 # --- FrameBuffer ---
-#
 
 class TestFrameBuffer:
 
@@ -202,9 +191,7 @@ class TestFrameBuffer:
         np.testing.assert_allclose(depth_out, 5.0, atol=1e-6)
 
 
-#
 # --- IMUBuffer ---
-#
 
 class TestIMUBuffer:
 
@@ -239,9 +226,7 @@ class TestIMUBuffer:
             imu_buffer.read_latest()
 
 
-#
 # --- SegmentationBuffer ---
-#
 
 class TestSegmentationBuffer:
 
@@ -265,9 +250,7 @@ class TestSegmentationBuffer:
         assert mask_out.shape == (400, 640)
 
 
-#
 # --- PoseBuffer ---
-#
 
 class TestPoseBuffer:
 
@@ -311,9 +294,7 @@ class TestPoseBuffer:
         assert speed == pytest.approx(2.5)
 
 
-#
 # --- ControlBuffer ---
-#
 
 class TestControlBuffer:
 
@@ -344,9 +325,7 @@ class TestControlBuffer:
         assert throttle == 0.0
 
 
-#
 # --- PointCloudBuffer ---
-#
 
 class TestPointCloudBuffer:
 
@@ -382,9 +361,7 @@ class TestPointCloudBuffer:
         buf.unlink()
 
 
-#
 # --- TrackBoundaryBuffer ---
-#
 
 class TestTrackBoundaryBuffer:
 
@@ -420,9 +397,7 @@ class TestTrackBoundaryBuffer:
         assert i.shape == (200, 2)
 
 
-#
-# --- Race condition tests — concurrent write/read across processes ---
-#
+# --- Race conditions: concurrent write/read across processes ---
 
 def _reader_process(name: str, n_reads: int, results: mp.Queue):
     """Child process: reads from buffer and counts valid reads."""
@@ -455,7 +430,6 @@ class TestRaceConditions:
         reader = mp.Process(target=_reader_process, args=(name, n_reads, results_q))
         reader.start()
 
-        # Parent (owner) writes
         for i in range(n_writes):
             buf.write(float(i) / n_writes, float(i) / n_writes)
             time.sleep(0.001)
@@ -521,7 +495,6 @@ class TestFrameBufferRace:
         reader = mp.Process(target=_frame_reader, args=(name, 50, q))
         reader.start()
 
-        # Parent (owner) writes 30 frames
         for i in range(30):
             rgb = np.full((400, 640, 3), i % 256, dtype=np.uint8)
             depth = np.full((400, 640), float(i), dtype=np.float32)

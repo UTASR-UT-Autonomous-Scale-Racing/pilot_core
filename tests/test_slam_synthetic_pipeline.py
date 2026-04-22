@@ -1,30 +1,29 @@
 """
-test_slam_synthetic_pipeline.py
-===============================
-End-to-end test of the ORB-SLAM3 RGBD pipeline using synthetic sensor data.
+test_slam_synthetic_pipeline.py — End-to-end test of the ORB-SLAM3 RGBD
+pipeline on synthetic sensor data.
 
-Only the RGBD frames and IMU readings are synthetic.  Mapping, loop closure
-detection, point-cloud generation, and localization are all performed by the
-real ORB-SLAM3 library via its pybind11 wrapper (``orbslam3_python``).
+Only the RGBD frames and IMU readings are synthetic (two laps of a closed
+track from synthetic.closed_loop_generator); tracking and mapping are done by
+the real ORB-SLAM3 library through its pybind11 wrapper (``orbslam3_python``).
 
-Two phases are executed in sequence:
+Skipped unless ``orbslam3_python`` is importable (ORB-SLAM3 and the wrapper
+must be built); also needs ORB_SLAM3/Vocabulary/ORBvoc.txt and
+synthetic_slam_settings.yaml.  The tests share one SLAM system and run in
+order:
 
-**Phase A — Mapping**
-    Feed a full closed-loop sequence of synthetic RGBD frames to ORB-SLAM3.
-    At the end (or during), verify that:
-    - tracking was successful for the majority of frames
-    - 3D map points were created
-    - a map change (loop closure / global BA) was flagged
+**Phase A — Mapping (lap 1)**
+    - at least 30 % of frames track OK
+    - 3D map points are created and spread out in X and Z
+    - at least 3 keyframes exist
+    Map changes (loop closure / global BA) are logged, not asserted.
 
-**Phase B — Localization**
-    Switch to localization-only mode and re-feed the same frames.
-    Verify that:
-    - tracking still succeeds against the pre-built map
-    - returned poses are valid (non-identity, non-zero rotation+translation)
+**Phase B — Driving lap (lap 2)**
+    - at least 20 % of frames track OK on the already-mapped track
 
-This test is intentionally single-process (no mp workers) to keep the
-SLAM system lifecycle simple and deterministic.  The multiprocessing worker
-integration is tested separately.
+A 2x2 debug video (RGB, depth, IMU, BEV map) is written to
+test_output/slam_synthetic_pipeline.mp4.  The test is single-process (no
+workers) to keep the SLAM lifecycle simple; worker integration is tested
+elsewhere.
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ import cv2
 import numpy as np
 import pytest
 
-# --- skip if orbslam3_python is not available ---
+# --- Skip if orbslam3_python is not available ---
 orbslam3 = pytest.importorskip(
     "orbslam3_python",
     reason="orbslam3_python wrapper not built or not on sys.path",
@@ -100,7 +99,7 @@ class FrameLogger:
         self._frame_count = 0
         logger.info(f"FrameLogger: writing to {output_path}")
 
-    # -- public API ----------------------------------------------------
+    # --- public API ---
 
     def log(
         self,
@@ -152,7 +151,7 @@ class FrameLogger:
         )
         return self._path
 
-    # -- internal helpers ----------------------------------------------
+    # --- internal helpers ---
 
     def _to_panel(self, img: np.ndarray) -> np.ndarray:
         """Resize / pad to exactly PANEL_W x PANEL_H."""
@@ -342,21 +341,6 @@ class FrameLogger:
 
 # --- Helpers ---
 
-def _is_valid_pose(pose: np.ndarray) -> bool:
-    """Return True if *pose* is a plausible SE3 matrix (not identity/zero)."""
-    if pose.shape != (4, 4):
-        return False
-    # Check the rotation block is a valid rotation (det ≈ 1)
-    R = pose[:3, :3]
-    det = np.linalg.det(R)
-    if abs(det - 1.0) > 0.1:
-        return False
-    # Check it's not just identity (translation should be non-trivial)
-    translation_norm = np.linalg.norm(pose[:3, 3])
-    # At the very start translation may be near-zero; that's OK
-    return True
-
-
 def _tracking_state_name(state: int) -> str:
     _names = {
         -1: "SYSTEM_NOT_READY",
@@ -428,7 +412,7 @@ def frame_logger():
 class TestSLAMSyntheticPipeline:
     """Phase A (mapping) + Phase B (localization) using real ORB-SLAM3."""
 
-    # Store results across methods (class-level state)
+    # Phase A results shared with the later tests (class-level state)
     _phase_a_map_points: np.ndarray | None = None
     _phase_a_poses: list = []
     _map_changed: bool = False
@@ -486,7 +470,6 @@ class TestSLAMSyntheticPipeline:
                     f"map_pts={n_pts}, tracking_ok={tracking_ok}"
                 )
 
-        # Store results for subsequent tests
         map_points = np.asarray(slam_system.get_all_map_points(), dtype=np.float32)
         TestSLAMSyntheticPipeline._phase_a_map_points = map_points
         TestSLAMSyntheticPipeline._phase_a_poses = poses
@@ -519,7 +502,7 @@ class TestSLAMSyntheticPipeline:
         if pts is None or len(pts) == 0:
             pytest.skip("No map points from Phase A")
 
-        # Points should span at least 0.5 m in X and Z
+        # Points should span more than 0.3 m in X and Z
         x_range = pts[:, 0].max() - pts[:, 0].min()
         z_range = pts[:, 2].max() - pts[:, 2].min()
 
@@ -590,7 +573,7 @@ class TestSLAMSyntheticPipeline:
 
         logger.info(f"Phase B complete: {tracking_ok}/{n} frames tracked OK")
 
-        # At least 20% should track
+        # At least 20% of frames should be tracked successfully
         min_tracked = int(n * 0.20)
         assert tracking_ok >= min_tracked, (
             f"Expected at least {min_tracked} Phase B frames OK, "
@@ -602,7 +585,7 @@ class TestSLAMSyntheticPipeline:
     # --- Summary ---
 
     def test_summary(self, slam_system):
-        """Print a final summary of both phases."""
+        """Log a final summary of both phases."""
         pts = TestSLAMSyntheticPipeline._phase_a_map_points
         n_pts = len(pts) if pts is not None else 0
         kf = np.asarray(slam_system.get_all_keyframe_poses())
@@ -617,5 +600,5 @@ class TestSLAMSyntheticPipeline:
         logger.info(f"  Trajectory length   : {slam_system.trajectory_length()}")
         logger.info("═" * 60)
 
-        # This test always passes — it's just for reporting
+        # Reporting only; always passes
         assert True

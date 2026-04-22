@@ -1,5 +1,6 @@
 """
-test_track_pid.py — Tests for TrackPIDController and helper functions.
+test_track_pid.py — TrackPIDController (centre-line PID steering from BEV
+track boundaries) and its _angle_diff helper.
 
 Categories:
     - Smoke: instantiation with defaults and custom gains
@@ -18,9 +19,7 @@ import pytest
 from workers.track_pid_controller import TrackPIDController, _angle_diff
 
 
-#
 # --- _angle_diff helper ---
-#
 
 class TestAngleDiff:
 
@@ -45,9 +44,7 @@ class TestAngleDiff:
         assert abs(d) < 1e-6 or abs(abs(d) - 2 * np.pi) < 1e-6
 
 
-#
 # --- TrackPIDController — Smoke & Initialisation ---
-#
 
 class TestPIDInit:
 
@@ -84,9 +81,7 @@ class TestPIDInit:
         assert pid._integral == 0.0
 
 
-#
 # --- PID step() I/O tests ---
-#
 
 @pytest.fixture()
 def oval_boundaries():
@@ -177,9 +172,7 @@ class TestPIDStep:
         assert pid._integral != 0.0
 
 
-#
 # --- Edge cases ---
-#
 
 class TestPIDEdgeCases:
 

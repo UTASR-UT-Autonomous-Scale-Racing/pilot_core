@@ -1,5 +1,5 @@
 """
-test_ring_buffer_consistency.py — Concurrency regression test for
+test_ring_buffer_consistency.py — Concurrency test for
 SharedRingBuffer: a reader must never observe a header whose payload
 belongs to a different (older or partially written) record.
 """

@@ -1,29 +1,24 @@
 """
-test_workers.py — Tests for all worker modules.
+test_workers.py — Unit tests for the pipeline workers, stepped in-process
+over real shared-memory buffers: construction, setup(), step() input/output
+and stepping with no input.
 
-Categories:
-    - Smoke / Initialisation: worker instantiation without starting
-    - Setup tests: verify setup() connects to buffers & devices
-    - Step I/O: write input buffers, call step, verify output buffers
-    - Null checks: step with no data, missing config
-    - Teardown: verify clean shutdown
-
-Workers tested:
-    - CameraWorker (requires OAK-D)
-    - IMUWorker (synthetic)
-    - VisionWorker (ResNet18 mock stub)
-    - SLAMWorker (stub mode — no orbslam3_python required)
-    - MappingWorker (synthetic data)
+Workers covered:
+    - BaseWorker (abstract interface, stop event)
+    - CameraWorker (capture tests need OAKD_AVAILABLE=1)
+    - IMUWorker (construction and config only)
+    - VisionWorker (mock segmentation model)
+    - SLAMWorker (stub mode without orbslam3_python; the real-SLAM test needs
+      OAKD_AVAILABLE=1 plus the ORB-SLAM3 binding and vocabulary)
+    - MappingWorker (synthetic oval track)
     - ControlWorker (PID mode)
-    - ActuatorWorker (no-hardware stub)
-    - RecorderWorker (tempdir)
+    - ActuatorWorker (construction only)
 """
 
 from __future__ import annotations
 
 import multiprocessing as mp
 import os
-import tempfile
 import time
 import uuid
 from unittest.mock import MagicMock, patch
@@ -47,9 +42,7 @@ def _uid():
     return uuid.uuid4().hex[:8]
 
 
-#
 # --- BaseWorker ---
-#
 
 class TestBaseWorker:
 
@@ -80,20 +73,9 @@ class TestBaseWorker:
         w.teardown()  # should not raise
 
 
-#
 # --- CameraWorker — requires OAK-D hardware ---
-#
 
 class TestCameraWorker:
-
-    def _have_oakd(self) -> bool:
-        """Check if OAK-D is plugged in."""
-        try:
-            import depthai as dai
-            devices = dai.Device.getAllAvailableDevices()
-            return len(devices) > 0
-        except Exception:
-            return False
 
     def test_smoke_init(self):
         from workers import CameraWorker
@@ -174,9 +156,7 @@ class TestCameraWorker:
             fb.unlink()
 
 
-#
-# --- IMUWorker — synthetic I2C stub ---
-#
+# --- IMUWorker ---
 
 class TestIMUWorker:
 
@@ -209,9 +189,7 @@ class TestIMUWorker:
             ib.unlink()
 
 
-#
 # --- VisionWorker — mock model ---
-#
 
 class TestVisionWorker:
 
@@ -254,21 +232,19 @@ class TestVisionWorker:
             w._logger.info = MagicMock()
             w._logger.debug = MagicMock()
 
-            # Write a frame as input
             fb.write(rgb_frame, depth_frame)
 
-            # Mock model that returns a uint8 mask (ResNet18-like)
+            # Mock segmentation model returning a 3-class int32 mask
             mock_mask = np.random.randint(0, 3, (400, 640), dtype=np.int32)
             mock_model = MagicMock()
             mock_model.get_mask.return_value = mock_mask
 
-            # Patch setup to just inject mock model
+            # Inject the mock model and buffers instead of calling setup()
             w._model = mock_model
             w._frame_buf = fb
             w._seg_buf = sb
 
-            # Step should read frame and write segmentation
-            # We need to replicate what step does (read frame -> model -> write seg)
+            # Replays step()'s read frame → get_mask → write mask path by hand
             result = fb.read_latest()
             assert result is not None
             header, rgb, depth = result
@@ -304,8 +280,7 @@ class TestVisionWorker:
             w._model = MagicMock()
             w._last_seq = 0
 
-            # step() when frame_buf is empty → should return without crash
-            # We replicate the guard logic
+            # Checks only the precondition of step()'s empty-buffer guard
             result = fb.read_latest()
             assert result is None  # no frame yet
         finally:
@@ -313,9 +288,7 @@ class TestVisionWorker:
             sb.unlink()
 
 
-#
 # --- SLAMWorker — stub mode (no orbslam3_python needed) ---
-#
 
 class TestSLAMWorker:
 
@@ -354,7 +327,7 @@ class TestSLAMWorker:
                 settings_path="nonexistent.yaml",
             )
             w._logger = MagicMock()
-            # Force stub by patching import
+            # Make `import orbslam3_python` fail so setup() falls back to the stub
             with patch.dict("sys.modules", {"orbslam3_python": None}):
                 w.setup()
             assert w._slam is None  # stub mode
@@ -381,13 +354,10 @@ class TestSLAMWorker:
             w._slam = None  # stub mode
             w._last_seq = 0
 
-            # Write a frame
             fb.write(rgb_frame, depth_frame)
 
-            # Step
             w.step()
 
-            # Should have written identity pose
             result = pb.read_latest()
             assert result is not None
             _, pose, _, _ = result
@@ -449,12 +419,11 @@ class TestSLAMWorker:
             w._last_seq = 0
             w._localization_activated = False
 
-            # Set localize event and step
             loc_ev.set()
             fb.write(rgb_frame, depth_frame)
             w.step()
 
-            # Should have activated localization (noop for stub)
+            # The stub has nothing to switch, but the flag must still be set
             assert w._localization_activated
         finally:
             fb.unlink()
@@ -467,7 +436,7 @@ class TestSLAMWorker:
     )
     def test_real_slam_single_frame(self):
         """Integration: real ORB_SLAM3 tracking on a single real frame."""
-        import orbslam3_python
+        pytest.importorskip("orbslam3_python")
         from workers import CameraWorker, SLAMWorker
 
         fn = f"slam_f_{_uid()}"
@@ -518,9 +487,7 @@ class TestSLAMWorker:
             pb.unlink()
 
 
-#
 # --- MappingWorker ---
-#
 
 class TestMappingWorker:
 
@@ -612,17 +579,13 @@ class TestMappingWorker:
             w._logger = MagicMock()
             w.setup()
 
-            # Write data to buffers
             pb.write(pose_4x4)
             sb.write(segmentation_mask)
             pcb.write(point_cloud)
 
-            # Step
             w.step()
 
-            # Should have accumulated trajectory
             assert len(w._bev_trajectory) >= 1
-            # Should have accumulated BEV wall points
             assert len(w._bev_wall_pts) >= 1
         finally:
             pb.unlink()
@@ -736,9 +699,7 @@ class TestMappingWorker:
             bb.unlink()
 
 
-#
-# --- ControlWorker — both modes ---
-#
+# --- ControlWorker (PID mode) ---
 
 class TestControlWorkerPID:
 
@@ -823,8 +784,6 @@ class TestControlWorkerPID:
             w._logger = MagicMock()
             w.setup()
 
-            # mapping not done → step should return without writing
-            t0 = time.time()
             w.step()
             assert cb.read_latest() is None  # nothing written
         finally:
@@ -867,9 +826,8 @@ class TestControlWorkerPID:
             done_ev.set()
             bb.write(outer, inner)
 
-            # Write a pose
             T = np.eye(4, dtype=np.float32)
-            T[0, 3] = 6.5  # near outer boundary
+            T[0, 3] = 6.5  # centre line of the fixture track at theta = 0
             pb.write(T)
 
             # Step multiple times to load boundaries then compute control
@@ -879,13 +837,15 @@ class TestControlWorkerPID:
             result = cb.read_latest()
             assert result is not None
             _, steer, throttle = result
-            assert -1.0 <= steer <= 1.0
-            assert -1.0 <= throttle <= 1.0
+            assert 0.0 <= steer <= 1.0        # ControlBuffer contract: [0, 1]
+            assert 0.0 <= throttle <= 1.0
         finally:
             cb.unlink()
             pb.unlink()
             bb.unlink()
 
+
+# --- ActuatorWorker ---
 
 class TestActuatorWorker:
 
@@ -897,44 +857,4 @@ class TestActuatorWorker:
             w = ActuatorWorker(name="actuator", input_buffer=cb)
             assert w.name == "actuator"
         finally:
-            cb.unlink()
-
-
-#
-# --- RecorderWorker ---
-#
-
-class TestRecorderWorker:
-
-    def test_smoke_init(self):
-        from workers import RecorderWorker
-        fn = f"rec_f_{_uid()}"
-        imuname = f"rec_i_{_uid()}"
-        sn = f"rec_s_{_uid()}"
-        pn = f"rec_p_{_uid()}"
-        cn = f"rec_c_{_uid()}"
-        fb = FrameBuffer(slots=4, name=fn, create=True)
-        ib = IMUBuffer(slots=8, name=imuname, create=True)
-        sb = SegmentationBuffer(slots=4, name=sn, create=True)
-        pb = PoseBuffer(slots=4, name=pn, create=True)
-        cb = ControlBuffer(slots=4, name=cn, create=True)
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                w = RecorderWorker(
-                    name="recorder",
-                    buffers={
-                        "frames": fb,
-                        "imu": ib,
-                        "segments": sb,
-                        "pose": pb,
-                        "control": cb,
-                    },
-                    output_dir=td,
-                )
-                assert w.name == "recorder"
-        finally:
-            fb.unlink()
-            ib.unlink()
-            sb.unlink()
-            pb.unlink()
             cb.unlink()

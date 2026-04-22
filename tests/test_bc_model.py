@@ -4,6 +4,7 @@ shared imitation infrastructure (control/imitation.py).
 
 Full training (scripts/train_bc_policy.py) is too slow for the unit suite;
 its closed-loop results are reported by the script.
+Skipped unless torch, onnx and onnxruntime are installed.
 """
 
 from __future__ import annotations

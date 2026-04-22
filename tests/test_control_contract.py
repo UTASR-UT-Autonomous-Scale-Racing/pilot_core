@@ -1,5 +1,5 @@
 """
-test_control_contract.py — Regression tests for the ControlBuffer [0, 1]
+test_control_contract.py — Tests for the ControlBuffer [0, 1]
 contract between controllers, ControlWorker and ActuatorWorker.
 
 Covers:

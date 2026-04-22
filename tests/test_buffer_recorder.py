@@ -1,5 +1,6 @@
 """
-Tests for BufferRecorderWorker — per-buffer binary recorder.
+test_buffer_recorder.py — BufferRecorderWorker, the per-buffer binary
+recorder: file format, decimation, record cap and every typed buffer.
 
 Covers:
     - File header writing & reading
@@ -7,19 +8,18 @@ Covers:
     - sample_k decimation
     - top_n record cap + wraparound
     - Integration with each typed buffer (Frame, IMU, Seg, Pose, Control, PC, Boundary)
-    - Edge cases: empty reads, back-to-back writes, zero payload
+    - Edge cases: nothing written, repeated seq_no, end of file
+    - config.yaml recording settings read by start.py
 """
 
 from __future__ import annotations
 
 import os
 import struct
-import time
 import uuid
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 from shared_buffer import (
     ControlBuffer,
@@ -30,11 +30,10 @@ from shared_buffer import (
     SegmentationBuffer,
     TrackBoundaryBuffer,
 )
-from shared_buffer.schema import DTypeTag, SCHEMA_VERSION
+from shared_buffer.schema import SCHEMA_VERSION
 from workers.buffer_recorder_worker import (
     FILE_HEADER_SIZE,
     FILE_MAGIC,
-    RECORD_HEADER_SIZE,
     BufferRecorderWorker,
 )
 
@@ -43,9 +42,7 @@ def _uid():
     return uuid.uuid4().hex[:8]
 
 
-# ---------------------------------------------------------------------------
-# Helpers: build a recorder wired to a real shared-memory buffer
-# ---------------------------------------------------------------------------
+# --- Helpers: build a recorder wired to a real shared-memory buffer ---
 
 def _make_recorder(
     buf,
@@ -77,9 +74,7 @@ def _bin_files(tmp_path) -> list[str]:
     )
 
 
-# ---------------------------------------------------------------------------
-# File header
-# ---------------------------------------------------------------------------
+# --- File header ---
 
 class TestFileHeader:
 
@@ -118,9 +113,7 @@ class TestFileHeader:
             buf.unlink()
 
 
-# ---------------------------------------------------------------------------
-# Record round-trip
-# ---------------------------------------------------------------------------
+# --- Record round-trip ---
 
 class TestRecordRoundTrip:
 
@@ -175,9 +168,7 @@ class TestRecordRoundTrip:
             buf.unlink()
 
 
-# ---------------------------------------------------------------------------
-# Decimation (sample_k)
-# ---------------------------------------------------------------------------
+# --- Decimation (sample_k) ---
 
 class TestSampleK:
 
@@ -235,9 +226,7 @@ class TestSampleK:
             buf.unlink()
 
 
-# ---------------------------------------------------------------------------
-# Top-N cap
-# ---------------------------------------------------------------------------
+# --- Top-N cap ---
 
 class TestTopN:
 
@@ -248,12 +237,11 @@ class TestTopN:
         try:
             w = _make_recorder(buf, "imu", tmp_path, top_n=3)
 
-            # Write 6 records — should wrap once
             for _ in range(6):
                 buf.write(np.zeros(9, dtype=np.float32))
                 w.step()
 
-            # Internal counter should have been reset
+            # 6 writes with top_n=3 wrap once, so the counter restarts
             assert w._records_written == 3
             w.teardown()
         finally:
@@ -275,9 +263,7 @@ class TestTopN:
             buf.unlink()
 
 
-# ---------------------------------------------------------------------------
-# Typed buffer integration — one test per buffer type
-# ---------------------------------------------------------------------------
+# --- Typed buffer integration — one test per buffer type ---
 
 class TestFrameRecorder:
 
@@ -347,7 +333,7 @@ class TestSegmentationRecorder:
                 rec = BufferRecorderWorker.read_record(f)
             assert rec is not None
             _, payload = rec
-            # 8 bytes meta + 400*640*4 float32
+            # 8 bytes meta + 400×640 4-byte mask
             assert len(payload) == 8 + 400 * 640 * 4
         finally:
             buf.unlink()
@@ -446,9 +432,7 @@ class TestBoundaryRecorder:
             buf.unlink()
 
 
-# ---------------------------------------------------------------------------
-# Edge cases
-# ---------------------------------------------------------------------------
+# --- Edge cases ---
 
 class TestEdgeCases:
 
@@ -493,12 +477,10 @@ class TestEdgeCases:
             buf.unlink()
 
 
-# ---------------------------------------------------------------------------
-# Integration: verify start.py recorder spawning logic
-# ---------------------------------------------------------------------------
+# --- config.yaml recording settings ---
 
 class TestStartPyRecorderConfig:
-    """Validate that the config structure produces the right number of recorders."""
+    """config.yaml provides the recording settings start.py uses to spawn recorders."""
 
     def test_recording_config_keys(self):
         import yaml

@@ -1,6 +1,9 @@
 """
 test_control_models.py — LQR, MPC, depth Follow-the-Gap and ONNX policy
 controllers: unit behaviour, closed-loop benchmarks and worker integration.
+
+The policy tests are skipped without onnxruntime; the export test also needs
+stable_baselines3, gymnasium and onnx.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ def _uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
-# ---------------------------------------------------------------- LQR / MPC
+# --- LQR / MPC ---
 
 @pytest.mark.parametrize("mode", ["lqr", "mpc"])
 @pytest.mark.parametrize("track", sorted(TRACKS))
@@ -70,14 +73,13 @@ def test_mpc_respects_steering_limits():
     assert deltas[-1] < 0                                        # steering back (right)
 
 
-# ---------------------------------------------------------------- depth FTG
+# --- Depth FTG ---
 
 class TestDepthScan:
 
     def test_floor_is_not_an_obstacle(self):
-        outer, inner, _ = oval_track(width=6.0)            # walls far outside the range
-        d = render_depth(0.0, -1e3, 0.0, [outer, inner], K_SIM, 160, 100)   # nothing in view
-        d[d == 0] = 0.0
+        outer, inner, _ = oval_track(width=6.0)
+        # Walls scaled far beyond max_range: only floor pixels are in view
         floor = render_depth(0.0, 0.0, 0.0, [outer * 100, inner * 100], K_SIM, 160, 100)
         _, ranges = depth_to_scan(floor, K_SIM, DepthFTGConfig())
         assert np.all(ranges == DepthFTGConfig().max_range)
@@ -120,13 +122,11 @@ class TestDepthGapFollower:
         assert r.xtrack_max < 0.3, r.summary()
 
 
-# ------------------------------------------------------------------- policy
-
-onnx_deps = pytest.importorskip("onnxruntime")
-
+# --- Policy ---
 
 def _export_test_policy(tmp_path):
     """Tiny real SB3 PPO (with VecNormalize stats) exported via rl/export_onnx."""
+    pytest.importorskip("onnxruntime")
     sb3 = pytest.importorskip("stable_baselines3")
     gym = pytest.importorskip("gymnasium")
     pytest.importorskip("onnx")
@@ -157,6 +157,7 @@ def _export_test_policy(tmp_path):
 class TestPolicy:
 
     def test_observation_matches_training_builder(self):
+        pytest.importorskip("onnxruntime")
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
         from control import policy as cp
         from workers import boundary_resampler as br
@@ -188,7 +189,7 @@ class TestPolicy:
         assert f.observation(st).shape == (45,)
 
 
-# ----------------------------------------------------------- worker wiring
+# --- Worker wiring ---
 
 def test_control_worker_depth_ftg_mode():
     from shared_buffer import ControlBuffer, FrameBuffer

@@ -39,7 +39,7 @@ def test_unit_signed_round_trip():
         assert unit_to_signed(*signed_to_unit(s, t)) == pytest.approx((s, t))
 
 
-# ------------------------------------------------------------------ actuator
+# --- Actuator ---
 
 class TestActuatorSafety:
 
@@ -97,7 +97,7 @@ class TestActuatorSafety:
         assert self._last_output(w)[1] == pytest.approx(0.5)   # over the cap → coast
 
 
-# --------------------------------------------------------------------- state
+# --- State ---
 
 class TestStateWorker:
 
@@ -128,7 +128,7 @@ class TestStateWorker:
             sb.unlink()
 
 
-# ------------------------------------------------------------------- control
+# --- Control ---
 
 @pytest.mark.parametrize("mode", ["pure_pursuit", "stanley"])
 def test_control_worker_track_mode(mode):
@@ -168,7 +168,7 @@ def test_control_worker_rejects_unknown_mode():
         w.setup()
 
 
-# ------------------------------------------------------------------ keyboard
+# --- Keyboard ---
 
 def test_keyboard_control_piped_stdin(monkeypatch):
     import io

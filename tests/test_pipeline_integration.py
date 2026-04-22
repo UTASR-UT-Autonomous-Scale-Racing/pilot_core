@@ -1,19 +1,18 @@
 """
-test_pipeline_integration.py — End-to-end integration tests for the full
-pilot_core pipeline.
-
-Tests the complete data path:
+test_pipeline_integration.py — Integration tests across the pilot_core
+data path:
     OAK-D camera → FrameBuffer → SLAMWorker → PoseBuffer
                                 → VisionWorker → SegmentationBuffer
     PoseBuffer + SegmentationBuffer + PointCloudBuffer → MappingWorker
     → TrackBoundaryBuffer → ControlWorker (PID) → ControlBuffer
 
 Categories:
-    - Smoke: all workers spawn and shut down cleanly
-    - I/O pipeline: synthetic data flows through buffer chain
-    - Null pipeline: start with no input → no crash
-    - Race conditions: full pipeline under concurrent operations
-    - OAK-D integration: real camera → full pipeline (hardware-gated)
+    - Worker lifecycle: BaseWorker run loop starts and stops in a child process
+    - Synthetic pipeline: data flows frame → pose → map → boundaries → control
+    - Null pipeline: workers stepped with no input write nothing and do not crash
+    - Race conditions: concurrent writer / reader processes
+    - Mapping helpers, start.py CLI, FTG controller in the control path
+    - OAK-D integration: real camera → pipeline; skipped unless OAKD_AVAILABLE=1
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ import multiprocessing as mp
 import os
 import time
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -30,7 +29,6 @@ import pytest
 from shared_buffer import (
     ControlBuffer,
     FrameBuffer,
-    IMUBuffer,
     PointCloudBuffer,
     PoseBuffer,
     SegmentationBuffer,
@@ -43,9 +41,7 @@ def _uid():
     return uuid.uuid4().hex[:8]
 
 
-#
 # --- Helper: minimal worker that stops after N steps ---
-#
 
 class _StepCounterWorker(BaseWorker):
     """Test worker that counts steps and auto-stops."""
@@ -68,9 +64,7 @@ class _StepCounterWorker(BaseWorker):
         pass
 
 
-#
 # --- Smoke test: BaseWorker run loop in a child process ---
-#
 
 class TestWorkerLifecycle:
 
@@ -95,15 +89,13 @@ class TestWorkerLifecycle:
         assert p.is_alive()
         w.stop()
         p.join(timeout=5)
-        # Note: with fork context the event propagates directly.
+        # Fallback so a worker that ignores stop() never outlives the test
         if p.is_alive():
             p.terminate()
             p.join(timeout=2)
 
 
-#
 # --- Synthetic data pipeline: Frame → SLAM(stub) → Pose → MappingWorker ---
-#
 
 class TestSyntheticPipeline:
     """Full pipeline test using synthetic data (no hardware required)."""
@@ -128,14 +120,13 @@ class TestSyntheticPipeline:
             w._slam = None  # stub
             w._last_seq = 0
 
-            # Write 5 frames
             for i in range(5):
                 rgb = np.random.randint(0, 255, (400, 640, 3), dtype=np.uint8)
                 depth = np.random.uniform(0.5, 3.0, (400, 640)).astype(np.float32)
                 fb.write(rgb, depth)
                 w.step()
 
-            # Should have identity pose
+            # The stub publishes identity poses
             result = pb.read_latest()
             assert result is not None
             _, pose, _, _ = result
@@ -324,9 +315,7 @@ class TestSyntheticPipeline:
             cb.unlink()
 
 
-#
-# --- Null / Empty pipeline — no data flows, nothing crashes ---
-#
+# --- Null pipeline: no data flows, nothing crashes ---
 
 class TestNullPipeline:
 
@@ -407,9 +396,7 @@ class TestNullPipeline:
             bb.unlink()
 
 
-#
-# --- Buffer chain race condition test — writer + reader in parallel processes ---
-#
+# --- Race conditions: writer and reader in parallel processes ---
 
 def _pose_reader(name: str, n: int, results: mp.Queue):
     """Read from PoseBuffer and count valid reads."""
@@ -433,7 +420,6 @@ class TestPipelineRaceConditions:
         q = mp.Queue()
         reader = mp.Process(target=_pose_reader, args=(name, 200, q))
         reader.start()
-        # Parent writes
         for i in range(100):
             T = np.eye(4, dtype=np.float32)
             T[0, 3] = float(i)
@@ -474,9 +460,7 @@ class TestPipelineRaceConditions:
             pb.unlink()
 
 
-#
 # --- Mapping helper functions ---
-#
 
 class TestMappingHelpers:
 
@@ -517,9 +501,7 @@ class TestMappingHelpers:
         assert np.all(np.diff(angles) >= -1e-6)  # monotonic along the lap
 
 
-#
-# --- OAK-D hardware integration — full pipeline ---
-#
+# --- OAK-D hardware integration (OAKD_AVAILABLE=1) ---
 
 @pytest.mark.skipif(
     not os.environ.get("OAKD_AVAILABLE", ""),
@@ -562,7 +544,7 @@ class TestOAKDIntegration:
                 assert rgb.shape == (400, 640, 3)
                 assert depth.dtype == np.float32
                 assert depth.shape == (400, 640)
-                # Depth should be in reasonable range (0 to 10m)
+                # Valid depth readings stay below 20 m
                 valid_depth = depth[depth > 0]
                 if len(valid_depth) > 0:
                     assert valid_depth.max() < 20.0
@@ -669,18 +651,17 @@ class TestOAKDIntegration:
                 cam.step()
                 slam.step()
 
-                # Synthetic ResNet18 seg mask (3-class)
                 result = fb.read_latest()
                 if result is not None:
                     _, rgb, depth = result
-                    # Simple ResNet18-like mask: threshold depth
+                    # Stand-in for ResNet18 segmentation: threshold depth
                     mask = np.zeros((400, 640), dtype=np.int32)
                     mask[depth < 2.0] = 1   # road
                     mask[depth >= 2.0] = 2  # wall
                     sb.write(mask)
                     frame_count += 1
 
-                    # Synthetic point cloud from depth
+                    # Random stand-in point cloud
                     pcb.write(np.random.randn(50, 3).astype(np.float32) * 3)
 
                 mapper.step()
@@ -698,9 +679,7 @@ class TestOAKDIntegration:
             bb.unlink()
 
 
-#
 # --- start.py CLI smoke tests ---
-#
 
 class TestStartCLI:
 
@@ -743,9 +722,7 @@ class TestStartCLI:
             load_config("nonexistent_config.yaml")
 
 
-# ----------------------------------------------------------------------------
-# --- FTG Controller integration — TrackBoundaryBuffer → FTG → ControlBuffer ---
-# ----------------------------------------------------------------------------
+# --- FTG controller in the control path ---
 
 class TestFTGControllerPipelineIntegration:
     """Verify TrackFTGController can replace PID inside the ControlWorker path."""

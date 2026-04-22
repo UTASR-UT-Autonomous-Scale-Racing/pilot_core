@@ -1,17 +1,18 @@
 """
-Tests for TrackFTGController — Follow-the-Gap reactive controller.
+test_track_ftg.py — TrackFTGController, the reactive Follow-the-Gap
+controller that steers from a virtual scan of the BEV track boundaries.
 
 Covers:
-  • Construction / default parameters
-  • step() returns (steering, throttle) in [-1, 1]
-  • Virtual scan generation from BEV boundary points
-  • Pre-processing (smoothing + clamp)
-  • Safety bubble zeroing
-  • Max-gap detection
-  • Best-point selection (deepest & centroid strategies)
-  • Corner-throttle scaling
-  • Reset is a no-op (reactive controller)
-  • Edge cases: empty boundaries, vehicle outside track, single-point lines
+    - Construction / default parameters
+    - step() returns (steering, throttle) in [-1, 1]
+    - Virtual scan generation from BEV boundary points
+    - Pre-processing (smoothing + clamp)
+    - Safety bubble zeroing
+    - Max-gap detection
+    - Best-point selection (deepest & centroid strategies)
+    - Corner-throttle scaling
+    - Reset is a no-op (reactive controller)
+    - Edge cases: empty boundaries, vehicle on a boundary, single-point lines
 """
 
 from __future__ import annotations
@@ -22,9 +23,7 @@ import pytest
 from workers.track_ftg_controller import TrackFTGController, _angle_diff
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# --- Helpers ---
 
 def _oval_track(n_outer: int = 80, n_inner: int = 80):
     """Return (outer, inner) boundary arrays for a simple oval track."""
@@ -43,9 +42,7 @@ def _straight_corridor(length: float = 10.0, width: float = 2.0, n: int = 50):
     return outer, inner
 
 
-# ---------------------------------------------------------------------------
-# Construction
-# ---------------------------------------------------------------------------
+# --- Construction ---
 
 class TestConstruction:
 
@@ -72,9 +69,7 @@ class TestConstruction:
         assert c.beam_angles.shape == (100,)
 
 
-# ---------------------------------------------------------------------------
-# _angle_diff helper
-# ---------------------------------------------------------------------------
+# --- _angle_diff helper ---
 
 class TestAngleDiff:
 
@@ -91,9 +86,7 @@ class TestAngleDiff:
             assert result == expected
 
 
-# ---------------------------------------------------------------------------
-# step() basic contract
-# ---------------------------------------------------------------------------
+# --- step() basic contract ---
 
 class TestStepContract:
 
@@ -123,9 +116,7 @@ class TestStepContract:
         assert throttle > 0.0  # should still be moving forward
 
 
-# ---------------------------------------------------------------------------
-# Virtual scan
-# ---------------------------------------------------------------------------
+# --- Virtual scan ---
 
 class TestVirtualScan:
 
@@ -150,9 +141,7 @@ class TestVirtualScan:
         assert scan.min() < 3.0  # inner ellipse radius ~ 1-2 units
 
 
-# ---------------------------------------------------------------------------
-# Pre-processing
-# ---------------------------------------------------------------------------
+# --- Pre-processing ---
 
 class TestPreprocess:
 
@@ -176,9 +165,7 @@ class TestPreprocess:
         np.testing.assert_array_equal(result, raw)
 
 
-# ---------------------------------------------------------------------------
-# Safety bubble
-# ---------------------------------------------------------------------------
+# --- Safety bubble ---
 
 class TestBubble:
 
@@ -201,9 +188,7 @@ class TestBubble:
         np.testing.assert_array_equal(ranges, original)
 
 
-# ---------------------------------------------------------------------------
-# Gap detection
-# ---------------------------------------------------------------------------
+# --- Gap detection ---
 
 class TestMaxGap:
 
@@ -235,9 +220,7 @@ class TestMaxGap:
         assert (start, end) == (3, 4)
 
 
-# ---------------------------------------------------------------------------
-# Best point selection
-# ---------------------------------------------------------------------------
+# --- Best point selection ---
 
 class TestBestPoint:
 
@@ -253,9 +236,7 @@ class TestBestPoint:
         assert idx == 4  # midpoint of [2..6]
 
 
-# ---------------------------------------------------------------------------
-# Throttle scaling
-# ---------------------------------------------------------------------------
+# --- Throttle scaling ---
 
 class TestThrottleScaling:
 
@@ -268,8 +249,8 @@ class TestThrottleScaling:
         inner = np.array([[0.5, 1.5], [1.0, 1.5], [2.0, 1.5]])
         pos = np.array([0.0, 0.0])
         _, throttle = c.step(pos, 0.0, outer, inner)
-        # Throttle should be reduced from the base 0.5
-        assert throttle <= 0.5
+        # Hard steering must reduce throttle well below the 0.5 base
+        assert throttle < 0.45
 
     def test_straight_throttle_near_base(self):
         c = TrackFTGController(
@@ -281,9 +262,7 @@ class TestThrottleScaling:
         assert throttle > 0.0
 
 
-# ---------------------------------------------------------------------------
-# Reset
-# ---------------------------------------------------------------------------
+# --- Reset ---
 
 class TestReset:
 
@@ -301,9 +280,7 @@ class TestReset:
         assert -1.0 <= t <= 1.0
 
 
-# ---------------------------------------------------------------------------
-# Edge cases
-# ---------------------------------------------------------------------------
+# --- Edge cases ---
 
 class TestEdgeCases:
 
@@ -332,7 +309,6 @@ class TestEdgeCases:
         """Vehicle sitting right on a boundary point should not crash."""
         c = TrackFTGController(noise_std=0.0)
         outer, inner = _oval_track()
-        # Place vehicle at the first outer point
         pos = outer[0].copy()
         s, t = c.step(pos, 0.0, outer, inner)
         assert -1.0 <= s <= 1.0

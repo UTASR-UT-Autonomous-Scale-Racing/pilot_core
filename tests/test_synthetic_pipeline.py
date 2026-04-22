@@ -1,25 +1,20 @@
 """
-test_synthetic_pipeline.py — End-to-end tests using synthetic FPV frames,
-generated depth, and synthetic IMU data.
-
-These tests run WITHOUT any hardware (no OAK-D camera, no I2C, no GPU).
-They exercise the full pipeline path:
-    Synthetic Camera → FrameBuffer → VisionWorker (mock) → SegmentationBuffer
+test_synthetic_pipeline.py — The synthetic frame / IMU generators
+(synthetic/) and the pipeline driven by them, with no hardware (no OAK-D,
+no I2C, no GPU). Workers are stepped in-process:
+    Synthetic camera → FrameBuffer → depth-threshold mask → SegmentationBuffer
     Synthetic IMU    → IMUBuffer
-    FrameBuffer → SLAMWorker (stub) → PoseBuffer
-    Mapping → TrackBoundaryBuffer → PID ControlWorker → ControlBuffer
+    FrameBuffer → SLAMWorker (stub, identity poses) → PoseBuffer
+    MappingWorker → TrackBoundaryBuffer → PID ControlWorker → ControlBuffer
 """
 
 from __future__ import annotations
 
 import multiprocessing as mp
-import os
-import time
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 from shared_buffer import (
     ControlBuffer,
@@ -36,9 +31,7 @@ def _uid():
     return uuid.uuid4().hex[:8]
 
 
-# ---------------------------------------------------------------------------
 # --- Synthetic frame generator tests ---
-# ---------------------------------------------------------------------------
 
 class TestSyntheticFrameGenerator:
 
@@ -69,10 +62,8 @@ class TestSyntheticFrameGenerator:
         from synthetic import SyntheticFrameGenerator
         gen = SyntheticFrameGenerator(width=320, height=200)
         frames = [gen.next_fast()[0].copy() for _ in range(5)]
-        # At least some frames should differ (scrolling)
-        all_same = all(np.array_equal(frames[0], f) for f in frames[1:])
-        # Due to speed=2 and time differences, they should vary
-        # But if called fast enough they might match — so just check no crash
+        # Scrolling is time-based, so rapid calls may return identical frames;
+        # only generating several frames without error is checked.
         assert len(frames) == 5
 
     def test_rgb_has_wall_and_floor_regions(self):
@@ -108,9 +99,8 @@ class TestSyntheticIMUGenerator:
         from synthetic import SyntheticIMUGenerator
         gen = SyntheticIMUGenerator()
         vec = gen.next()
-        # qw should be ~1.0
+        # Layout: [qw, qx, qy, qz, ax, ay, az, throttle, steering]
         assert abs(vec[0] - 1.0) < 0.01
-        # qx, qy, qz should be near 0
         assert abs(vec[1]) < 0.1
         assert abs(vec[2]) < 0.1
         assert abs(vec[3]) < 0.1
@@ -123,9 +113,7 @@ class TestSyntheticIMUGenerator:
         assert abs(vec[6] - 9.81) < 1.0
 
 
-# ---------------------------------------------------------------------------
 # --- CameraWorker with synthetic mode ---
-# ---------------------------------------------------------------------------
 
 class TestCameraWorkerSynthetic:
 
@@ -188,9 +176,7 @@ class TestCameraWorkerSynthetic:
             fb.unlink()
 
 
-# ---------------------------------------------------------------------------
 # --- IMUWorker with synthetic mode ---
-# ---------------------------------------------------------------------------
 
 class TestIMUWorkerSynthetic:
 
@@ -219,9 +205,7 @@ class TestIMUWorkerSynthetic:
             ib.unlink()
 
 
-# ---------------------------------------------------------------------------
 # --- Full synthetic pipeline: Camera → SLAM(stub) → Vision(mock) → Control ---
-# ---------------------------------------------------------------------------
 
 class TestFullSyntheticPipeline:
 
@@ -234,7 +218,6 @@ class TestFullSyntheticPipeline:
         fb = FrameBuffer(slots=4, name=fn, create=True)
         pb = PoseBuffer(slots=4, name=pn, create=True)
         try:
-            # Write synthetic frames
             from synthetic import SyntheticFrameGenerator
             gen = SyntheticFrameGenerator(width=640, height=400)
 
@@ -265,7 +248,7 @@ class TestFullSyntheticPipeline:
         gen = SyntheticFrameGenerator(width=640, height=400)
         rgb, depth = gen.next_fast()
 
-        # Simple depth-based segmentation (like the Threshold model does)
+        # Depth-threshold segmentation, like the Threshold vision model
         mask = np.zeros((400, 640), dtype=np.int32)
         mask[depth < 1.0] = 1   # close = road/floor
         mask[depth >= 1.0] = 2  # far = wall
@@ -394,8 +377,8 @@ class TestFullSyntheticPipeline:
             result = cb.read_latest()
             assert result is not None
             _, steer, throttle = result
-            assert -1.0 <= steer <= 1.0
-            assert -1.0 <= throttle <= 1.0
+            assert 0.0 <= steer <= 1.0        # ControlBuffer contract: [0, 1]
+            assert 0.0 <= throttle <= 1.0
 
             cam.teardown()
         finally:
@@ -414,13 +397,9 @@ class TestFullSyntheticPipeline:
         gen = SyntheticFrameGenerator(width=640, height=400, wall_distance=1.5)
         _, depth = gen.next_fast()
 
-        # Extract depth histogram to verify structure
         near = (depth < 1.0).sum()
-        mid = ((depth >= 1.0) & (depth < 5.0)).sum()
         far = (depth >= 5.0).sum()
 
-        # Should have a mix of near/mid/far depths
-        total = depth.size
         assert near > 0, "No near-range pixels (floor should be close)"
         assert far > 0, "No far-range pixels (sky/end should be far)"
 

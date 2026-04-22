@@ -2,7 +2,7 @@
 conftest.py — Shared fixtures for pilot_core test suite.
 
 Provides:
-    - Unique buffer names (avoid shm collisions between parallel tests)
+    - Typed shared-memory buffers with unique names, unlinked on teardown
     - Synthetic camera frames (640×400 RGB + Depth)
     - Synthetic IMU data (9-float vector)
     - Synthetic segmentation masks (ResNet18-style)
@@ -15,25 +15,19 @@ Provides:
 from __future__ import annotations
 
 import multiprocessing as mp
-import os
 import uuid
-from typing import Generator
 
 import numpy as np
 import pytest
 
-#
-# Unique naming helpers — prevent shm collisions across parallel workers / reruns
-#
+# --- Unique shared-memory names (avoid collisions across parallel runs) ---
 
 def _uid() -> str:
     """Short unique suffix for shared-memory names."""
     return uuid.uuid4().hex[:8]
 
 
-#
-# Synthetic data factories
-#
+# --- Synthetic data factories ---
 
 @pytest.fixture()
 def rgb_frame() -> np.ndarray:
@@ -49,7 +43,7 @@ def depth_frame() -> np.ndarray:
 
 @pytest.fixture()
 def imu_vector() -> np.ndarray:
-    """9-float IMU vector: [wx, wy, wz, ax, ay, az, qx, qy, qz]."""
+    """Random 9-float IMU vector in the imu_buf layout: [qw, qx, qy, qz, ax, ay, az, s7, s8]."""
     return np.random.randn(9).astype(np.float32)
 
 
@@ -105,9 +99,7 @@ def track_boundaries() -> tuple[np.ndarray, np.ndarray]:
     return outer, inner
 
 
-#
-# Buffer fixtures (auto-cleanup via finalizer)
-#
+# --- Buffer fixtures (unlinked on teardown) ---
 
 @pytest.fixture()
 def frame_buffer():
@@ -187,9 +179,7 @@ def boundary_buffer():
         pass
 
 
-#
-# Multiprocessing helpers
-#
+# --- Multiprocessing helpers ---
 
 @pytest.fixture()
 def spawn_ctx():

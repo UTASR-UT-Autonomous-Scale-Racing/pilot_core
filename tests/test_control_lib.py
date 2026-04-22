@@ -24,14 +24,14 @@ def oval():
     return TrackModel(outer, inner), centre
 
 
-# --------------------------------------------------------------------- params
+# --- Params ---
 
 def test_vehicle_params_loaded_from_yaml():
     assert P.wheelbase == pytest.approx(0.3302)
     assert P.max_steering_angle == pytest.approx(0.4189)
 
 
-# ---------------------------------------------------------------------- track
+# --- Track ---
 
 class TestTrackModel:
 
@@ -79,7 +79,7 @@ class TestTrackModel:
         np.testing.assert_allclose(track.point_at(track.length + 0.2), track.point_at(0.2), atol=1e-9)
 
 
-# ---------------------------------------------------------------------- speed
+# --- Speed ---
 
 class TestSpeed:
 
@@ -105,7 +105,7 @@ class TestSpeed:
         assert -0.3 <= u < 0.0
 
 
-# ---------------------------------------------------------------- controllers
+# --- Controllers ---
 
 @pytest.mark.parametrize("lateral_cls", [PurePursuit, Stanley])
 class TestLateral:
@@ -139,7 +139,7 @@ def test_build_track_follower_rejects_unknown(oval):
         build_track_follower("nope", oval[0], P)
 
 
-# ------------------------------------------------------------------ estimator
+# --- Estimator ---
 
 class TestEstimator:
 
@@ -170,7 +170,7 @@ class TestEstimator:
         assert ekf.predict_to(0.3).yaw_rate > 0
 
 
-# --------------------------------------------------------------------- safety
+# --- Safety ---
 
 class TestSafety:
 

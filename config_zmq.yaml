@@ -1,84 +1,83 @@
-# config_zmq.yaml — AutoDRIVE simulator profile: sensors, ground-truth pose
-# and control all go over ZMQ via the autodrive_bridge; no hardware.
+# AutoDRIVE simulator. Sensors, ground-truth pose and control all go over ZMQ
+# through autodrive_bridge, no hardware involved.
 #
 #   python start.py --config config_zmq.yaml
 
-# --- ZMQ (simulator bridge) ---
-use_zmq: true                   # replace camera/IMU/I2C with the ZMQ bridge
-zmq_host: "localhost"           # "autodrive_bridge" if the bridge runs in a separate container
-zmq_sensor_port: 5555           # SUB: sensor data from the simulator
-zmq_control_port: 5556          # PUB: control commands to the simulator
-zmq_telemetry_port: 5557        # PUB: telemetry / visualisation data (see zmq_publish)
-use_zmq_pose: true              # use the simulator's ground-truth pose; LIDAR projection builds the point cloud
+# zmq bridge
+use_zmq: true                   # ZMQ bridge instead of camera/IMU/I2C
+zmq_host: "localhost"           # "autodrive_bridge" if it's in its own container
+zmq_sensor_port: 5555           # SUB, sensors from the sim
+zmq_control_port: 5556          # PUB, commands to the sim
+zmq_telemetry_port: 5557        # PUB, telemetry/vis (zmq_publish below)
+use_zmq_pose: true              # sim ground-truth pose; the point cloud then comes from lidar projection
 
-# --- Sensor / Hardware (unused in simulator mode) ---
-i2c_address: null               # no I2C hardware
+# hardware, all unused in the sim
+i2c_address: null
 i2c_bus: null
 use_oakd_imu: false
-synthetic: false                # not needed: frames come from the simulator
+synthetic: false
 
-# --- Pipeline ---
-resolution: [640, 360]          # [width, height] of simulator camera frames (px)
-fps: 30                         # target frame rate (Hz)
-device: "cuda:0"                # torch device for inference ("cpu" if no GPU)
+resolution: [640, 360]          # sim camera, [width, height]
+fps: 30
 
-# Depth camera far clip (m) — must match farClipPlane in the simulator's
-# DepthCamera.cs (15.0).  The simulator sends an 8-bit linear depth image;
-# ZMQSensorWorker converts it to metres as pixel / 255 * depth_max_meters.
+# Depth far clip in metres. Has to match farClipPlane in the sim's
+# DepthCamera.cs (15.0): the sim sends 8-bit linear depth and
+# ZMQSensorWorker turns it into metres as pixel / 255 * depth_max_meters
 depth_max_meters: 15.0
 
-# --- Vision ---
 segmentation_config_path: "pilot_vision/models/deeplab/config.yaml"
+vision:
+  model: pilot_vision           # pilot_vision | onnx | ground_plane (docs/vision.md)
+  onnx_model: track_seg.onnx    # model: onnx — network from scripts/train_vision.py (+ .json sidecar)
 
-# --- Control ---
 control_mode: "pid"             # pure_pursuit | stanley | lqr | mpc | policy | pid | ftg | lidar_pid | depth_ftg | vae | bc
 
-# --- LIDAR (LidarProjectionWorker, used when enable_slam and use_zmq_pose) ---
-# Simulated Hokuyo UST-10LX: 1080 rays, ±135°, 0.06–10 m range,
-# mounted at [x=0.2733, y=0.0, z=0.096] m in the vehicle frame.
+# lidar, for LidarProjectionWorker (enable_slam + use_zmq_pose).
+# The sim models a Hokuyo UST-10LX: 1080 rays over ±135°, 0.06-10 m, mounted
+# at [x=0.2733, y=0.0, z=0.096] m in the vehicle frame
 lidar:
-  range_min: 0.1                # m, discard very close returns (vehicle body)
-  range_max: 9.5                # m, discard max-range (no-return) values
-  voxel_size: 0.10              # m, deduplication cell size
-  move_threshold: 0.05          # m, minimum movement before projecting a new scan
+  range_min: 0.1                # m, closer than this is the car's own body
+  range_max: 9.5                # m, drops the max-range / no-return values
+  voxel_size: 0.10              # m, dedup cell
+  move_threshold: 0.05          # m moved before we project another scan
 
-# --- SLAM ---
-enable_slam: true               # with use_zmq_pose: true, LIDAR projection replaces ORB-SLAM3
-use_saved_map: false            # skip mapping and load boundaries from saved_map_path
-saved_map_path: "rl/boundaries_easy"   # directory containing outer_line.npy / inner_line.npy
+# SLAM
+enable_slam: true               # NB with use_zmq_pose this means lidar projection, not ORB-SLAM3
+use_saved_map: false            # skip mapping, load boundaries from saved_map_path
+saved_map_path: "rl/boundaries_easy"   # dir with outer_line.npy / inner_line.npy
 slam:
   vocabulary: "ORB_SLAM3/Vocabulary/ORBvoc.txt"
-  settings: "simulator_orbslam_settings.yaml"   # ORB-SLAM3 settings for the simulator camera
+  settings: "simulator_orbslam_settings.yaml"
 
-# --- Mapping (BEV boundary extraction) ---
+# mapping
 mapping:
-  boundary_min_points: 50       # wall points required before boundaries are extracted
-  bev_axes: [0, 1]              # simulator world: X, Y horizontal, Z up (ORB-SLAM3 camera frame would be [0, 2])
-  forward_axis: 0               # simulator vehicle frame: X forward (ORB-SLAM3 camera frame would be 2)
-  boundary_save_path: "rl/boundaries_easy"   # where extracted boundaries are saved (null disables saving)
+  boundary_min_points: 50
+  bev_axes: [0, 1]              # sim world is Z-up so X, Y are horizontal. ORB-SLAM3 camera frame would be [0, 2]
+  forward_axis: 0               # X forward in the sim vehicle frame (2 for ORB-SLAM3 camera frame)
+  boundary_save_path: "rl/boundaries_easy"   # null = don't save
 
-# --- PID Control (control_mode: pid, and lidar_pid) ---
+# pid and lidar_pid
 pid:
-  kp_steer: 2.0                 # proportional steering gain
-  ki_steer: 0.0                 # integral steering gain
-  kd_steer: 0.1                 # derivative steering gain
-  target_throttle: 0.05         # base throttle, signed [-1, 1]
-  sector_deg: 60.0              # lidar_pid: half-angle of the forward sector used for wall detection
-  slow_corner_factor: 0.6       # lidar_pid: throttle multiplier at full steer
+  kp_steer: 2.0
+  ki_steer: 0.0
+  kd_steer: 0.1
+  target_throttle: 0.05         # signed [-1, 1]
+  sector_deg: 60.0              # lidar_pid only: half-angle of the forward sector it looks for walls in
+  slow_corner_factor: 0.6       # lidar_pid only: throttle multiplier at full steer
 
-# --- Boundary Follow-the-Gap (control_mode: ftg) ---
+# ftg: follow-the-gap on a virtual scan cast against the mapped boundaries
 ftg:
-  num_beams: 360                # rays in the virtual scan cast against the boundaries
-  fov_deg: 270.0                # total field of view, centred on the heading
+  num_beams: 360
+  fov_deg: 270.0                # total, centred on heading
   max_range: 5.0                # m
-  bubble_radius_deg: 30.0       # half-width of the safety bubble around the nearest obstacle
-  smooth_window: 5              # moving-average window over the ranges
-  target_throttle: 0.05         # base throttle, signed [-1, 1]
+  bubble_radius_deg: 30.0       # half-width of the bubble around the nearest obstacle
+  smooth_window: 5              # moving average over the ranges
+  target_throttle: 0.05
   throttle_corner_scale: 0.5    # throttle = base * (1 - scale * |steering|)
-  noise_std: 0.05               # std of Gaussian noise added to steering
+  noise_std: 0.05               # steering noise
   gap_strategy: "deepest"       # "deepest" or "centroid"
 
-# --- Shared Buffers (ring-buffer slots per stream) ---
+# buffer slots
 buffers:
   frame:
     slots: 8
@@ -97,22 +96,21 @@ buffers:
   lidar:
     slots: 16
 
-# --- ZMQ Telemetry (published on zmq_telemetry_port) ---
+# telemetry back to the sim, on zmq_telemetry_port
 zmq_publish:
-  enabled: true                 # publish telemetry back to the simulator
-  control: true                 # control commands
+  enabled: true
+  control: true
   pose: true                    # trajectory
-  segmentation: true            # segmentation masks
-  boundary: true                # track boundaries (only when mapping runs)
-  pointcloud: true              # point cloud (only when mapping runs)
+  segmentation: true
+  boundary: true                # only if mapping is running
+  pointcloud: true              # same
 
-# --- Recording ---
-recording: false                # record buffers to disk (also: start.py --recording)
+# recording
+recording: false                # also start.py --recording
 recording_path: "/tmp/pilot_recordings"
 recording_config:
-  sample_k: 1                   # save every k-th sample (1 = all)
-  top_n: 1000                   # max records per buffer (0 = unlimited)
+  sample_k: 1                   # every k-th sample
+  top_n: 1000                   # per buffer, 0 = unlimited
 
-# --- Web Telemetry (optional HTTP publisher) ---
 web_publish:
   enabled: false

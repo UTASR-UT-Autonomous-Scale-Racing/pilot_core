@@ -1,144 +1,143 @@
-# config.yaml — On-car profile (Jetson): OAK-D camera, CUDA inference,
-# Arduino actuator over I2C, ORB-SLAM3 mapping.
+# On-car config (Jetson): OAK-D, CUDA inference, Arduino actuator over I2C,
+# ORB-SLAM3 mapping.
 #
 #   python start.py                      # uses this file by default
 #   scripts/run.sh / scripts/start.sh    # native / Docker launch on the Jetson
 
-# --- Pipeline ---
-fps: 30                       # camera frame rate (Hz)
-resolution: [640, 400]        # [width, height] of camera frames (px)
+fps: 30                       # camera, Hz
+resolution: [640, 400]        # [width, height] px
 
-# --- Sensor / Hardware ---
-use_oakd_imu: false           # true: stream the OAK-D IMU via the camera worker; false: Arduino IMU over I2C
-i2c_address: 0x08             # Arduino I2C address (null → actuator/IMU run in dummy mode)
+# hardware
+use_oakd_imu: false           # true = OAK-D IMU through the camera worker, false = Arduino IMU over I2C
+i2c_address: 0x08             # Arduino address. null -> actuator/IMU run as dummies
 i2c_bus: 1                    # /dev/i2c-<bus>
 
-# --- Vision ---
+# vision
 segmentation_config_path: pilot_vision/models/default/config.yaml
-use_tensorrt: false           # true on the Jetson to load TensorRT engines
+vision:
+  model: pilot_vision           # pilot_vision | onnx | ground_plane (docs/vision.md)
+  onnx_model: track_seg.onnx    # model: onnx — network from scripts/train_vision.py (+ .json sidecar)
 
-# --- Control ---
 control_mode: "pure_pursuit"  # pure_pursuit | stanley | lqr | mpc | policy | depth_ftg | vae | bc | pid | ftg
 
-# --- PID Control (control_mode: pid) ---
+# control_mode: pid
 pid:
-  kp_steer: 1.0               # proportional steering gain
-  ki_steer: 0.0               # integral steering gain
-  kd_steer: 0.1               # derivative steering gain
+  kp_steer: 1.0
+  ki_steer: 0.0
+  kd_steer: 0.1
   target_throttle: 0.3        # base throttle, signed [-1, 1]
-  noise_std: 0.05             # std of Gaussian noise added to steering
+  noise_std: 0.05             # gaussian noise on steering (std)
 
-# --- PWM (servo / ESC pulse widths, µs) ---
-# Below neutral = left / backward, above neutral = right / forward.
+# servo / ESC pulse widths in us. Below neutral is left / backward,
+# above is right / forward
 pwm:
   steer_min: 1105             # full left
   steer_max: 1825             # full right
   steer_neutral: 1461         # straight
   throttle_min: 1199          # full backward
   throttle_max: 1595          # full forward
-  throttle_neutral: 1397      # neutral (coast)
+  throttle_neutral: 1397      # coast
 
-# --- Track following (control_mode: pure_pursuit | stanley | lqr | mpc | policy) ---
-vehicle_params: vehicle_params.yaml   # physical vehicle parameters (relative to repo root)
+# track following: pure_pursuit, stanley, lqr, mpc, policy
+vehicle_params: vehicle_params.yaml   # relative to repo root
 track_control:
   spacing: 0.05                 # m, centre-line sample spacing
   pure_pursuit:
     lookahead_min: 0.6          # m
     lookahead_max: 2.0          # m
-    k_v: 0.5                    # s, look-ahead growth with speed
+    k_v: 0.5                    # s, lookahead grows with speed
   stanley:
     k: 1.0                      # cross-track error gain
-    k_soft: 1.0                 # m/s, softening speed (avoids division by ~0 at low speed)
+    k_soft: 1.0                 # m/s, keeps the division sane near zero speed
   lqr:
-    q_lateral: 4.0              # weight on lateral error²
-    q_heading: 1.0              # weight on heading error²
-    r_steer: 2.0                # weight on steering (beyond curvature feed-forward)²
+    q_lateral: 4.0              # lateral error^2
+    q_heading: 1.0              # heading error^2
+    r_steer: 2.0                # steering beyond the curvature feed-forward, squared
   mpc:
     horizon: 20                 # steps
-    dt: 0.05                    # s per step (1 s horizon)
-    q_lateral: 10.0             # weight on lateral error²
-    q_heading: 2.0              # weight on heading error²
-    r_steer: 1.0                # weight on steering²
-    r_rate: 20.0                # weight on steering rate² (smoothness)
-    delay: 0.05                 # s, actuation delay compensated
+    dt: 0.05                    # s, so a 1 s horizon
+    q_lateral: 10.0             # weights are on squared terms
+    q_heading: 2.0
+    r_steer: 1.0
+    r_rate: 20.0                # steering rate, for smoothness
+    delay: 0.05                 # s of actuation delay to compensate
   policy:
-    model: policy.onnx          # from rl/export_onnx.py (+ policy.json sidecar)
-  fallback: null                # "depth_ftg": drive map-free while the state estimate is stale
-  fallback_after: 0.3           # s without a fresh state before the fallback engages
+    model: policy.onnx          # rl/export_onnx.py output, wants policy.json next to it
+  fallback: null                # set to "depth_ftg" to keep driving map-free while the state is stale
+  fallback_after: 0.3           # s of stale state before it kicks in
   speed:
-    v_max: 1.3                  # m/s — keep below safety.speed_cap
-    lat_accel_fraction: 0.6     # fraction of friction_coeff * g allowed in corners
-    accel: 1.5                  # m/s²
-    decel: 1.0                  # m/s² (coasting + limited backward input)
+    v_max: 1.3                  # m/s, keep under safety.speed_cap
+    lat_accel_fraction: 0.6     # of friction_coeff * g, in corners
+    accel: 1.5                  # m/s^2
+    decel: 1.0                  # m/s^2, coasting plus a bit of reverse
     longitudinal:
-      speed_per_throttle: 3.0   # m/s per unit throttle — CALIBRATE on the car
-      kp: 0.25                  # speed PI proportional gain
-      ki: 0.15                  # speed PI integral gain
-      max_backward: 0.3         # most backward input used to slow down
-      min_speed_for_backward: 0.3   # m/s, below this no backward input is used
+      speed_per_throttle: 3.0   # m/s per unit throttle. TODO calibrate on the car
+      kp: 0.25                  # speed PI
+      ki: 0.15
+      max_backward: 0.3         # max reverse input used for braking
+      min_speed_for_backward: 0.3   # m/s, no reverse braking below this
 
-# --- Map-free depth Follow-the-Gap (control_mode: depth_ftg, or track fallback) ---
+# depth follow-the-gap, map-free (control_mode: depth_ftg, or as the track fallback)
 depth_ftg:
-  camera_height: 0.12           # m above ground — MEASURE on the car
-  min_obstacle_height: 0.04     # m, below = floor
-  max_obstacle_height: 0.50     # m, above = ignored
+  camera_height: 0.12           # m above ground, needs measuring on the car
+  min_obstacle_height: 0.04     # m, anything lower is floor
+  max_obstacle_height: 0.50     # m, anything higher is ignored
   max_range: 4.0                # m
   bubble_radius: 0.25           # m around the nearest obstacle
   aim_distance: 0.7             # m
   cruise_speed: 0.6             # m/s
-  stop_distance: 0.35           # m — obstacle this close ahead → neutral
+  stop_distance: 0.35           # m, obstacle this close ahead -> neutral
 
-# --- VAE control model (control_mode: vae, map-free) ---
+# control_mode: vae (map-free)
 vae:
-  model: vae_policy.onnx        # from scripts/train_vae_policy.py (+ .json sidecar)
+  model: vae_policy.onnx        # scripts/train_vae_policy.py, needs the .json too
   cruise_speed: 0.8             # m/s
   steer_slowdown: 0.5           # speed *= 1 - steer_slowdown * |steering|
 
-# --- Behaviour-cloning control model (control_mode: bc, map-free) ---
+# behaviour cloning, control_mode: bc, also map-free
 bc:
-  model: bc_policy.onnx         # from scripts/train_bc_policy.py (+ .json sidecar)
+  model: bc_policy.onnx         # from scripts/train_bc_policy.py
   cruise_speed: 0.8             # m/s
   steer_slowdown: 0.5           # speed *= 1 - steer_slowdown * |steering|
 
-# --- State estimator (pose EKF) ---
+# pose EKF
 estimator:
-  pos_std: 0.03                 # m, pose position measurement noise
-  yaw_std: 0.03                 # rad, pose heading measurement noise
-  stale_after: 0.5              # s without a pose → stop driving
+  pos_std: 0.03                 # m, measurement noise
+  yaw_std: 0.03                 # rad
+  stale_after: 0.5              # s without a pose and we stop driving
 
-# --- Safety supervisor (ActuatorWorker) ---
+# safety supervisor, runs in ActuatorWorker
 safety:
-  command_timeout: 0.150        # s — no fresh command → throttle neutral
-  speed_cap: 1.5                # m/s — forward throttle tapers to 0 approaching this
-  cap_margin: 0.2               # m/s taper band below the cap
-  # Forward throttle is also bounded by speed_cap / speed_per_throttle
-  # (track_control.speed.longitudinal.speed_per_throttle) — calibrate it.
-  max_throttle_no_speed: 0.4    # forward cap when there is no speed estimate
-  steering_rate: 7.6            # units/s (signed range [-1, 1])
+  command_timeout: 0.150        # s, no fresh command -> neutral throttle
+  speed_cap: 1.5                # m/s, forward throttle tapers to 0 as we approach it
+  cap_margin: 0.2               # m/s, width of that taper
+  # NB forward throttle is also capped at speed_cap / speed_per_throttle
+  # (track_control.speed.longitudinal), so calibrate that one
+  max_throttle_no_speed: 0.4    # forward cap with no speed estimate
+  steering_rate: 7.6            # units/s, on the signed [-1, 1] range
   throttle_rate: 4.0            # units/s
 
-# --- SLAM ---
-enable_slam: true               # run ORB-SLAM3 + mapping (also: start.py --enable-slam)
+# SLAM
+enable_slam: true               # ORB-SLAM3 + mapping, same as start.py --enable-slam
 slam:
   vocabulary: ORB_SLAM3/Vocabulary/ORBvoc.txt
-  settings: orbslam_oakd_rgbd.yaml    # regenerate: scripts/gen_orbslam_settings.py
+  settings: orbslam_oakd_rgbd.yaml    # regenerate with scripts/gen_orbslam_settings.py
 
-# --- Mapping (BEV boundary extraction) ---
+# mapping / BEV boundaries
 mapping:
-  boundary_min_points: 50       # wall points required before boundaries are extracted
+  boundary_min_points: 50       # wall points needed before we try extracting boundaries
 
-# --- Recording ---
-recording: false                # record buffers to disk (also: start.py --recording)
+recording: false                # dump buffers to disk (or start.py --recording)
 recording_path: /tmp/pilot_recordings
 recording_config:
-  sample_k: 1                   # global: save every k-th sample (1 = all)
-  top_n: 0                      # global: max records per buffer (0 = unlimited)
-  # Per-buffer overrides (inherit the global values if omitted):
+  sample_k: 1                   # keep every k-th sample, 1 = all
+  top_n: 0                      # max records per buffer, 0 = no limit
+  # per-buffer overrides, anything missing falls back to the values above
   frame:
-    sample_k: 2                 # frames are large — save every 2nd
+    sample_k: 2                 # frames are big
     top_n: 5000
   imu:
-    sample_k: 1                 # IMU is tiny — save everything
+    sample_k: 1                 # imu is tiny, keep it all
     top_n: 0
   segmentation:
     sample_k: 2
@@ -150,22 +149,22 @@ recording_config:
     sample_k: 1
     top_n: 0
   pointcloud:
-    sample_k: 5                 # point clouds are heavy
+    sample_k: 5
     top_n: 2000
   boundary:
     sample_k: 10
     top_n: 500
 
-# --- Web Telemetry (optional HTTP publisher) ---
+# web telemetry (HTTP POST), off by default
 web_publish:
   enabled: false
   endpoint: "http://localhost:8080/api/telemetry"
   interval: 1.0                 # s between POSTs
-  timeout: 2.0                  # s, HTTP timeout per request
+  timeout: 2.0                  # s per request
   vehicle_id: "pilot_1"
-  max_trajectory_pts: 500       # cap on trajectory points per payload
+  max_trajectory_pts: 500       # per payload
 
-# --- Shared Buffers (ring-buffer slots per stream) ---
+# ring buffer slot counts
 buffers:
   frame:
     slots: 8
@@ -182,5 +181,3 @@ buffers:
   boundary:
     slots: 2
 
-# --- Deployment ---
-device: "cuda:0"                # torch device for inference

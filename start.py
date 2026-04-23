@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """
-start.py — Central orchestrator for the pilot_core autonomous racecar pipeline.
-
-Responsibilities:
-    1. Parse config.yaml + CLI arguments
-    2. Create shared-memory ring buffers in the parent process
-    3. Spawn each worker as a multiprocessing.Process with kwargs
-    4. Monitor worker health (restart on crash)
-    5. Handle SIGINT / SIGTERM for graceful shutdown
+Entry point for the pilot_core pipeline. Reads config.yaml plus CLI flags,
+creates the shared-memory ring buffers in this (parent) process, spawns one
+multiprocessing.Process per worker, restarts workers that crash, and cleans
+up on SIGINT / SIGTERM.
 
 Usage:
     python start.py                            # uses config.yaml defaults
@@ -32,7 +28,6 @@ from typing import Any, Dict, List
 import numpy as np
 import yaml
 
-# --- Shared buffers ---
 from shared_buffer import (
     ControlBuffer,
     FrameBuffer,
@@ -45,7 +40,6 @@ from shared_buffer import (
     TrackBoundaryBuffer,
 )
 
-# --- Workers ---
 from workers import (
     ActuatorWorker,
     BaseWorker,
@@ -64,10 +58,7 @@ from workers import (
 )
 from workers.control_worker import TRACK_MODES
 
-# --- Config helpers ---
-
 def load_config(path: str) -> Dict[str, Any]:
-    """Load YAML config file and return as a dict."""
     with open(path, "r") as f:
         return yaml.safe_load(f) or {}
 
@@ -104,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# --- Global state for signal handling ---
+# module-level so the signal handler can reach them
 
 _workers: List[BaseWorker] = []
 _processes: List[mp.Process] = []
@@ -124,7 +115,7 @@ def _release_buffers() -> None:
 
 
 def _shutdown(signum=None, frame=None) -> None:
-    """Gracefully stop all workers and clean up shared memory."""
+    """Stop all workers and unlink the shared memory."""
     global _shutting_down
     if _shutting_down:
         return
@@ -132,7 +123,7 @@ def _shutdown(signum=None, frame=None) -> None:
 
     logging.info("Shutdown signal received — stopping workers …")
 
-    # Disarm first so the actuator outputs neutral while everything stops
+    # disarm first so the actuator goes neutral while everything else winds down
     if _armed_event is not None:
         _armed_event.clear()
     if _keyboard is not None:
@@ -154,14 +145,12 @@ def _shutdown(signum=None, frame=None) -> None:
     sys.exit(0)
 
 
-# --- Operator keyboard ---
-
 class KeyboardControl:
-    """Non-blocking single-key input from the terminal.
+    """Non-blocking single-key terminal input for the operator.
 
-    On a TTY the terminal is put in cbreak mode so keys act immediately
-    (restored by :meth:`close`).  Otherwise (piped stdin) each line is one
-    command.  End-of-input is ignored — the car simply stays as it is.
+    On a TTY we switch to cbreak so keys act without Enter; close() puts the
+    terminal back. With piped stdin each line counts as one key. EOF is
+    ignored and the car just stays in whatever state it's in.
     """
 
     def __init__(self) -> None:
@@ -208,13 +197,11 @@ class KeyboardControl:
             self._fd = None
 
 
-# --- Main ---
-
 def main() -> None:
     args = parse_args()
 
-    # Ensure all mp primitives (Event, Value, Process) use the spawn context
-    # so that semaphores/locks are properly shared with spawned child processes.
+    # spawn everywhere, so Event/Value/Process all share one context and the
+    # semaphores/locks actually get shared with the children
     mp.set_start_method("spawn", force=True)
 
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -228,14 +215,13 @@ def main() -> None:
     config = load_config(args.config)
     logger.info(f"Loaded config from {args.config}")
 
-    # Every worker is its own process; letting each one spin up a full
-    # BLAS/OpenMP thread pool oversubscribes small CPUs badly.  Children
-    # inherit this environment when spawned.
+    # Every worker is its own process. If each one spins up a full BLAS/OpenMP
+    # thread pool, small CPUs get badly oversubscribed. Children inherit this env.
     threads = str(config.get("threads_per_worker", 1))
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
         os.environ.setdefault(var, threads)
 
-    # CLI flags override config values
+    # CLI flags win over the config
     if args.recording:
         config["recording"] = True
     if args.enable_slam:
@@ -250,11 +236,11 @@ def main() -> None:
     use_zmq = config.get("use_zmq", False)
     use_zmq_pose = config.get("use_zmq_pose", False)
 
-    # --- 1. Create shared buffers ---
+    # shared buffers
     buf_cfg = config.get("buffers", {})
     resolution = config.get("resolution", [640, 400])
 
-    # Frame buffer payload: meta(16) + W*H*3 RGB uint8 + W*H depth float32 (metres)
+    # frame payload = meta(16) + W*H*3 RGB uint8 + W*H float32 depth in metres
     width, height = resolution
     _frame_max_payload = 16 + width * height * 3 + width * height * 4
     frame_buf = FrameBuffer(
@@ -290,7 +276,6 @@ def main() -> None:
     global _buffers
     _buffers = [frame_buf, imu_buf, seg_buf, pose_buf, ctrl_buf]
 
-    # SLAM-specific buffers
     pc_buf = None
     boundary_buf = None
     lidar_buf = None
@@ -319,7 +304,7 @@ def main() -> None:
         )
         _buffers.append(lidar_buf)
 
-    # Vehicle state estimate — whenever there is a pose source
+    # state estimate only makes sense if something is producing poses
     has_pose_source = enable_slam or use_zmq_pose
     state_buf = None
     if has_pose_source:
@@ -332,12 +317,11 @@ def main() -> None:
 
     logger.info("Shared buffers created")
 
-    # --- 2. Create multiprocessing events for pipeline coordination ---
     loop_event = mp.Event() if enable_slam else None
     mapping_done_event = mp.Event() if (enable_slam or use_saved_map) else None
     localize_event = mp.Event() if enable_slam else None
 
-    # Load pre-saved map boundaries and write into boundary_buf immediately
+    # saved map: push the boundaries into boundary_buf right away
     if use_saved_map and boundary_buf is not None:
         outer_path = os.path.join(saved_map_path, "outer_line.npy")
         inner_path = os.path.join(saved_map_path, "inner_line.npy")
@@ -351,13 +335,12 @@ def main() -> None:
         else:
             logger.warning(f"use_saved_map=true but no .npy files found at {saved_map_path}")
 
-    # --- 3. Resolve config values ---
     seg_config_path = config.get(
         "segmentation_config_path", "pilot_vision/models/default/config.yaml"
     )
     resolution = config.get("resolution", [640, 400])
     fps = config.get("fps", 30)
-    device = config.get("device", "cuda:0")
+    vision_cfg = config.get("vision", {})
     use_oakd_imu = config.get("use_oakd_imu", False)
     i2c_address = config.get("i2c_address")
     i2c_bus = config.get("i2c_bus")
@@ -369,9 +352,9 @@ def main() -> None:
     if isinstance(i2c_address, str):
         i2c_address = int(i2c_address, 0)
 
-    # --- 4. Define workers ---
+    # workers
 
-    # One drivetrain calibration shared by every speed-producing component
+    # one drivetrain calibration, shared by everything that produces a speed
     speed_per_throttle = (
         config.get("track_control", {}).get("speed", {}).get("longitudinal", {}).get("speed_per_throttle", 3.0)
     )
@@ -393,9 +376,9 @@ def main() -> None:
     global _workers
     _workers = []
 
-    # Sensor input workers
+    # sensors
     if use_zmq:
-        # Simulator mode: one ZMQ subscriber replaces the hardware sensors
+        # sim: a single ZMQ subscriber stands in for all the hardware sensors
         _workers.append(
             ZMQSensorWorker(
                 name="zmq_sensor",
@@ -410,9 +393,9 @@ def main() -> None:
         )
         logger.info(f"ZMQ sensor mode enabled (host={zmq_host}, port={zmq_sensor_port})")
     else:
-        # Hardware mode.  The OAK-D can only be opened by one process, so its
-        # IMU is streamed by the camera worker; otherwise a dedicated IMU
-        # worker reads I2C / synthetic data.
+        # Hardware. Only one process can open the OAK-D, so if we're using its
+        # IMU the camera worker streams it. Otherwise a separate IMU worker
+        # reads I2C (or synthetic data).
         oakd_imu_via_camera = use_oakd_imu and not use_synthetic
         _workers.append(
             CameraWorker(
@@ -435,7 +418,7 @@ def main() -> None:
                 )
             )
 
-    # Vision worker — skip when using LIDAR mapping (no segmentation needed)
+    # no segmentation needed for LIDAR mapping, so skip vision there
     lidar_mapping_mode = use_zmq and use_zmq_pose and enable_slam
     if not lidar_mapping_mode:
         _workers.append(
@@ -444,14 +427,17 @@ def main() -> None:
                 input_buffer=frame_buf,
                 output_buffer=seg_buf,
                 model_config=seg_config_path,
-                device=device,
-                use_tensorrt=config.get("use_tensorrt", False),
+                mode=vision_cfg.get("model", "pilot_vision"),
+                onnx_model=vision_cfg.get("onnx_model", "track_seg.onnx"),
+                threshold=vision_cfg.get("threshold"),
+                camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
+                ground_plane=vision_cfg.get("ground_plane", {}),
             )
         )
 
-    # Control worker.  Pose-based modes (pid, ftg, TRACK_MODES) need a pose
-    # source (SLAM or simulator ground truth); depth_ftg / vae / bc run from
-    # frame_buf alone; lidar_pid reads the simulator LIDAR scan.
+    # Control. The pose-based modes (pid, ftg, TRACK_MODES) need a pose source,
+    # i.e. SLAM or sim ground truth. depth_ftg / vae / bc only need frame_buf,
+    # and lidar_pid reads the sim LIDAR scan.
     if control_mode == "lidar_pid":
         _workers.append(
             ControlWorker(
@@ -543,13 +529,13 @@ def main() -> None:
             )
         )
 
-    # Safety supervisor config.  The steady-state throttle bound uses the same
-    # drivetrain gain as the speed controller unless set explicitly.
+    # Safety supervisor. Unless it's set explicitly, the steady-state throttle
+    # bound uses the same drivetrain gain as the speed controller.
     safety_cfg = dict(config.get("safety", {}))
     safety_cfg.setdefault("speed_per_throttle", speed_per_throttle)
 
-    # Actuator worker (hardware I2C and/or ZMQ control publisher).
-    # Outputs stay neutral until the operator arms from the terminal.
+    # actuator: I2C to the hardware and/or ZMQ control out to the sim.
+    # Stays neutral until the operator arms from the terminal
     global _armed_event
     _armed_event = mp.Event()
     _workers.append(
@@ -567,9 +553,9 @@ def main() -> None:
         )
     )
 
-    # SLAM + Mapping workers
+    # SLAM + mapping
     if enable_slam and use_zmq_pose:
-        # Ground-truth pose mode: project 2D LIDAR scan to world-frame 3D points
+        # ground-truth pose mode: 2D LIDAR scan -> world-frame 3D points
         lidar_cfg = config.get("lidar", {})
         _workers.append(
             LidarProjectionWorker(
@@ -620,16 +606,15 @@ def main() -> None:
             )
         )
 
-    # Optional per-buffer recorder workers
     if config.get("recording", False):
         rec_cfg = config.get("recording_config", {})
         rec_dir = config.get("recording_path", "/tmp/pilot_recordings")
         rec_sample_k = rec_cfg.get("sample_k", 1)
         rec_top_n = rec_cfg.get("top_n", 0)
 
-        # One BufferRecorderWorker per active buffer.  Each records every
-        # k-th sequence number, capped at top_n records (0 = unlimited).
-        # Per-buffer overrides: recording_config.<buffer_name>.{sample_k, top_n}.
+        # One recorder per active buffer. Each keeps every k-th sequence
+        # number, up to top_n records (0 = no limit). Override per buffer with
+        # recording_config.<buffer_name>.{sample_k, top_n}
         rec_buffers: Dict[str, Any] = {
             "frame": frame_buf,
             "imu": imu_buf,
@@ -657,7 +642,7 @@ def main() -> None:
                 )
             )
 
-    # Optional web telemetry publisher
+    # web telemetry (optional)
     web_cfg = config.get("web_publish", {})
     if web_cfg.get("enabled", False):
         _workers.append(
@@ -676,7 +661,7 @@ def main() -> None:
         )
         logger.info("Web publish worker enabled → %s", web_cfg.get("endpoint"))
 
-    # Optional ZMQ telemetry publisher (simulator visualisation)
+    # ZMQ telemetry for the sim visualiser
     zmq_publish_cfg = config.get("zmq_publish", {})
     if use_zmq and zmq_publish_cfg.get("enabled", False):
         _workers.append(
@@ -693,11 +678,10 @@ def main() -> None:
         )
         logger.info(f"ZMQ telemetry publisher enabled on port {zmq_telemetry_port}")
 
-    # --- 5. Register signal handlers ---
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # --- 6. Spawn worker processes ---
+    # spawn
     _restart_counts: Dict[str, int] = {w.name: 0 for w in _workers}
     for w in _workers:
         p = mp.Process(target=w.run, name=w.name, daemon=False)
@@ -707,7 +691,7 @@ def main() -> None:
 
     logger.info(f"All {len(_workers)} workers running.")
 
-    # --- 7. Operator keys + monitor loop ---
+    # operator keys + health monitor
     global _keyboard
     _keyboard = KeyboardControl()
     logger.info("=" * 60)
@@ -731,12 +715,12 @@ def main() -> None:
                     logger.info("Quit requested")
                     _shutdown()
                 else:
-                    # Any other key (SPACE by convention) disarms immediately
+                    # anything else disarms (SPACE is the documented one)
                     if _armed_event.is_set():
                         logger.warning("DISARMED by operator")
                     _armed_event.clear()
 
-            # Mapping finished → switch SLAM to localization-only mode
+            # mapping done, switch SLAM over to localization only
             if (
                 enable_slam
                 and mapping_done_event is not None

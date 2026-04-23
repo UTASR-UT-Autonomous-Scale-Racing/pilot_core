@@ -1,53 +1,49 @@
-# config_dev_local.yaml — No-hardware profile: synthetic frames/depth/IMU,
-# CPU inference, no actuator output.  Used by the dev-local container
-# (Dockerfile.dev-local / .devcontainer/dev-local).
+# No hardware at all: synthetic frames/depth/IMU, CPU inference, dummy
+# actuator. This is what the dev-local container runs
+# (Dockerfile.dev-local, .devcontainer/dev-local).
 #
 #   python start.py --config config_dev_local.yaml
 
-# --- Pipeline ---
-fps: 10                       # synthetic frame rate (Hz)
-resolution: [640, 400]        # [width, height] of frames (px)
+fps: 10                       # Hz
+resolution: [640, 400]
 
-# --- Sensor / Hardware ---
-synthetic: true               # synthetic frames/depth/IMU instead of the OAK-D
+# sensors
+synthetic: true               # instead of the OAK-D
 use_oakd_imu: false
-i2c_address: null             # null → actuator/IMU run in dummy mode (no writes)
+i2c_address: null             # dummy actuator/IMU
 i2c_bus: null
 
-# --- Vision ---
 segmentation_config_path: pilot_vision/models/default/config.yaml
-use_tensorrt: false
+vision:
+  model: pilot_vision           # pilot_vision | onnx | ground_plane (docs/vision.md)
+  onnx_model: track_seg.onnx    # model: onnx — network from scripts/train_vision.py (+ .json sidecar)
 
-# --- Control ---
-control_mode: "depth_ftg"     # map-free on synthetic depth
+control_mode: "depth_ftg"     # map-free, works off the synthetic depth
 
-# --- PID Control (control_mode: pid) ---
+# only used with control_mode: pid
 pid:
-  kp_steer: 1.0               # proportional steering gain
-  ki_steer: 0.0               # integral steering gain
-  kd_steer: 0.1               # derivative steering gain
-  target_throttle: 0.3        # base throttle, signed [-1, 1]
-  noise_std: 0.0              # std of Gaussian noise added to steering
+  kp_steer: 1.0
+  ki_steer: 0.0
+  kd_steer: 0.1
+  target_throttle: 0.3        # signed [-1, 1]
+  noise_std: 0.0
 
-# --- SLAM ---
-enable_slam: false              # run ORB-SLAM3 + mapping (also: start.py --enable-slam)
+# slam
+enable_slam: false              # or --enable-slam
 slam:
   vocabulary: ORB_SLAM3/Vocabulary/ORBvoc.txt
-  settings: synthetic_slam_settings.yaml   # intrinsics of the synthetic camera
+  settings: synthetic_slam_settings.yaml   # synthetic camera intrinsics
 
-# --- Mapping (BEV boundary extraction) ---
 mapping:
-  boundary_min_points: 10       # wall points required before boundaries are extracted
+  boundary_min_points: 10       # wall points needed before extracting (50 on the car)
 
-# --- Recording ---
-recording: false                # record buffers to disk (also: start.py --recording)
+recording: false
 recording_path: /tmp/pilot_recordings
 
-# --- Web Telemetry (optional HTTP publisher) ---
 web_publish:
   enabled: false
 
-# --- Shared Buffers (ring-buffer slots per stream) ---
+# smaller buffers than the on-car config
 buffers:
   frame:
     slots: 4
@@ -64,5 +60,3 @@ buffers:
   boundary:
     slots: 2
 
-# --- Deployment ---
-device: "cpu"                   # torch device for inference

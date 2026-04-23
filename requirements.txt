@@ -10,7 +10,7 @@ depthai>=3.0        # OAK-D camera + IMU (v3 API)
 smbus2              # Arduino I2C link (Jetson)
 pyzmq               # AutoDRIVE simulator bridge
 osqp                # QP solver for control_mode: mpc
-onnxruntime         # control_mode: policy / vae / bc (CPU inference)
+onnxruntime         # control_mode: policy / vae / bc, vision.model: onnx (CPU inference)
 
 # Tests
 pytest
@@ -21,4 +21,5 @@ pybind11
 
 # Not installed by default (dev machine only), install manually when needed:
 #   RL training / policy export (rl/):        pip install "stable-baselines3[extra]" gymnasium onnx torch
-#   BC / VAE training (scripts/train_*.py):   pip install torch
+#   BC / VAE training (scripts/train_*_policy.py):  pip install torch onnx
+#   Vision training (scripts/train_vision.py, vision_bench.py):  pip install torch torchvision onnx

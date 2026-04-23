@@ -1,10 +1,16 @@
 """
-VisionWorker — reads frames from FrameBuffer, runs segmentation model
-inference, and writes masks into SegmentationBuffer.
+FrameBuffer -> drivable-track segmentation -> SegmentationBuffer.
 
-The model class (from ``pilot_vision``) is loaded from a YAML config via
-:func:`utils.load_model_from_config` and must provide
-``get_mask(depth, rgb) -> mask | None``.
+Output contract: a uint8 mask at frame resolution, 1 = drivable track and
+0 = everything else (walls, off-track floor, background).
+
+Segmenter (``vision.model`` in the config):
+
+* ``pilot_vision`` (default): a model from the pilot_vision submodule, loaded
+  from ``segmentation_config_path`` by utils.load_model_from_config
+  (``get_mask(depth, rgb)``); its output is converted to the mask contract.
+* ``onnx``: a network trained with scripts/train_vision.py (``vision.onnx_model``).
+* ``ground_plane``: training-free RANSAC floor + free space from depth.
 """
 
 from __future__ import annotations
@@ -15,45 +21,58 @@ from typing import Any
 from .base_worker import BaseWorker
 from shared_buffer import FrameBuffer, SegmentationBuffer
 
+MODES = ("pilot_vision", "onnx", "ground_plane")
+
 
 class VisionWorker(BaseWorker):
-    """Worker process for segmentation inference.
+    """Segmentation inference worker.
 
-    Config kwargs
-    -------------
-    input_buffer : FrameBuffer
-        Shared FrameBuffer to read RGB+Depth from.
-    output_buffer : SegmentationBuffer
-        Shared SegmentationBuffer to write masks into.
-    model_config : str
-        Path to the segmentation model YAML config file.
-    device : str
-        Device string (e.g. ``"cuda:0"``); currently only logged — the model
-        config decides where inference runs.
-    use_tensorrt : bool
-        Currently unused (default False).
+    Config kwargs:
+      input_buffer     FrameBuffer (RGB + depth in metres)
+      output_buffer    SegmentationBuffer
+      mode             one of MODES (default ``pilot_vision``)
+      model_config     pilot_vision model YAML (mode ``pilot_vision``)
+      onnx_model       exported network (mode ``onnx``)
+      threshold        track-probability threshold override (mode ``onnx``)
+      camera_settings  ORB-SLAM3 settings file with the intrinsics (mode ``ground_plane``)
+      ground_plane     vision.segmenters.GroundPlaneConfig overrides
     """
 
     def __init__(self, name: str = "vision", **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
         self._frame_buf: FrameBuffer | None = None
         self._seg_buf: SegmentationBuffer | None = None
-        self._model = None
+        self._segmenter = None
+        self._legacy = False
         self._last_seq = 0
         self._waiting_logged = False
 
     def setup(self) -> None:
         self._frame_buf = self.config["input_buffer"]
         self._seg_buf = self.config["output_buffer"]
+        mode = self.config.get("mode", "pilot_vision")
 
-        model_config_path = self.config["model_config"]
-        from utils import load_model_from_config
+        if mode == "pilot_vision":
+            from utils import load_model_from_config
 
-        self._model, class_name = load_model_from_config(model_config_path)
-        self.logger.info(f"Loaded segmentation model: {class_name}")
+            self._segmenter, class_name = load_model_from_config(self.config["model_config"])
+            self._legacy = True
+            self.logger.info(f"VisionWorker ready — pilot_vision model {class_name}")
+        elif mode == "onnx":
+            from vision.segmenters import OnnxTrackSegmenter
 
-        device = self.config.get("device", "cpu")
-        self.logger.info(f"VisionWorker ready (device={device})")
+            path = self.config.get("onnx_model", "track_seg.onnx")
+            self._segmenter = OnnxTrackSegmenter(path, self.config.get("threshold"))
+            self.logger.info(f"VisionWorker ready — {self._segmenter.meta.get('model')} ({path})")
+        elif mode == "ground_plane":
+            from control.depth_ftg import Intrinsics
+            from vision.segmenters import GroundPlaneConfig, GroundPlaneSegmenter
+
+            K = Intrinsics.from_orbslam_settings(self.config.get("camera_settings", "orbslam_oakd_rgbd.yaml"))
+            self._segmenter = GroundPlaneSegmenter(K, GroundPlaneConfig(**self.config.get("ground_plane", {})))
+            self.logger.info("VisionWorker ready — ground_plane (RANSAC floor + free space)")
+        else:
+            raise ValueError(f"Unknown vision mode {mode!r}; options: {', '.join(MODES)}")
 
     def step(self) -> None:
         result = self._frame_buf.read_latest()
@@ -65,15 +84,16 @@ class VisionWorker(BaseWorker):
             return
 
         header, rgb, depth = result
-
         if header.seq_no <= self._last_seq:
             time.sleep(0.001)
             return
         self._last_seq = header.seq_no
 
-        # Model interface: get_mask(depth_frame, rgb_frame)
-        mask = self._model.get_mask(depth, rgb)
+        mask = self._segmenter.get_mask(depth, rgb)      # note the arg order: depth first
+        if self._legacy:
+            from vision.segmenters import to_track_mask
 
+            mask = to_track_mask(mask, depth.shape)
         if mask is not None:
             self._seg_buf.write(mask)
 

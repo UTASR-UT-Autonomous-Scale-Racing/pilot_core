@@ -1,9 +1,9 @@
-# Control references
+# References
 
 The paper or book each implementation follows. Each module also cites it in its docstring.
 
 | Component | `control_mode` / module | Reference |
-| --------- | ----------------------- | --------- |
+|------ |-------------------- |------ |
 | Pure Pursuit | `pure_pursuit` · `control/controllers.py` | R. C. Coulter, "Implementation of the Pure Pursuit Path Tracking Algorithm", CMU-RI-TR-92-01, 1992 |
 | Stanley | `stanley` · `control/controllers.py` | S. Thrun et al., "Stanley: The Robot that Won the DARPA Grand Challenge", *J. Field Robotics* 23(9), 2006; G. Hoffmann et al., "Autonomous Automobile Trajectory Tracking for Off-Road Driving", ACC 2007 |
 | LQR (path-error model) | `lqr` · `control/lqr.py` | J. M. Snider, "Automatic Steering Methods for Autonomous Automobile Path Tracking", CMU-RI-TR-09-08, 2009; R. Rajamani, *Vehicle Dynamics and Control*, Springer, 2012 |
@@ -18,6 +18,18 @@ The paper or book each implementation follows. Each module also cites it in its 
 | PID (speed, legacy steering) | `control/speed.py`, `pid` | K. J. Åström, R. M. Murray, *Feedback Systems*, Princeton University Press, 2008 |
 | Extended Kalman filter | `control/estimator.py` | S. Thrun, W. Burgard, D. Fox, *Probabilistic Robotics*, MIT Press, 2005 |
 | Kinematic bicycle model | `control/sim.py`, `control/lqr.py` | R. Rajamani, *Vehicle Dynamics and Control*, Springer, 2012; Kong et al., IEEE IV 2015 |
+
+## Vision
+
+| Component | `vision.model` / `--model` | Reference |
+| --------- | -------------------------- | --------- |
+| Fast-SCNN | `fast_scnn` · `vision/models.py` | R. P. K. Poudel, S. Liwicki, R. Cipolla, "Fast-SCNN: Fast Semantic Segmentation Network", BMVC 2019 |
+| LR-ASPP / MobileNetV3 | `lraspp` · `vision/models.py` | A. Howard et al., "Searching for MobileNetV3", ICCV 2019 |
+| DeepLabV3 | `deeplabv3` · `vision/models.py` | L.-C. Chen, G. Papandreou, F. Schroff, H. Adam, "Rethinking Atrous Convolution for Semantic Image Segmentation", arXiv:1706.05587, 2017 |
+| U-Net | `unet` · `vision/models.py` | O. Ronneberger, P. Fischer, T. Brox, "U-Net: Convolutional Networks for Biomedical Image Segmentation", MICCAI 2015 |
+| RANSAC ground plane | `ground_plane` · `vision/segmenters.py` | M. A. Fischler, R. C. Bolles, "Random Sample Consensus", *Comm. ACM* 24(6), 1981 |
+| Free-space column scan | `ground_plane` · `vision/segmenters.py` | H. Badino, U. Franke, D. Pfeiffer, "The Stixel World – A Compact Medium Level Representation of the 3D-World", DAGM 2009 |
+| Dice loss | `vision/data.py` | F. Milletari, N. Navab, S.-A. Ahmadi, "V-Net: Fully Convolutional Neural Networks for Volumetric Medical Image Segmentation", 3DV 2016 |
 
 ## Implementation notes
 

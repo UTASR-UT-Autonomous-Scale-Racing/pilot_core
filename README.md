@@ -25,7 +25,7 @@ on synthetic data.
 While it runs, the terminal takes single-key commands:
 
 | Key     | Action |
-| ------- | ------ |
+|---- |--- |
 | `a`     | **Arm**: actuator outputs follow the controller |
 | `SPACE` | **Disarm**: outputs go to neutral immediately (any key other than `a`/`l`/`q`) |
 | `l`     | Signal loop closure at the end of the hand-driven mapping lap |
@@ -54,7 +54,7 @@ Outputs stay neutral until you arm.
 Data contracts between workers:
 
 | Buffer       | Contents |
-| ------------ | -------- |
+|--------- |----- |
 | `frame_buf`  | RGB `uint8` (H, W, 3) and depth in metres `float32` (H, W), aligned |
 | `imu_buf`    | `[qw, qx, qy, qz, ax, ay, az, s7, s8]`, acceleration in m/s² |
 | `pose_buf`   | 4×4 camera-to-world pose; published only while SLAM is tracking |
@@ -71,7 +71,7 @@ After a hand-driven mapping lap (`--enable-slam`, then `l`), the track controlle
 follow the mapped centre-line. The map-free controllers drive from the depth image alone.
 
 | `control_mode` | Controller | Needs |
-| -------------- | ---------- | ----- |
+|----------- |------- |-- |
 | `pure_pursuit` (default) | Pure Pursuit | SLAM + mapped track |
 | `stanley` | Stanley | SLAM + mapped track |
 | `lqr` | Speed-scheduled LQR | SLAM + mapped track |
@@ -90,10 +90,18 @@ See [docs/control.md](docs/control.md) for the conventions, tuning, the
 closed-loop bench, training the learned models, and the checklist before driving
 the car. Algorithm references are in [docs/references.md](docs/references.md).
 
+## Vision
+
+`VisionWorker` publishes a drivable-track mask (1 = track, 0 = everything else) to
+`seg_buf`. The segmenter is set by `vision.model`: a `pilot_vision` model (default),
+a candidate network trained with `scripts/train_vision.py` (`onnx`: Fast-SCNN,
+LR-ASPP, DeepLabV3, U-Net), or the training-free `ground_plane` (RANSAC floor + free
+space from depth). See [docs/vision.md](docs/vision.md).
+
 ## Configuration
 
 | File | Use |
-| ---- | --- |
+|- | |
 | `config.yaml` | On the car (Jetson): I2C actuator, SLAM, `pure_pursuit` |
 | `config_cpu.yaml` | Workstation: real OAK-D, CPU, **actuator output disabled** |
 | `config_dev_local.yaml` | No hardware: synthetic camera and IMU |
@@ -129,6 +137,7 @@ A new controller usually means adding a class in `control/`, registering its
 ```
 start.py              orchestrator (entry point)
 control/              control library: track model, controllers, EKF, safety, learned models, bench
+vision/               drivable-track segmentation: candidate networks, training, segmenters
 workers/              pipeline worker processes
 shared_buffer/        shared-memory ring buffers
 synthetic/            synthetic camera / IMU / track data for tests
@@ -136,14 +145,14 @@ orbslam3_wrapper/     pybind11 bindings for ORB-SLAM3
 rl/                   PPO training in AutoDRIVE + ONNX export
 scripts/              launch, deployment, benchmark and training scripts
 tests/                pytest suite
-docs/                 control, SLAM, simulator, deployment, references
+docs/                 control, vision, SLAM, simulator, deployment, references
 submodules            ORB_SLAM3, pilot_vision (segmentation models), firmware (Arduino)
 ```
 
 ### Scripts
 
 | Script | Purpose |
-| ------ | ------- |
+|--- |---- |
 | `scripts/run.sh [args]` | Activate `.venv`, set `LD_LIBRARY_PATH`, run `start.py` |
 | `scripts/dev_run.sh [args]` | `run.sh` with `config_cpu.yaml --debug` |
 | `scripts/jetson_run.sh` | On the car: performance mode, update from origin, launch |
@@ -151,6 +160,8 @@ submodules            ORB_SLAM3, pilot_vision (segmentation models), firmware (A
 | `scripts/gen_orbslam_settings.py` | ORB-SLAM3 camera settings from the OAK-D calibration |
 | `scripts/sim_bench.py` | Closed-loop controller benchmarks |
 | `scripts/train_bc_policy.py`, `train_vae_policy.py` | Train the learned depth controllers |
+| `scripts/train_vision.py` | Train a drivable-track segmentation network |
+| `scripts/vision_bench.py` | Size and latency of the segmentation candidates |
 | `scripts/collect_frames.py` | Save simulator camera frames |
 | `scripts/setup.sh` | Initialise all submodules |
 | `scripts/branch_checkout.sh [branch]` | Check out a branch in pilot_core and its submodules |
@@ -158,6 +169,6 @@ submodules            ORB_SLAM3, pilot_vision (segmentation models), firmware (A
 ### Containers
 
 | Image | Use |
-| ----- | --- |
+|-- | |
 | `Dockerfile` | Jetson (L4T, NVIDIA runtime); entrypoint `start.py` |
 | `Dockerfile.dev-local` | Lightweight synthetic-only test container (`.devcontainer/dev-local/`) |

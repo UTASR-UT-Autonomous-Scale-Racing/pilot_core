@@ -1,18 +1,16 @@
 #!/bin/bash
-# Jetson Docker deploy: update repos, check config, set Jetson performance
-# mode + OAK-D udev rule, build the image from Dockerfile and run it.
+# Docker deploy on the Jetson. Pulls, sanity-checks the config, sets perf
+# mode and the OAK-D udev rule, then builds and runs the image.
 #   scripts/start.sh                    # container runs start.py --config config.yaml
 #   scripts/start.sh --config X.yaml    # args replace the image CMD (passed to start.py)
 set -e
 cd "$(dirname "$0")/.."
 
-# ================================
-# Update repositories (submodules move to their remote branch tips)
+# NB: submodules go to their remote branch tips, not the pinned commits
 git pull
 git submodule update --recursive --remote
 
-# ================================
-# Check that the config and its segmentation model config exist
+# make sure the config and the segmentation config it points to exist
 CONFIG_FILE="config.yaml"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Error: Configuration file not found: $CONFIG_FILE"
@@ -29,36 +27,29 @@ fi
 echo "-> Successfully verified configuration files."
 echo ""
 
-# ================================
-# Hardware setup
-
-# Jetson max performance mode (skipped on non-Jetson hosts)
+# hardware
+# perf mode, skipped if this isn't a Jetson
 if command -v nvpmodel &> /dev/null; then
     sudo nvpmodel -m 0
     sudo jetson_clocks
     echo "Set Jetson performance mode to MAX-N."
 fi
 
-# udev rule so the OAK-D (Movidius, vendor 03e7) is accessible without root
+# OAK-D (Movidius, vendor 03e7) without root
 echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"' | sudo tee /etc/udev/rules.d/80-movidius.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 
 echo "-> Successfully applied hardware settings."
 echo ""
 
-# ================================
-# Build Docker image
 IMAGE_NAME="utasr-image"
 sudo docker build -t ${IMAGE_NAME} -f Dockerfile .
 
 echo "Successfully built Docker image."
 echo ""
 
-# ================================
-# Run Docker container (no CPU / RAM / GPU limits)
-#   --privileged  USB access (OAK-D)
-#   --net=host    host networking
-#   --device      I2C bus to the Arduino
+# no CPU/RAM/GPU limits. --privileged is for the OAK-D over USB, the
+# --device is the I2C bus to the Arduino
 sudo docker run \
     --runtime nvidia \
     --rm \

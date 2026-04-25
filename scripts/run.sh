@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch the Python pipeline from the repo root.
+# Launch the pipeline from the repo root
 #   scripts/run.sh                          # config.yaml
 #   scripts/run.sh --config config_cpu.yaml # any start.py arguments
 set -euo pipefail

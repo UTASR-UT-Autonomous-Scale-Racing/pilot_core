@@ -1,8 +1,7 @@
-/**
- * pybind11 wrapper for ORB_SLAM3 — exposes a minimal Python API for the
- * pilot_core multiprocessing pipeline.
+/*
+ * pybind11 wrapper for ORB_SLAM3. Only exposes what the pilot_core workers
+ * actually use:
  *
- * Exposed API:
  *   orbslam3_python.System(vocab, settings, sensor_type)
  *       .track_rgbd(rgb, depth, timestamp) -> np.ndarray (4x4 float32)
  *       .map_changed()                     -> bool
@@ -16,11 +15,10 @@
  *       .shutdown()                        -> None
  *       .trajectory_length()               -> int
  *
- *   Sensor-type constants (ORB_SLAM3::System::eSensor):
- *       MONOCULAR = 0, STEREO = 1, RGBD = 2,
- *       IMU_MONOCULAR = 3, IMU_STEREO = 4, IMU_RGBD = 5
+ * plus the ORB_SLAM3::System::eSensor constants: MONOCULAR = 0, STEREO = 1,
+ * RGBD = 2, IMU_MONOCULAR = 3, IMU_STEREO = 4, IMU_RGBD = 5.
  *
- * Build: see orbslam3_wrapper/CMakeLists.txt (and docs/slam.md).
+ * Build with orbslam3_wrapper/CMakeLists.txt, docs/slam.md has the details.
  */
 
 #include <pybind11/pybind11.h>
@@ -38,18 +36,12 @@
 
 namespace py = pybind11;
 
-/**
- * Thin C++ wrapper around ORB_SLAM3::System that provides numpy-friendly
- * input/output without requiring consumers to deal with OpenCV cv::Mat
- * or Eigen types directly.
- */
+// Wraps ORB_SLAM3::System so Python only ever sees numpy arrays, never
+// cv::Mat or Eigen types.
 class SLAM {
 public:
-    /**
-     * @param vocab      Path to ORBvoc.txt
-     * @param settings   Path to camera-settings YAML
-     * @param sensor     Sensor enum (0=MONO, 1=STEREO, 2=RGBD, …)
-     */
+    // vocab = ORBvoc.txt path, settings = camera YAML, sensor = eSensor value
+    // (0 mono, 1 stereo, 2 RGBD, ...)
     SLAM(const std::string &vocab,
          const std::string &settings,
          int sensor)
@@ -58,16 +50,14 @@ public:
                /*bUseViewer=*/false),
           last_loop_flag_(false) {}
 
-    /* --- tracking --- */
-
     /**
-     * Run one RGBD tracking step.
+     * One RGBD tracking step.
      *
-     * @param rgb   uint8 numpy array (H, W, 3)  — colour order per Camera.RGB in the settings
-     * @param depth float32 numpy array (H, W)   — depth in metres
-     * @param ts    timestamp (seconds)
-     * @return 4×4 float32 world-to-camera SE3 pose Tcw (identity/stale when
-     *         tracking is not OK — check get_tracking_state())
+     * @param rgb   uint8 (H, W, 3); channel order must match Camera.RGB in the settings
+     * @param depth float32 (H, W), metres
+     * @param ts    timestamp in seconds
+     * @return 4x4 float32 Tcw (world-to-camera). When tracking isn't OK this
+     *         is identity or stale, so check get_tracking_state().
      */
     py::array_t<float> track_rgbd(py::array_t<uint8_t, py::array::c_style> rgb,
                                    py::array_t<float, py::array::c_style> depth,
@@ -88,11 +78,10 @@ public:
 
         Sophus::SE3f pose = sys_.TrackRGBD(rgb_mat, dep_mat, ts);
 
-        // Store trajectory
         Eigen::Matrix4f mat = pose.matrix();
         trajectory_.push_back(mat);
 
-        // Copy into numpy array (row-major)
+        // Eigen is column-major by default, so copy element-wise into the row-major array
         auto out = py::array_t<float>(std::vector<py::ssize_t>{4, 4});
         auto buf = out.mutable_unchecked<2>();
         for (int i = 0; i < 4; ++i)
@@ -102,28 +91,20 @@ public:
         return out;
     }
 
-    /* --- map queries --- */
-
-    /**
-     * Returns true once after any loop closure or global BA.
-     * Shares ORB-SLAM3's MapChanged() state with is_loop_detected().
-     */
+    // True once after each loop closure or global BA. NB: this and
+    // is_loop_detected() both consume the same MapChanged() flag.
     bool map_changed() {
         return sys_.MapChanged();
     }
 
-    /**
-     * Get all 3D map points from the current Atlas.
-     *
-     * @return (N, 3) float32 numpy array of world-frame XYZ positions.
-     */
+    /* All map points in the Atlas, (N, 3) float32 world-frame XYZ. */
     py::array_t<float> get_all_map_points() {
         ORB_SLAM3::Atlas *atlas = sys_.mpAtlas;
         if (!atlas) return py::array_t<float>(std::vector<py::ssize_t>{0, 3});
 
         std::vector<ORB_SLAM3::MapPoint*> points = atlas->GetAllMapPoints();
 
-        // Filter out bad / null points
+        // skip null and culled (isBad) points
         std::vector<Eigen::Vector3f> valid;
         valid.reserve(points.size());
         for (auto *mp : points) {
@@ -144,22 +125,18 @@ public:
         return out;
     }
 
-    /**
-     * Get camera-to-world poses (Twc) for all keyframes as a (K, 4, 4)
-     * float32 numpy array.
-     */
+    // Keyframe poses as Twc (camera-to-world, unlike track_rgbd), (K, 4, 4) float32
     py::array_t<float> get_all_keyframe_poses() {
         ORB_SLAM3::Atlas *atlas = sys_.mpAtlas;
         if (!atlas) return py::array_t<float>(std::vector<py::ssize_t>{0, 4, 4});
 
         std::vector<ORB_SLAM3::KeyFrame*> kfs = atlas->GetAllKeyFrames();
 
-        // Filter bad keyframes
         std::vector<Eigen::Matrix4f> poses;
         poses.reserve(kfs.size());
         for (auto *kf : kfs) {
             if (kf && !kf->isBad()) {
-                Sophus::SE3f se3 = kf->GetPose().inverse();  // cam-to-world
+                Sophus::SE3f se3 = kf->GetPose().inverse();  // GetPose() is Tcw
                 poses.push_back(se3.matrix());
             }
         }
@@ -177,9 +154,7 @@ public:
         return out;
     }
 
-    /**
-     * Get the full trajectory (one 4×4 Tcw pose per TrackRGBD call) as a list.
-     */
+    // every Tcw we've returned from track_rgbd, in order. Grows unbounded.
     py::list get_trajectory() {
         py::list out;
         for (auto &mat : trajectory_) {
@@ -193,11 +168,9 @@ public:
         return out;
     }
 
-    /* --- loop closure --- */
-
-    /**
-     * Check if a loop closure has been detected.
-     * Uses MapChanged() as a proxy — it fires once per loop closure / global BA.
+    /*
+     * Loop closure check, using MapChanged() as a proxy (it fires once per
+     * loop closure or global BA).
      */
     bool is_loop_detected() {
         bool changed = sys_.MapChanged();
@@ -209,13 +182,9 @@ public:
         return false;
     }
 
-    /* --- mode control --- */
-
     void activate_localization_mode() { sys_.ActivateLocalizationMode(); }
     void deactivate_localization_mode() { sys_.DeactivateLocalizationMode(); }
     int get_tracking_state() { return sys_.GetTrackingState(); }
-
-    /* --- lifecycle --- */
 
     void shutdown() { sys_.Shutdown(); }
 
@@ -258,7 +227,7 @@ PYBIND11_MODULE(orbslam3_python, m) {
         .def("trajectory_length", &SLAM::trajectory_length,
              "Number of poses in the stored trajectory");
 
-    // Sensor-type constants
+    // eSensor values
     m.attr("MONOCULAR")    = static_cast<int>(ORB_SLAM3::System::MONOCULAR);
     m.attr("STEREO")       = static_cast<int>(ORB_SLAM3::System::STEREO);
     m.attr("RGBD")         = static_cast<int>(ORB_SLAM3::System::RGBD);

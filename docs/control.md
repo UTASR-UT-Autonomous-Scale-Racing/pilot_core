@@ -31,7 +31,7 @@ test without any hardware or worker processes.
 ## Conventions
 
 | Quantity | Convention |
-| -------- | ---------- |
+|----- |------- |
 | Ground plane | 2-D `(x, y)` = two world axes chosen by `mapping.bev_axes` (SLAM camera frame: `[0, 2]`) |
 | Heading | Radians, counter-clockwise from +x. The car's forward axis is `mapping.forward_axis` (camera: `2`) |
 | Signed command | Steering **+1 = full left**, throttle +1 = full forward, −1 = full backward, 0 = neutral |
@@ -49,7 +49,7 @@ slow down; a backward input pushes it backwards and would reverse once stopped.
 ### Track followers (need SLAM and a mapped track)
 
 | `control_mode` | Class | Notes |
-| -------------- | ----- | ----- |
+|----------- |-- |-- |
 | `pure_pursuit` | `control.PurePursuit` | Steers at a point `lookahead` metres ahead on the centre-line. Smoothest steering. Default |
 | `stanley` | `control.Stanley` | Heading error plus cross-track error at the front axle |
 | `lqr` | `control.lqr.LQR` | Discrete LQR on the path-error model, gains scheduled on speed, curvature feed-forward |
@@ -70,7 +70,7 @@ when the estimate recovers.
 ### Map-free (depth camera only)
 
 | `control_mode` | Class | Notes |
-| -------------- | ----- | ----- |
+|----------- |-- |-- |
 | `depth_ftg` | `control.depth_ftg.DepthGapFollower` | Builds a virtual scan from the depth image (floor removed by a height band) and steers at the centre of the best free gap |
 | `bc` | `control.imitation.DepthPolicyFollower` + `control.bc` | End-to-end CNN, depth frame → steering |
 | `vae` | `control.imitation.DepthPolicyFollower` + `control.vae` | VAE latent of the depth frame → steering head |
@@ -103,7 +103,7 @@ direction and has no cross-track term, so it drifts; prefer the track followers.
 All keys are commented in `config.yaml`. The control-related sections are:
 
 | Section | Contents |
-| ------- | -------- |
+|---- |----- |
 | `track_control` | Per-controller gains (`pure_pursuit`, `stanley`, `lqr`, `mpc`), `policy.model`, `speed` (profile + `longitudinal`), `fallback` |
 | `depth_ftg`, `bc`, `vae` | Map-free controllers (camera height, cruise speed, model paths) |
 | `estimator` | EKF noise settings and staleness timeout |
@@ -131,7 +131,7 @@ The same scenarios run as acceptance tests in `tests/test_control_bench.py` and
 `tests/test_control_models.py`. Typical results on the twisty track:
 
 | Controller | Cross-track RMS / max | Off track | Speed |
-| ---------- | --------------------- | --------- | ----- |
+|------- |------------------ |------ |-- |
 | `pure_pursuit` | 3.4 / 11.6 cm | 0 % | 1.3 m/s |
 | `stanley` | 1.9 / 4.5 cm | 0 % | 1.3 m/s |
 | `lqr` | 0.8 / 3.2 cm | 0 % | 1.3 m/s |

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Initialise all git submodules (pilot_vision, firmware, ...).
+# init all submodules (pilot_vision, firmware, ...)
 #   scripts/setup.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."

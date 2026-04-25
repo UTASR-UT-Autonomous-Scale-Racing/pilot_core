@@ -11,20 +11,20 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# --- pybind11 ---
+# pybind11
 find_package(pybind11 REQUIRED)
 
-# --- OpenCV (must match the version ORB_SLAM3 was built against) ---
+# OpenCV (must match the version ORB_SLAM3 was built against)
 find_package(OpenCV 4.4 REQUIRED)
 
-# --- Eigen3 ---
+# Eigen3
 find_package(Eigen3 3 REQUIRED)
 
-# --- ORB_SLAM3 paths ---
+# ORB_SLAM3 paths
 set(ORBSLAM3_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../ORB_SLAM3)
 set(ORBSLAM3_LIB ${ORBSLAM3_DIR}/lib/libORB_SLAM3.so)
 
-# --- Python module ---
+# Python module
 pybind11_add_module(orbslam3_python src/bind.cpp)
 
 # Declare the OpenGL extension prototypes referenced by Pangolin headers

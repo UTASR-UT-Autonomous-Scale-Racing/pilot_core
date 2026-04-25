@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Check out the same branch in pilot_core and every component submodule.
+# Put pilot_core and each submodule on the same branch
 #   scripts/branch_checkout.sh [branch]   (default: main)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 branch="${1:-main}"
 
 for repo in pilot_vision firmware; do
-    # Submodules have a .git *file*, not a directory
+    # submodules have a .git file, not a dir
     if [ -e "$repo/.git" ]; then
         echo "Checking out '$branch' in $repo ..."
         git -C "$repo" fetch origin "$branch"

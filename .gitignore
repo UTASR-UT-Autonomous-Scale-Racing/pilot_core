@@ -1,4 +1,4 @@
-# --- Python ---
+# Python
 __pycache__/
 *.py[cod]
 .venv/
@@ -6,13 +6,13 @@ venv/
 .pytest_cache/
 *.egg-info/
 
-# --- Build artefacts ---
+# Build artefacts
 build/
 lib/
 # pybind11 wrapper is built locally (see README) — never commit the binary
 orbslam3_python*.so
 
-# --- Runtime output ---
+# Runtime output
 # Trained models / datasets (regenerate with scripts/train_*_policy.py, rl/export_onnx.py)
 *.onnx
 *.npz
@@ -27,10 +27,10 @@ temp/
 *.jpeg
 *.gif
 
-# --- Editor / notebooks ---
+# Editor / notebooks
 .vscode/
 *.ipynb
 
-# --- RL training outputs ---
+# RL training outputs
 rl/checkpoints/
 rl/logs/

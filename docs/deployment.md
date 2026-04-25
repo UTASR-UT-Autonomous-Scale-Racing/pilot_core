@@ -26,7 +26,7 @@ config exists, sets performance mode and the OAK-D udev rule, builds the image f
 `Dockerfile`, and runs it with:
 
 | Flag | Why |
-| ---- | --- |
+|- | |
 | `--runtime nvidia` | GPU access |
 | `--privileged` | USB access for the OAK-D |
 | `--device /dev/i2c-1` | Arduino over I2C |

@@ -41,13 +41,17 @@ class SegmentationBuffer:
             create=create,
         )
 
-    def write(self, mask: np.ndarray) -> SlotHeader:
+    def write(self, mask: np.ndarray, ts: Optional[float] = None) -> SlotHeader:
         """Any numeric (H, W) mask; stored as float32."""
         mask_f32 = mask.astype(np.float32)
         h, w = mask_f32.shape[:2]
         meta = struct.pack(_META_FMT, h, w)
         payload = meta + mask_f32.tobytes()
-        return self._rb.write(payload)
+        return self._rb.write(payload, ts)
+
+    def latest_seq(self) -> int:
+        """Highest published seq_no, without copying any data."""
+        return self._rb.latest_seq()
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray]]:
         result = self._rb.read_latest()

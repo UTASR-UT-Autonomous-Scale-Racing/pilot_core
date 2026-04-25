@@ -2,7 +2,7 @@
 Estimated vehicle state in the BEV plane, written by StateWorker.
 
 Payload layout:
-    [8 bytes]  float64  t         (state time, time.time() clock)
+    [8 bytes]  float64  t         (state time, time.monotonic() clock)
     [8 bytes]  float32  x, y      (m, BEV plane)
     [4 bytes]  float32  yaw       (rad, CCW from +x)
     [4 bytes]  float32  v         (m/s, signed)
@@ -35,9 +35,13 @@ class StateBuffer:
             create=create,
         )
 
-    def write(self, state: VehicleState) -> SlotHeader:
+    def write(self, state: VehicleState, ts: Optional[float] = None) -> SlotHeader:
         payload = struct.pack(_STATE_FMT, state.t, state.x, state.y, state.yaw, state.v, state.yaw_rate)
-        return self._rb.write(payload)
+        return self._rb.write(payload, ts)
+
+    def latest_seq(self) -> int:
+        """Highest published seq_no, without copying any data."""
+        return self._rb.latest_seq()
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, VehicleState]]:
         result = self._rb.read_latest()

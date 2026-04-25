@@ -93,18 +93,21 @@ class SharedRingBuffer:
     def _slot_offset(self, index: int) -> int:
         return index * self.slot_size
 
-    def write(self, payload: bytes) -> SlotHeader:
+    def write(self, payload: bytes, ts: Optional[float] = None) -> SlotHeader:
         """Write raw bytes into the next slot and return the header.
 
-        Serialising is the caller's job; the typed wrappers handle that.
+        ``ts`` is the sample's time on the ``time.monotonic()`` clock (e.g. the
+        camera capture time); defaults to now.  Serialising is the caller's
+        job; the typed wrappers handle that.
         """
         if self._seq is None:
             raise RuntimeError("Cannot write from a read-only buffer handle.")
 
         payload_len = len(payload)
         if payload_len > self.slot_payload_size:
-            payload = payload[: self.slot_payload_size]
-            payload_len = self.slot_payload_size
+            raise ValueError(
+                f"payload of {payload_len} bytes exceeds the slot size of {self.slot_payload_size}"
+            )
 
         with self._seq.get_lock():
             self._seq.value += 1
@@ -115,7 +118,7 @@ class SharedRingBuffer:
 
         header = SlotHeader(
             seq_no=seq_no,
-            produced_ts=time.time(),
+            produced_ts=time.monotonic() if ts is None else float(ts),
             read_ts=0.0,
             payload_size=payload_len,
             schema_version=SCHEMA_VERSION,
@@ -129,11 +132,18 @@ class SharedRingBuffer:
 
         return header
 
+    def latest_seq(self) -> int:
+        """Highest published seq_no (0 if nothing written), without copying data.
+
+        Lets pollers skip the full payload copy when nothing new has arrived.
+        """
+        return max(struct.unpack_from("<Q", self._shm.buf, self._slot_offset(i))[0] for i in range(self.slots))
+
     def read_latest(self) -> Optional[Tuple[SlotHeader, bytes]]:
         """(header, payload) for the slot with the highest seq_no, or None
         if nothing complete has been written yet.
 
-        Also stamps read_ts in the slot header with time.time(), which is
+        Also stamps read_ts in the slot header with time.monotonic(), which is
         how the monitors track consumer lag.
         """
         for _ in range(_READ_RETRIES):
@@ -184,7 +194,7 @@ class SharedRingBuffer:
             return None
 
         # read_ts lives at header offset 16, see schema.py
-        now = time.time()
+        now = time.monotonic()
         struct.pack_into("<d", self._shm.buf, offset + 16, now)
         header.read_ts = now
 

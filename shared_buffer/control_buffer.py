@@ -38,9 +38,13 @@ class ControlBuffer:
             create=create,
         )
 
-    def write(self, steering: float, throttle: float) -> SlotHeader:
+    def write(self, steering: float, throttle: float, ts: Optional[float] = None) -> SlotHeader:
         payload = struct.pack(_CTRL_FMT, steering, throttle)
-        return self._rb.write(payload)
+        return self._rb.write(payload, ts)
+
+    def latest_seq(self) -> int:
+        """Highest published seq_no, without copying any data."""
+        return self._rb.latest_seq()
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, float, float]]:
         """-> (header, steering, throttle), or None."""

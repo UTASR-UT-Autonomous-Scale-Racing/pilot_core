@@ -59,14 +59,18 @@ class FrameBuffer:
             create=create,
         )
 
-    def write(self, rgb: np.ndarray, depth: np.ndarray) -> SlotHeader:
+    def write(self, rgb: np.ndarray, depth: np.ndarray, ts: Optional[float] = None) -> SlotHeader:
         """rgb: (H, W, 3) uint8. depth: (H, W) float32 metres, or uint16."""
         rh, rw = rgb.shape[:2]
         dh, dw = depth.shape[:2]
 
         meta = struct.pack(_META_FMT, rh, rw, dh, dw)
         payload = meta + rgb.tobytes() + depth.tobytes()
-        return self._rb.write(payload)
+        return self._rb.write(payload, ts)
+
+    def latest_seq(self) -> int:
+        """Highest published seq_no, without copying any data."""
+        return self._rb.latest_seq()
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray, np.ndarray]]:
         """Newest (header, rgb, depth), or None if nothing's been written.

@@ -43,13 +43,17 @@ class PointCloudBuffer:
             create=create,
         )
 
-    def write(self, points: np.ndarray) -> SlotHeader:
+    def write(self, points: np.ndarray, ts: Optional[float] = None) -> SlotHeader:
         pts = points.astype(np.float32)
         n = min(len(pts), self._max_points)
         pts = pts[:n]
         count_bytes = struct.pack(_COUNT_FMT, n)
         payload = count_bytes + pts.tobytes()
-        return self._rb.write(payload)
+        return self._rb.write(payload, ts)
+
+    def latest_seq(self) -> int:
+        """Highest published seq_no, without copying any data."""
+        return self._rb.latest_seq()
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray]]:
         """(header, (N, 3) float32 points) or None."""

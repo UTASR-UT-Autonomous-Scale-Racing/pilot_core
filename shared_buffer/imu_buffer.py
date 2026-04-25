@@ -37,10 +37,14 @@ class IMUBuffer:
             create=create,
         )
 
-    def write(self, imu_vector: np.ndarray) -> SlotHeader:
+    def write(self, imu_vector: np.ndarray, ts: Optional[float] = None) -> SlotHeader:
         """imu_vector is (9,), laid out as in the module docstring."""
         payload = imu_vector.astype(np.float32).tobytes()
-        return self._rb.write(payload)
+        return self._rb.write(payload, ts)
+
+    def latest_seq(self) -> int:
+        """Highest published seq_no, without copying any data."""
+        return self._rb.latest_seq()
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray]]:
         """(header, (9,) float32 vector) or None"""

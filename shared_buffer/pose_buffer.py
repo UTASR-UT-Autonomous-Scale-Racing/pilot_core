@@ -43,7 +43,8 @@ class PoseBuffer:
         )
 
     def write(
-        self, pose: np.ndarray, map_points: Optional[np.ndarray] = None, speed: float = 0.0
+        self, pose: np.ndarray, map_points: Optional[np.ndarray] = None, speed: float = 0.0,
+        ts: Optional[float] = None,
     ) -> SlotHeader:
         """pose is the 4x4 camera-to-world matrix. map_points (N, 3) can be
         None/empty and gets cut to 2048. speed is m/s, 0.0 if unknown.
@@ -60,7 +61,11 @@ class PoseBuffer:
             payload = pose_bytes + struct.pack(_COUNT_FMT, 0)
 
         payload += struct.pack("<f", float(speed))
-        return self._rb.write(payload)
+        return self._rb.write(payload, ts)
+
+    def latest_seq(self) -> int:
+        """Highest published seq_no, without copying any data."""
+        return self._rb.latest_seq()
 
     def read_latest(
         self,

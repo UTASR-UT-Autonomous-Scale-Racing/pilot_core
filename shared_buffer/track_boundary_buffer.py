@@ -44,7 +44,7 @@ class TrackBoundaryBuffer:
         )
 
     def write(
-        self, outer_line: np.ndarray, inner_line: np.ndarray
+        self, outer_line: np.ndarray, inner_line: np.ndarray, ts: Optional[float] = None
     ) -> SlotHeader:
         """outer_line (N, 2) and inner_line (M, 2), both in BEV coords."""
         outer = outer_line.astype(np.float32)
@@ -59,7 +59,11 @@ class TrackBoundaryBuffer:
             + struct.pack(_COUNT_FMT, n_inner)
             + inner[:n_inner].tobytes()
         )
-        return self._rb.write(payload)
+        return self._rb.write(payload, ts)
+
+    def latest_seq(self) -> int:
+        """Highest published seq_no, without copying any data."""
+        return self._rb.latest_seq()
 
     def read_latest(
         self,

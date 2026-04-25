@@ -32,10 +32,14 @@ class LidarBuffer:
             create=create,
         )
 
-    def write(self, ranges: np.ndarray) -> SlotHeader:
+    def write(self, ranges: np.ndarray, ts: Optional[float] = None) -> SlotHeader:
         """ranges: (1080,), metres"""
         payload = ranges.astype(np.float32).tobytes()
-        return self._rb.write(payload)
+        return self._rb.write(payload, ts)
+
+    def latest_seq(self) -> int:
+        """Highest published seq_no, without copying any data."""
+        return self._rb.latest_seq()
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray]]:
         result = self._rb.read_latest()

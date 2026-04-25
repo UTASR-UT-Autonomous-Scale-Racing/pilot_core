@@ -24,8 +24,8 @@ class DTypeTag(IntEnum):
 #
 #   Offset  Size  Type      Field
 #   0       8     uint64    seq_no           (monotonically increasing write counter)
-#   8       8     float64   produced_ts      (time.time() at write)
-#   16      8     float64   read_ts          (time.time() at read, set by the consumer)
+#   8       8     float64   produced_ts      (time.monotonic() of the sample)
+#   16      8     float64   read_ts          (time.monotonic() at read, set by the consumer)
 #   24      4     uint32    payload_size     (actual bytes written in payload area)
 #   28      2     uint16    schema_version
 #   30      2     uint16    dtype_tag        (DTypeTag value)

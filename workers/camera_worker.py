@@ -1,14 +1,11 @@
 """
-CameraWorker — captures RGB + depth frames from an OAK-D camera (DepthAI v3)
-and writes them into frame_buf.
+OAK-D camera capture (DepthAI v3). RGB from CAM_A, stereo depth from
+CAM_B/CAM_C, depth aligned to the undistorted RGB and the two synced.
+Writes RGB uint8 + depth float32 (metres) into the FrameBuffer.
 
-Pipeline: colour camera (CAM_A) + stereo pair (CAM_B/CAM_C) → StereoDepth,
-with depth aligned to the undistorted RGB image and the two streams
-time-synchronised.  frame_buf receives RGB uint8 and depth float32 in metres.
-
-When an ``imu_buffer`` is supplied, the on-board IMU (BNO086 / BMI270) is
-added to the *same* pipeline.  A DepthAI device can only be opened by one
-process, so the OAK-D IMU must be streamed here rather than by IMUWorker.
+If an imu_buffer is passed, the on-board IMU (BNO086 / BMI270) goes into
+the same pipeline. It has to live here and not in IMUWorker because only
+one process can open a DepthAI device.
 """
 
 from __future__ import annotations
@@ -26,29 +23,19 @@ from shared_buffer import FrameBuffer
 try:
     import depthai as dai
 except ImportError:
-    dai = None  # allow import on machines without depthai for testing
+    dai = None  # so tests can import this without depthai installed
 
 
 class CameraWorker(BaseWorker):
-    """Worker process that captures OAK-D RGB+Depth frames via DepthAI v3.
+    """OAK-D RGB + depth capture.
 
-    Falls back to synthetic FPV frames when depthai is unavailable,
-    ``synthetic=True`` is passed, or ``PILOT_SYNTHETIC=1`` is set.
+    Switches to synthetic FPV frames if depthai isn't installed, if
+    synthetic=True, or if PILOT_SYNTHETIC=1.
 
-    Config kwargs
-    -------------
-    output_buffer : FrameBuffer
-        Shared FrameBuffer to write into.
-    fps : int
-        Target camera FPS (default 30).
-    resolution : list[int]
-        ``[width, height]`` for RGB and depth output (default [640, 400]).
-    synthetic : bool
-        Force synthetic frame generation (default False).
-    imu_buffer : IMUBuffer | None
-        If given, stream the OAK-D on-board IMU into this buffer.
-    imu_rate_hz : int
-        IMU report rate (default 100).
+    Config kwargs: output_buffer (FrameBuffer), fps (default 30),
+    resolution [w, h] for both RGB and depth (default [640, 400]),
+    synthetic, imu_buffer (stream the on-board IMU into it if given) and
+    imu_rate_hz (default 100).
     """
 
     def __init__(self, name: str = "camera", **kwargs: Any) -> None:
@@ -61,8 +48,6 @@ class CameraWorker(BaseWorker):
         self._synth_gen = None
         self._imu_buf = None
         self._imu_q = None
-
-    # --- lifecycle ---
 
     def setup(self) -> None:
         import os
@@ -84,15 +69,13 @@ class CameraWorker(BaseWorker):
 
         self._frame_buf = self.config["output_buffer"]
 
-        # --- DepthAI v3 pipeline ---
         self._pipeline = self._open_pipeline()
         platform = self._pipeline.getDefaultDevice().getPlatform()
 
-        # Colour camera (CAM_A)
         cam_rgb = self._pipeline.create(dai.node.Camera).build(
             dai.CameraBoardSocket.CAM_A, sensorFps=fps
         )
-        # Stereo pair (CAM_B = left, CAM_C = right)
+        # CAM_B = left, CAM_C = right
         cam_left = self._pipeline.create(dai.node.Camera).build(
             dai.CameraBoardSocket.CAM_B, sensorFps=fps
         )
@@ -105,25 +88,23 @@ class CameraWorker(BaseWorker):
         stereo.setLeftRightCheck(True)
         stereo.setRectification(True)
 
-        # Link stereo pair → StereoDepth
         cam_left.requestOutput(size, fps=fps).link(stereo.left)
         cam_right.requestOutput(size, fps=fps).link(stereo.right)
 
-        # RGB output — undistorted so stereo depth aligns to it exactly
+        # undistorted, otherwise the aligned depth won't line up with it
         rgb_out = cam_rgb.requestOutput(size, fps=fps, enableUndistortion=True)
 
-        # Align depth to RGB
         if platform == dai.Platform.RVC4:
             align = self._pipeline.create(dai.node.ImageAlign)
             stereo.depth.link(align.input)
             rgb_out.link(align.inputAlignTo)
             depth_out = align.outputAligned
         else:
-            # RVC2 — align via stereo node directly
+            # RVC2: StereoDepth can do the alignment itself
             rgb_out.link(stereo.inputAlignTo)
             depth_out = stereo.depth
 
-        # Pair RGB and depth frames whose timestamps are within half a frame period
+        # pair rgb/depth if timestamps are within half a frame period
         sync = self._pipeline.create(dai.node.Sync)
         sync.setSyncThreshold(timedelta(seconds=1.0 / (2 * fps)))
         rgb_out.link(sync.inputs["rgb"])
@@ -141,10 +122,10 @@ class CameraWorker(BaseWorker):
         )
 
     def _open_pipeline(self, attempts: int = 5, backoff_s: float = 1.0):
-        """Open the device, retrying while it re-enumerates.
+        """dai.Pipeline() with retries.
 
-        After a pipeline is closed the OAK-D reboots and briefly cannot be
-        reopened ("Couldn't open stream"), e.g. on a worker restart.
+        When a pipeline closes the OAK-D reboots and can't be reopened for a
+        moment ("Couldn't open stream"). Shows up on worker restarts.
         """
         for attempt in range(1, attempts + 1):
             try:
@@ -159,7 +140,6 @@ class CameraWorker(BaseWorker):
                 time.sleep(backoff_s * attempt)
 
     def _setup_imu(self, rate_hz: int) -> None:
-        """Add the on-board IMU node to the camera pipeline."""
         imu = self._pipeline.create(dai.node.IMU)
         imu.enableIMUSensor(
             [
@@ -174,12 +154,12 @@ class CameraWorker(BaseWorker):
         self._imu_q = imu.out.createOutputQueue(maxSize=50, blocking=False)
 
     def _drain_imu(self) -> None:
-        """Publish all pending IMU packets.
+        """Push every pending IMU packet into the IMU buffer.
 
-        Vector layout matches the I2C IMU path:
-        ``[qw, qx, qy, qz, ax, ay, az, gx, gy]`` (accel in m/s², gyro rad/s).
-        The final two slots carry throttle/steering feedback on the I2C
-        path; the OAK-D has no such feedback, so gyro x/y are reported.
+        Same layout as the I2C IMU: [qw, qx, qy, qz, ax, ay, az, gx, gy],
+        accel m/s^2, gyro rad/s. On the I2C path the last two slots are
+        throttle/steering feedback; the OAK-D doesn't have that so we put
+        gyro x/y there instead.
         """
         for imu_data in self._imu_q.tryGetAll():
             for packet in imu_data.packets:
@@ -208,10 +188,10 @@ class CameraWorker(BaseWorker):
         rgb_frame = msg_group["rgb"]
         depth_frame = msg_group["depth"]
 
-        # DepthAI delivers BGR; FrameBuffer carries RGB (vision models expect RGB)
+        # DepthAI gives BGR, vision models want RGB
         rgb = cv2.cvtColor(rgb_frame.getCvFrame(), cv2.COLOR_BGR2RGB)
         depth = depth_frame.getFrame().astype(np.float32)
-        depth /= 1000.0  # mm → metres
+        depth /= 1000.0  # mm -> m
 
         self._frame_buf.write(rgb, depth)
 
@@ -222,10 +202,9 @@ class CameraWorker(BaseWorker):
                 f"depth={depth.shape} range=[{depth.min():.2f}, {depth.max():.2f}]m"
             )
 
-    # --- synthetic mode ---
+    # synthetic mode (no hardware)
 
     def _setup_synthetic(self) -> None:
-        """Init synthetic FPV frame generator (no hardware needed)."""
         from synthetic import SyntheticFrameGenerator
 
         fps = self.config.get("fps", 30)

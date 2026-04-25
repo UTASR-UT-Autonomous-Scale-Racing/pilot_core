@@ -1,29 +1,18 @@
 """
-test_slam_synthetic_pipeline.py — End-to-end test of the ORB-SLAM3 RGBD
-pipeline on synthetic sensor data.
+Real ORB-SLAM3 (through the orbslam3_python pybind11 wrapper) on synthetic
+RGBD + IMU data: two laps of a closed track from synthetic.closed_loop_generator.
 
-Only the RGBD frames and IMU readings are synthetic (two laps of a closed
-track from synthetic.closed_loop_generator); tracking and mapping are done by
-the real ORB-SLAM3 library through its pybind11 wrapper (``orbslam3_python``).
+Skipped unless orbslam3_python imports. Also needs ORB_SLAM3/Vocabulary/ORBvoc.txt
+and synthetic_slam_settings.yaml.
 
-Skipped unless ``orbslam3_python`` is importable (ORB-SLAM3 and the wrapper
-must be built); also needs ORB_SLAM3/Vocabulary/ORBvoc.txt and
-synthetic_slam_settings.yaml.  The tests share one SLAM system and run in
-order:
+The tests share one SLAM system and have to run in order. Lap 1 is the mapping
+phase (A): >= 30% of frames tracked, map points spread in X and Z, at least 3
+keyframes. Map changes (loop closure, global BA) are only logged. Lap 2 (B)
+drives over the mapped track and needs >= 20% tracked.
 
-**Phase A — Mapping (lap 1)**
-    - at least 30 % of frames track OK
-    - 3D map points are created and spread out in X and Z
-    - at least 3 keyframes exist
-    Map changes (loop closure / global BA) are logged, not asserted.
-
-**Phase B — Driving lap (lap 2)**
-    - at least 20 % of frames track OK on the already-mapped track
-
-A 2x2 debug video (RGB, depth, IMU, BEV map) is written to
-test_output/slam_synthetic_pipeline.mp4.  The test is single-process (no
-workers) to keep the SLAM lifecycle simple; worker integration is tested
-elsewhere.
+Writes a 2x2 debug video (RGB, depth, IMU, BEV) to
+test_output/slam_synthetic_pipeline.mp4. Kept single-process, no workers, so
+the SLAM lifecycle stays simple; workers are covered elsewhere.
 """
 
 from __future__ import annotations
@@ -37,20 +26,18 @@ import cv2
 import numpy as np
 import pytest
 
-# --- Skip if orbslam3_python is not available ---
 orbslam3 = pytest.importorskip(
     "orbslam3_python",
     reason="orbslam3_python wrapper not built or not on sys.path",
 )
 
-# Ensure project root is on path for synthetic imports
+# project root on sys.path for the synthetic imports
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from synthetic.closed_loop_generator import ClosedLoopFrameGenerator
 
-# --- Paths ---
 VOCAB_PATH = os.path.join(ROOT, "ORB_SLAM3", "Vocabulary", "ORBvoc.txt")
 SETTINGS_PATH = os.path.join(ROOT, "synthetic_slam_settings.yaml")
 VIDEO_DIR = os.path.join(ROOT, "test_output")
@@ -58,30 +45,19 @@ VIDEO_DIR = os.path.join(ROOT, "test_output")
 logger = logging.getLogger(__name__)
 
 
-# --- Frame Logger ---
-
 class FrameLogger:
-    """Records a four-panel 2x2 video:
-
-        +------------------+------------------+
-        |  (1) RGB image   | (2) Depth mask   |
-        +------------------+------------------+
-        |  (3) IMU values  | (4) BEV map      |
-        +------------------+------------------+
-
-    Each panel is 640x480.  Final video is 1280x960.
-    """
+    """2x2 debug video: RGB | depth on top, IMU | BEV map below.
+    Panels are 640x480, so the video is 1280x960."""
 
     PANEL_W = 640
     PANEL_H = 480
 
-    # Camera intrinsics (must match synthetic_slam_settings.yaml)
+    # must match synthetic_slam_settings.yaml
     FX = 456.99
     FY = 456.99
     CX = 320.0
     CY = 240.0
 
-    # BEV rendering extents (metres)
     BEV_RANGE = 5.0  # +/- 5 m around the centroid
 
     def __init__(self, output_path: str, fps: float = 25.0) -> None:
@@ -99,8 +75,6 @@ class FrameLogger:
         self._frame_count = 0
         logger.info(f"FrameLogger: writing to {output_path}")
 
-    # --- public API ---
-
     def log(
         self,
         rgb: np.ndarray,
@@ -112,31 +86,24 @@ class FrameLogger:
         phase: str = "A",
     ) -> None:
         """Compose one 2x2-panel frame and write it to the video."""
-        # Accumulate trajectory
         self._trajectory.append(pose[:3, 3].copy())
 
-        # Fetch current map points from SLAM
         raw_pts = slam_system.get_all_map_points()
         pts_3d = np.asarray(raw_pts, dtype=np.float32)
         if len(pts_3d) > 0:
             self._all_map_pts = pts_3d
 
-        # (1) Raw synthetic RGB frame
         panel1 = self._to_panel(rgb.copy())
         state_name = _tracking_state_name(state)
         colour = (0, 255, 0) if state == 2 else (0, 0, 255)
         self._put_label(panel1, f"{state_name}  f:{self._frame_count}", (10, 30), colour)
 
-        # (2) Depth visualisation
         panel2 = self._draw_depth_mask(depth)
 
-        # (3) IMU values
         panel3 = self._draw_imu_panel(imu)
 
-        # (4) BEV map
         panel4 = self._draw_bev_map(pose, phase)
 
-        # Assemble 2x2 grid
         top_row = np.hstack([panel1, panel2])
         bot_row = np.hstack([panel3, panel4])
         combined = np.vstack([top_row, bot_row])
@@ -144,30 +111,24 @@ class FrameLogger:
         self._frame_count += 1
 
     def release(self) -> str:
-        """Finalise the video file and return its path."""
         self._writer.release()
         logger.info(
             f"FrameLogger: wrote {self._frame_count} frames to {self._path}"
         )
         return self._path
 
-    # --- internal helpers ---
-
     def _to_panel(self, img: np.ndarray) -> np.ndarray:
-        """Resize / pad to exactly PANEL_W x PANEL_H."""
         h, w = img.shape[:2]
         if (w, h) != (self.PANEL_W, self.PANEL_H):
             img = cv2.resize(img, (self.PANEL_W, self.PANEL_H))
         return img
 
     def _draw_depth_mask(self, depth: np.ndarray) -> np.ndarray:
-        """Colourmap the depth image into an RGB panel."""
         panel = np.zeros((self.PANEL_H, self.PANEL_W, 3), dtype=np.uint8)
         if depth is None or depth.size == 0:
             self._put_label(panel, "No depth", (10, 30))
             return panel
         d = depth.copy().astype(np.float32)
-        # Resize to panel dims if needed
         if d.shape[:2] != (self.PANEL_H, self.PANEL_W):
             d = cv2.resize(d, (self.PANEL_W, self.PANEL_H),
                            interpolation=cv2.INTER_NEAREST)
@@ -183,7 +144,6 @@ class FrameLogger:
             ((d[valid] - d_min) / d_range * 255), 0, 255
         ).astype(np.uint8)
         coloured = cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
-        # Black out invalid pixels
         coloured[~valid] = (0, 0, 0)
         self._put_label(
             coloured,
@@ -193,7 +153,7 @@ class FrameLogger:
         return coloured
 
     def _draw_imu_panel(self, imu: dict | None) -> np.ndarray:
-        """Render IMU accelerometer and gyroscope values as text + bar graph."""
+        """Accel and gyro values as text plus a bar each"""
         panel = np.zeros((self.PANEL_H, self.PANEL_W, 3), dtype=np.uint8)
         self._put_label(panel, "IMU Readings", (10, 30), (200, 200, 200))
 
@@ -204,30 +164,27 @@ class FrameLogger:
         accel = imu.get('accel', np.zeros(3))
         gyro = imu.get('gyro', np.zeros(3))
 
-        # Accelerometer section
+        # accel
         self._put_label(panel, "Accelerometer (m/s2)", (10, 70), (180, 180, 255))
         labels_a = ['X', 'Y', 'Z']
-        max_accel = 15.0  # scale bar to this
+        max_accel = 15.0
         bar_x0, bar_w = 100, 400
         for j, (lbl, val) in enumerate(zip(labels_a, accel)):
             y = 100 + j * 50
             self._put_label(panel, f"{lbl}: {val:+8.3f}", (10, y + 15))
-            # Bar: centred at midpoint, extends left/right
+            # bar is centred, grows left for negative values
             mid = bar_x0 + bar_w // 2
             extent = int(np.clip(val / max_accel, -1, 1) * (bar_w // 2))
-            # Background bar
             cv2.rectangle(panel, (bar_x0, y), (bar_x0 + bar_w, y + 25),
                           (40, 40, 40), -1)
-            # Centre line
             cv2.line(panel, (mid, y), (mid, y + 25), (80, 80, 80), 1)
-            # Value bar
             col = (100, 200, 100) if val >= 0 else (100, 100, 200)
             if extent >= 0:
                 cv2.rectangle(panel, (mid, y + 2), (mid + extent, y + 23), col, -1)
             else:
                 cv2.rectangle(panel, (mid + extent, y + 2), (mid, y + 23), col, -1)
 
-        # Gyroscope section
+        # gyro
         self._put_label(panel, "Gyroscope (rad/s)", (10, 270), (255, 180, 180))
         labels_g = ['X', 'Y', 'Z']
         max_gyro = 5.0
@@ -248,10 +205,9 @@ class FrameLogger:
         return panel
 
     def _draw_bev_map(self, pose: np.ndarray, phase: str) -> np.ndarray:
-        """Render a bird's-eye view of map points + trajectory."""
         bev = np.zeros((self.PANEL_H, self.PANEL_W, 3), dtype=np.uint8)
 
-        # Determine BEV extents from all accumulated data
+        # fit the view to everything seen so far
         all_xz = []
         if len(self._all_map_pts) > 0:
             all_xz.append(self._all_map_pts[:, [0, 2]])
@@ -271,14 +227,14 @@ class FrameLogger:
             combined[:, 1].max() - combined[:, 1].min(),
             2.0,
         )
-        half = spread * 0.6  # 20% margin
+        half = spread * 0.6
 
         def world_to_px(wx, wz):
             px = int((wx - cx + half) / (2 * half) * self.PANEL_W)
             py = int((wz - cz + half) / (2 * half) * self.PANEL_H)
             return px, py
 
-        # Draw map points (grey dots)
+        # map points, subsampled to ~3000
         if len(self._all_map_pts) > 0:
             pts_bev = self._all_map_pts[:, [0, 2]]
             for wx, wz in pts_bev[::max(1, len(pts_bev) // 3000)]:
@@ -286,7 +242,6 @@ class FrameLogger:
                 if 0 <= px < self.PANEL_W and 0 <= py < self.PANEL_H:
                     bev[py, px] = (100, 100, 100)
 
-        # Draw trajectory
         if len(self._trajectory) >= 2:
             traj = np.array(self._trajectory)
             traj_xz = traj[:, [0, 2]]
@@ -297,19 +252,16 @@ class FrameLogger:
                 col = (0, 255, 0) if phase == "A" else (255, 200, 0)
                 cv2.line(bev, p1, p2, col, 1, cv2.LINE_AA)
 
-        # Current position (bright dot)
         cur_x, cur_z = pose[0, 3], pose[2, 3]
         cpx, cpy = world_to_px(cur_x, cur_z)
         cv2.circle(bev, (cpx, cpy), 5, (0, 0, 255), -1)
 
-        # Heading arrow (forward = third column of rotation)
-        fwd_world = pose[:3, 2]  # camera forward = travel direction
+        fwd_world = pose[:3, 2]  # camera forward (3rd column) = travel direction
         arrow_len = int(self.PANEL_W * 0.04)
         ax = cpx + int(fwd_world[0] * arrow_len / (2 * half) * self.PANEL_W)
         ay = cpy + int(fwd_world[2] * arrow_len / (2 * half) * self.PANEL_H)
         cv2.arrowedLine(bev, (cpx, cpy), (ax, ay), (0, 0, 255), 2, tipLength=0.4)
 
-        # Labels
         phase_label = "MAPPING" if phase == "A" else "LOCALIZATION"
         self._put_label(bev, f"BEV — {phase_label}", (10, 25), (200, 200, 200))
         n_pts = len(self._all_map_pts)
@@ -339,8 +291,6 @@ class FrameLogger:
         )
 
 
-# --- Helpers ---
-
 def _tracking_state_name(state: int) -> str:
     _names = {
         -1: "SYSTEM_NOT_READY",
@@ -354,16 +304,9 @@ def _tracking_state_name(state: int) -> str:
     return _names.get(state, f"UNKNOWN({state})")
 
 
-# --- Fixtures ---
-
 @pytest.fixture(scope="module")
 def synthetic_frames():
-    """Generate two continuous laps of synthetic RGBD frames.
-
-    Returns the full 2-lap sequence.  Tests split it:
-      Phase A = first lap  (frames 0 .. n_per_lap-1)
-      Phase B = second lap (frames n_per_lap .. 2*n_per_lap-1)
-    """
+    """Two continuous laps. Phase A uses the first half, phase B the second."""
     n_per_lap = 300
     logger.info("Generating synthetic closed-loop frames (2 laps) …")
     gen = ClosedLoopFrameGenerator(
@@ -382,7 +325,6 @@ def synthetic_frames():
 
 @pytest.fixture(scope="module")
 def slam_system():
-    """Create and yield an ORB-SLAM3 System; shut it down after test module."""
     assert os.path.isfile(VOCAB_PATH), f"Vocabulary not found: {VOCAB_PATH}"
     assert os.path.isfile(SETTINGS_PATH), f"Settings not found: {SETTINGS_PATH}"
 
@@ -399,7 +341,6 @@ def slam_system():
 
 @pytest.fixture(scope="module")
 def frame_logger():
-    """Create a FrameLogger that writes the debug video."""
     video_path = os.path.join(VIDEO_DIR, "slam_synthetic_pipeline.mp4")
     fl = FrameLogger(video_path, fps=25.0)
     yield fl
@@ -407,22 +348,17 @@ def frame_logger():
     logger.info(f"Video saved to {path}")
 
 
-# --- Tests ---
-
 class TestSLAMSyntheticPipeline:
-    """Phase A (mapping) + Phase B (localization) using real ORB-SLAM3."""
-
-    # Phase A results shared with the later tests (class-level state)
+    # phase A results, kept on the class so later tests can see them
     _phase_a_map_points: np.ndarray | None = None
     _phase_a_poses: list = []
     _map_changed: bool = False
     _phase_a_tracking_ok_count: int = 0
     _phase_b_tracking_ok_count: int = 0
 
-    # --- Phase A: Mapping ---
+    # phase A: mapping
 
     def test_phase_a_mapping(self, slam_system, synthetic_frames, frame_logger):
-        """Feed the first lap to ORB-SLAM3 and verify mapping."""
         logger.info("═" * 60)
         logger.info("Phase A — MAPPING (lap 1)")
         logger.info("═" * 60)
@@ -435,7 +371,7 @@ class TestSLAMSyntheticPipeline:
         poses = []
 
         for i, (rgb, depth, gt_pose, ts, imu_data) in enumerate(lap1):
-            # ORB-SLAM3 expects uint8 RGB and float32 depth
+            # ORB-SLAM3 wants uint8 RGB, float32 depth
             rgb_u8 = rgb.astype(np.uint8)
             depth_f32 = depth.astype(np.float32)
 
@@ -455,7 +391,6 @@ class TestSLAMSyntheticPipeline:
                     f"(total changes: {map_changed_count})"
                 )
 
-            # Log frame to video
             frame_logger.log(
                 rgb_u8, depth_f32, pose, slam_system, state,
                 imu=imu_data, phase="A",
@@ -480,29 +415,23 @@ class TestSLAMSyntheticPipeline:
         logger.info(f"Map changes: {map_changed_count}")
         logger.info(f"Trajectory length: {slam_system.trajectory_length()}")
 
-        # --- Assertions ---
-        # At least 30% of frames should be tracked successfully
-        # (initialisation takes a few frames, and synthetic scenes may
-        # occasionally lose tracking in turns)
+        # Only 30%: init eats a few frames and the synthetic scene can lose
+        # tracking in the turns
         min_tracked = int(n * 0.30)
         assert tracking_ok >= min_tracked, (
             f"Expected at least {min_tracked} frames tracked OK, got {tracking_ok}"
         )
 
-        # Must have created some 3D map points
         assert len(map_points) > 0, "No map points were created"
 
         logger.info("✓ Phase A assertions passed")
 
-    # --- Phase A result inspection ---
-
     def test_phase_a_map_points_quality(self, slam_system):
-        """Verify map points are spatially distributed (not collapsed)."""
+        """Map points should be spread out, not collapsed to a blob"""
         pts = TestSLAMSyntheticPipeline._phase_a_map_points
         if pts is None or len(pts) == 0:
             pytest.skip("No map points from Phase A")
 
-        # Points should span more than 0.3 m in X and Z
         x_range = pts[:, 0].max() - pts[:, 0].min()
         z_range = pts[:, 2].max() - pts[:, 2].min()
 
@@ -518,7 +447,6 @@ class TestSLAMSyntheticPipeline:
         logger.info("✓ Map point quality OK")
 
     def test_phase_a_keyframes(self, slam_system):
-        """Verify multiple keyframes were created."""
         kf_poses = np.asarray(slam_system.get_all_keyframe_poses())
         n_kf = len(kf_poses)
         logger.info(f"Keyframes: {n_kf}")
@@ -526,10 +454,9 @@ class TestSLAMSyntheticPipeline:
         assert n_kf >= 3, f"Expected ≥3 keyframes, got {n_kf}"
         logger.info("✓ Keyframe count OK")
 
-    # --- Phase B: Driving lap on the mapped track ---
+    # phase B: second lap over the mapped track
 
     def test_phase_b_localization(self, slam_system, synthetic_frames, frame_logger):
-        """Feed the second lap — continuous tracking on the mapped track."""
         logger.info("═" * 60)
         logger.info("Phase B — DRIVING LAP (lap 2 on the mapped track)")
         logger.info("═" * 60)
@@ -556,7 +483,6 @@ class TestSLAMSyntheticPipeline:
             if slam_system.map_changed():
                 map_changed_b += 1
 
-            # Log frame to video
             frame_logger.log(
                 rgb_u8, depth_f32, pose, slam_system, state,
                 imu=imu_data, phase="B",
@@ -573,7 +499,6 @@ class TestSLAMSyntheticPipeline:
 
         logger.info(f"Phase B complete: {tracking_ok}/{n} frames tracked OK")
 
-        # At least 20% of frames should be tracked successfully
         min_tracked = int(n * 0.20)
         assert tracking_ok >= min_tracked, (
             f"Expected at least {min_tracked} Phase B frames OK, "
@@ -582,10 +507,7 @@ class TestSLAMSyntheticPipeline:
 
         logger.info("✓ Phase B assertions passed")
 
-    # --- Summary ---
-
     def test_summary(self, slam_system):
-        """Log a final summary of both phases."""
         pts = TestSLAMSyntheticPipeline._phase_a_map_points
         n_pts = len(pts) if pts is not None else 0
         kf = np.asarray(slam_system.get_all_keyframe_poses())
@@ -600,5 +522,5 @@ class TestSLAMSyntheticPipeline:
         logger.info(f"  Trajectory length   : {slam_system.trajectory_length()}")
         logger.info("═" * 60)
 
-        # Reporting only; always passes
+        # just reporting, always passes
         assert True

@@ -1,17 +1,15 @@
 """
-SLAMWorker — reads frames from FrameBuffer, runs ORB_SLAM3 RGBD tracking
-via the pybind11 wrapper, and writes pose + point-cloud data into shared
-buffers.
+SLAMWorker: FrameBuffer -> ORB_SLAM3 RGBD tracking (pybind11 wrapper) ->
+PoseBuffer, plus the map point cloud.
 
-Pose contract: PoseBuffer carries the **camera-to-world** transform (Twc),
-so ``pose[:3, 3]`` is the camera position in the map frame.  ORB-SLAM3
-returns world-to-camera (Tcw); it is inverted here.  Frames where tracking
-is not OK are not published (ORB-SLAM3 returns an identity/stale pose).
+PoseBuffer gets camera-to-world (Twc), so pose[:3, 3] is the camera position
+in the map frame. ORB-SLAM3 hands back world-to-camera (Tcw) and we invert it
+here. If tracking isn't OK we don't publish at all, since the pose ORB-SLAM3
+returns then is identity or stale.
 
-Operates in two phases:
-    Phase A (mapping):  TrackRGBD per frame, accumulate trajectory, publish
-                        point cloud when map changes, signal loop closure.
-    Phase B (driving):  ActivateLocalizationMode, TrackRGBD for live pose only.
+Two phases. While mapping it's TrackRGBD every frame, point cloud published
+when the map changes, loop closure signalled. Once driving we switch to
+localization mode and only use TrackRGBD for the live pose.
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ import numpy as np
 from .base_worker import BaseWorker
 from shared_buffer import FrameBuffer, PoseBuffer
 
-# Optional — only needed when a point-cloud buffer is supplied
+# optional, only needed if a point-cloud buffer is passed in
 try:
     from shared_buffer.pointcloud_buffer import PointCloudBuffer
 except ImportError:
@@ -41,7 +39,7 @@ _STATE_NAMES = {
 
 
 def invert_se3(T: np.ndarray) -> np.ndarray:
-    """Closed-form inverse of a 4×4 rigid transform."""
+    """Inverse of a 4x4 rigid transform (R^T, -R^T t)."""
     R, t = T[:3, :3], T[:3, 3]
     inv = np.eye(4, dtype=np.float32)
     inv[:3, :3] = R.T
@@ -50,30 +48,29 @@ def invert_se3(T: np.ndarray) -> np.ndarray:
 
 
 class SLAMWorker(BaseWorker):
-    """Worker process for visual SLAM (ORB_SLAM3 via pybind11).
+    """Visual SLAM worker (ORB_SLAM3 through pybind11).
 
     Config kwargs
     -------------
     input_buffer : FrameBuffer
-        Shared FrameBuffer to read RGB+Depth from.
+        RGB + depth in.
     output_buffer : PoseBuffer
-        Shared PoseBuffer to write pose matrices into.
-    pointcloud_buffer : PointCloudBuffer | None
-        Shared PointCloudBuffer for the 3D map (optional).
+        Twc out.
+    pointcloud_buffer : PointCloudBuffer, optional
+        3D map points.
     vocab_path : str
-        Path to ORB vocabulary file (``ORBvoc.txt``).
+        ORBvoc.txt
     settings_path : str
-        Path to camera settings YAML for ORB_SLAM3.
-    loop_event : multiprocessing.Event | None
-        Set when ORB-SLAM3 reports a map change (loop closure / global BA).
-    localize_event : multiprocessing.Event | None
-        Once set, switches ORB-SLAM3 to localization-only mode.
+        ORB_SLAM3 camera settings YAML.
+    loop_event : multiprocessing.Event, optional
+        Set when ORB-SLAM3 reports a map change (loop closure or global BA).
+    localize_event : multiprocessing.Event, optional
+        When set we switch ORB-SLAM3 into localization-only mode.
     warmup_frames : int
-        Number of initial frames to skip while stereo depth settles
-        (default 15).
+        Frames to drop at startup while stereo depth settles. Default 15.
 
-    Without ``orbslam3_python`` installed the worker runs as a stub that
-    publishes identity poses and no point cloud.
+    If orbslam3_python isn't installed this runs as a stub: identity poses,
+    no point cloud.
     """
 
     def __init__(self, name: str = "slam", **kwargs: Any) -> None:
@@ -124,7 +121,7 @@ class SLAMWorker(BaseWorker):
             self._slam = None
 
     def step(self) -> None:
-        # --- Switch to localization-only mode once mapping is done ---
+        # mapping done -> localization only
         if (
             not self._localization_activated
             and self._localize_event is not None
@@ -135,7 +132,6 @@ class SLAMWorker(BaseWorker):
                 self.logger.info("Switched to localization-only mode")
             self._localization_activated = True
 
-        # --- Read a frame ---
         result = self._frame_buf.read_latest()
         if result is None:
             time.sleep(0.01)
@@ -149,13 +145,13 @@ class SLAMWorker(BaseWorker):
 
         self._frame_count += 1
 
-        # Skip the camera warm-up: the first frames after the OAK-D starts
-        # have sparse stereo depth, which makes ORB-SLAM3 initialise a thin
-        # map, lose it and reset repeatedly.
+        # Drop the warm-up frames. Right after the OAK-D starts the stereo
+        # depth is sparse, and ORB-SLAM3 would initialise a thin map, lose it,
+        # and keep resetting.
         if self._frame_count <= self._warmup_frames:
             return
 
-        # Log the depth statistics of the first tracked frame (expects metres)
+        # sanity check on the first tracked frame, depth should be in metres
         if self._frame_count == self._warmup_frames + 1:
             nonzero = depth[depth > 0]
             self.logger.debug(
@@ -179,7 +175,6 @@ class SLAMWorker(BaseWorker):
             if tracking_ok:
                 self._pose_buf.write(Twc)
 
-            # Periodic tracking diagnostics
             if self._frame_count % 30 == 0:
                 tx, ty, tz = (float(v) for v in Twc[:3, 3])
                 all_pts = np.asarray(self._slam.get_all_map_points(), dtype=np.float32)
@@ -199,8 +194,8 @@ class SLAMWorker(BaseWorker):
                 )
                 self.logger.debug(f"  map_pt_range: {pt_range}")
 
-            # Publish point cloud on loop closure AND periodically so
-            # MappingWorker has wall points even without a detected loop.
+            # Publish on map change and also every N frames, otherwise
+            # MappingWorker has no wall points until a loop is detected.
             map_changed = self._slam.map_changed()
             publish_pc = map_changed or (
                 self._pc_buf is not None
@@ -215,11 +210,11 @@ class SLAMWorker(BaseWorker):
                     else:
                         self.logger.debug(f"Periodic PC publish: {len(all_pts)} pts")
 
-            # map_changed() fires once per loop closure / global BA
+            # map_changed() is true once per loop closure / global BA
             if map_changed and self._loop_event is not None:
                 self._loop_event.set()
         else:
-            # Stub mode (no orbslam3_python)
+            # stub, no orbslam3_python
             identity = np.eye(4, dtype=np.float32)
             self._pose_buf.write(identity)
 

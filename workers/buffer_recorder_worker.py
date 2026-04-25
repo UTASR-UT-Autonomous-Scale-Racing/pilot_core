@@ -1,13 +1,10 @@
 """
-BufferRecorderWorker — generic per-buffer recorder that saves raw bytes
-with a binary metadata header to disk.
+Records one shared-memory buffer to disk as raw bytes plus a small binary
+header. Spawn one of these per buffer you want recorded.
 
-One instance is spawned for **each** buffer that should be recorded.  Each
-sampled slot is written as a fixed-size record header followed by the raw
-payload bytes.  All integers are little-endian.
+Everything is little-endian. Each sampled slot becomes a fixed-size record
+header followed by the payload:
 
-Disk layout per record
-----------------------
     [8  bytes]  uint64   seq_no
     [8  bytes]  float64  produced_ts
     [8  bytes]  float64  read_ts  (wall-clock when this worker read the slot)
@@ -16,8 +13,8 @@ Disk layout per record
     [2  bytes]  uint16   dtype_tag
     [payload_size bytes]  raw payload bytes  (identical to the shm slot payload)
 
-Each file is named ``<buffer_name>_<session_ts>.bin`` and carries a one-time
-64-byte file header:
+Files are named <buffer_name>_<session_ts>.bin and start with a 64-byte
+header:
 
     [8  bytes]  magic     b"PLTREC\\x00\\x01"
     [2  bytes]  uint16    schema_version
@@ -27,16 +24,10 @@ Each file is named ``<buffer_name>_<session_ts>.bin`` and carries a one-time
     [8  bytes]  float64   session_start_ts
     [36 bytes]  reserved  (zero-filled)
 
-``top_n``
----------
-After ``top_n`` records the file pointer seeks back to the first record
-and overwrites from there (the file is not truncated).  ``top_n=0``
-disables the cap and records indefinitely.
-
-``sample_k``
-------------
-The worker only writes a record when ``(seq_no % sample_k) == 0``, giving
-a decimated recording that matches the configured cadence.
+Only slots with seq_no % sample_k == 0 get written, so sample_k just
+decimates. After top_n records we seek back to the first record and
+overwrite from there. NB: the file is not truncated, so older tail records
+can still be sitting past the current write position. top_n=0 means no cap.
 """
 
 from __future__ import annotations
@@ -50,11 +41,11 @@ from .base_worker import BaseWorker
 from shared_buffer.ring_buffer import SharedRingBuffer
 from shared_buffer.schema import SlotHeader, SCHEMA_VERSION
 
-# --- Binary protocol constants ---
 FILE_MAGIC = b"PLTREC\x00\x01"             # 8 bytes
 # magic(8) schema(2) dtype(2) sample_k(4) top_n(4) session_ts(8) reserved(30) = 58 bytes
 FILE_HEADER_FMT = "<8sHHIId30s"
-FILE_HEADER_SIZE = 64                      # on-disk size; struct is zero-padded by 6 bytes
+# on-disk size; struct is zero-padded by 6 bytes
+FILE_HEADER_SIZE = 64
 
 # seq_no, produced_ts, read_ts, payload_size, schema_ver, dtype_tag
 RECORD_HEADER_FMT = "<QddIHH"
@@ -62,25 +53,17 @@ RECORD_HEADER_SIZE = struct.calcsize(RECORD_HEADER_FMT)  # 32 bytes
 
 
 class BufferRecorderWorker(BaseWorker):
-    """Generic worker that records a single shared-memory buffer to disk.
+    """Records a single shared-memory buffer to disk.
 
-    Config kwargs
-    -------------
-    buffer : SharedRingBuffer | typed buffer wrapper
-        The buffer to read from.  May be a raw ``SharedRingBuffer`` or a
-        typed wrapper like ``FrameBuffer`` — the worker accesses the
-        underlying ``._rb`` if present, else uses it directly.
-    buffer_name : str
-        Human-readable name (used in the output filename).
-    output_dir : str
-        Directory where the ``.bin`` file is written.
-    sample_k : int
-        Only record every *k*-th sequence number (default 1 = every sample).
-    top_n : int
-        Maximum number of records written before wrapping (0 = unlimited).
-    dtype_tag : int
-        Numeric ``DTypeTag`` value for the file header (default: the
-        buffer's own ``dtype_tag``).
+    Config kwargs:
+      buffer       a SharedRingBuffer, or a typed wrapper (FrameBuffer etc.),
+                   in which case we use its ._rb
+      buffer_name  goes in the output filename
+      output_dir   where the .bin goes (default /tmp/pilot_recordings)
+      sample_k     record every k-th seq_no (default 1, i.e. everything)
+      top_n        records before wrapping, 0 = unlimited
+      dtype_tag    DTypeTag written to the file header; defaults to the
+                   buffer's own
     """
 
     def __init__(self, name: str = "buf_recorder", **kwargs: Any) -> None:
@@ -97,11 +80,9 @@ class BufferRecorderWorker(BaseWorker):
         self._data_start_offset: int = 0
         self._session_ts: float = 0.0
 
-    # --- lifecycle ---
-
     def setup(self) -> None:
         buf = self.config["buffer"]
-        # Unwrap typed wrapper → underlying SharedRingBuffer
+        # typed wrappers keep the ring buffer in ._rb
         if hasattr(buf, "_rb"):
             self._rb = buf._rb
         else:
@@ -144,7 +125,7 @@ class BufferRecorderWorker(BaseWorker):
         if header.seq_no % self._sample_k != 0:
             return
 
-        # top_n reached: rewind to the first record and overwrite
+        # hit top_n, rewind and overwrite from the first record
         if self._top_n > 0 and self._records_written >= self._top_n:
             self._fp.seek(self._data_start_offset)
             self._records_written = 0
@@ -161,10 +142,7 @@ class BufferRecorderWorker(BaseWorker):
                 f"{self._records_written} records written"
             )
 
-    # --- binary I/O helpers ---
-
     def _write_file_header(self) -> None:
-        """Write the 64-byte file header once at the start of the file."""
         struct_size = struct.calcsize(FILE_HEADER_FMT)
         header_bytes = struct.pack(
             FILE_HEADER_FMT,
@@ -180,7 +158,6 @@ class BufferRecorderWorker(BaseWorker):
         self._fp.write(header_bytes)
 
     def _write_record(self, header: SlotHeader, payload: bytes) -> None:
-        """Write one record: record-header + raw payload bytes."""
         rec_hdr = struct.pack(
             RECORD_HEADER_FMT,
             header.seq_no,
@@ -193,15 +170,12 @@ class BufferRecorderWorker(BaseWorker):
         self._fp.write(rec_hdr)
         self._fp.write(payload)
 
-    # --- static helpers for reading files back ---
+    # for reading recordings back
 
     @staticmethod
     def read_file_header(fp) -> dict:
-        """Read and decode the 64-byte file header from an open file.
-
-        Returns a dict with keys: ``magic``, ``schema_version``,
-        ``dtype_tag``, ``sample_k``, ``top_n``, ``session_ts``.
-        """
+        """Decode the 64-byte file header into a dict (magic, schema_version,
+        dtype_tag, sample_k, top_n, session_ts)."""
         raw = fp.read(FILE_HEADER_SIZE)
         struct_size = struct.calcsize(FILE_HEADER_FMT)
         magic, schema, dtype, sample_k, top_n, session_ts, _reserved_b = (
@@ -218,10 +192,8 @@ class BufferRecorderWorker(BaseWorker):
 
     @staticmethod
     def read_record(fp) -> tuple[dict, bytes] | None:
-        """Read one record from an open file.
-
-        Returns ``(record_header_dict, payload_bytes)`` or *None* at EOF.
-        """
+        """(header_dict, payload) for the next record, or None at EOF / on a
+        truncated record."""
         raw_hdr = fp.read(RECORD_HEADER_SIZE)
         if len(raw_hdr) < RECORD_HEADER_SIZE:
             return None

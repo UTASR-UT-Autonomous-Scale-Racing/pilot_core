@@ -1,24 +1,19 @@
 """
-MappingWorker — accumulates the driven BEV trajectory and wall points, then
-extracts left / right track boundaries once ``loop_event`` is set.
+MappingWorker: records the driven BEV trajectory and the wall points, and
+turns them into left/right track boundaries once ``loop_event`` fires.
 
-Phase A (mapping):
-    - Read PoseBuffer poses → BEV (x, y, heading) trajectory.
-    - Read PointCloudBuffer (LidarProjectionWorker in the simulator, or
-      SLAMWorker map points) → BEV wall points.  Each cloud is the full
-      accumulated map, so the newest one replaces the previous.
-    - Continue until ``loop_event`` is set (operator key [l], or a SLAM loop
-      closure).
+While mapping, poses from PoseBuffer become an (x, y, heading) trajectory and
+PointCloudBuffer gives the wall points (LidarProjectionWorker in sim, SLAM map
+points on the car). Each cloud is the whole accumulated map, so we just keep
+the newest one. This goes on until loop_event is set, either by the operator
+pressing [l] or by a SLAM loop closure.
 
-Phase B (boundary extraction):
-    - Each wall point is assigned to the left or right of the driven
-      trajectory (cross product with the forward direction at its nearest
-      trajectory pose) and ordered by trajectory arc length.  Works for any
-      track topology.
-    - Right-side points are written to TrackBoundaryBuffer as ``outer_line``
-      and left-side points as ``inner_line`` (correct for counter-clockwise
-      laps), optionally saved to ``boundary_save_path``, then
-      ``mapping_done_event`` is set.
+Then each wall point gets put on the left or right of the driven path (sign of
+the cross product with the forward direction at the nearest trajectory pose)
+and sorted by arc length along the path, which doesn't care about track
+topology. Right side goes to TrackBoundaryBuffer as outer_line, left side as
+inner_line. That labelling is only right for counter-clockwise laps. Optionally
+saved to boundary_save_path, then mapping_done_event is set.
 """
 
 from __future__ import annotations
@@ -37,7 +32,7 @@ from shared_buffer.track_boundary_buffer import TrackBoundaryBuffer
 
 
 def _to_bev(points_3d: np.ndarray, axes: tuple = (0, 2)) -> np.ndarray:
-    """Project 3D world points to 2D BEV by selecting two horizontal axes."""
+    """3D -> BEV, just picks out the two horizontal axes."""
     return points_3d[:, list(axes)]
 
 
@@ -47,55 +42,49 @@ def split_walls_by_trajectory(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Split wall points into left / right relative to the driven trajectory.
 
-    For every wall point the nearest trajectory pose is found via a KD-tree.
-    The cross product of (forward direction at that pose) and (vector to wall
-    point) determines the side: positive → left, negative → right.
-    Points are sorted by their trajectory arc-length so they form an
-    ordered polyline.
+    Nearest trajectory pose per wall point comes from a KD-tree. The sign of
+    the cross product (heading at that pose) x (pose -> wall point) picks the
+    side: positive is left, negative is right. Each side is then sorted by arc length along the trajectory so
+    it comes out as an ordered polyline.
 
     Parameters
     ----------
     bev_wall_pts : np.ndarray
-        ``(N, 2)`` BEV wall points.
+        (N, 2) BEV wall points.
     trajectory_xyh : np.ndarray
-        ``(T, 3)`` columns = [x, y, heading_rad] of the driven path.
+        (T, 3) driven path, columns [x, y, heading_rad].
 
     Returns
     -------
-    (left_pts, right_pts) — each ``(M, 2) float32``, ordered by arc-length.
+    (left_pts, right_pts), each (M, 2) float32, ordered by arc length.
     """
     from scipy.spatial import KDTree
 
     traj_pos = trajectory_xyh[:, :2]   # (T, 2)
     traj_hdg = trajectory_xyh[:, 2]    # (T,)
 
-    # Arc-lengths along trajectory (used for ordering boundary points)
+    # cumulative arc length, only used for ordering
     arc = np.concatenate([[0.0], np.cumsum(
         np.linalg.norm(np.diff(traj_pos, axis=0), axis=1)
     )])  # (T,)
 
-    # Nearest trajectory point for every wall point
     tree = KDTree(traj_pos)
     _, nearest_idx = tree.query(bev_wall_pts)  # (N,)
 
-    # Forward vectors at nearest trajectory points
-    hdgs = traj_hdg[nearest_idx]           # (N,)
-    fwd_x = np.cos(hdgs)                   # (N,)
-    fwd_y = np.sin(hdgs)                   # (N,)
+    hdgs = traj_hdg[nearest_idx]  # (N,)
+    fwd_x = np.cos(hdgs)
+    fwd_y = np.sin(hdgs)
 
-    # Vector from trajectory point → wall point
     v = bev_wall_pts - traj_pos[nearest_idx]  # (N, 2)
 
-    # Cross product z-component: fwd × v
-    #   positive → wall is to the LEFT  (ROS: y > 0)
-    #   negative → wall is to the RIGHT (ROS: y < 0)
+    # z of fwd x v: > 0 means the wall is on the left (ROS y > 0),
+    # < 0 on the right
     cross = fwd_x * v[:, 1] - fwd_y * v[:, 0]  # (N,)
     left_mask = cross > 0
 
     left_pts = bev_wall_pts[left_mask]
     right_pts = bev_wall_pts[~left_mask]
 
-    # Order each side by arc-length of their nearest trajectory point
     def _order_by_arc(pts: np.ndarray, idx: np.ndarray) -> np.ndarray:
         if len(pts) == 0:
             return pts
@@ -109,32 +98,31 @@ def split_walls_by_trajectory(
 
 
 class MappingWorker(BaseWorker):
-    """Worker that accumulates BEV data and extracts track boundaries.
+    """Accumulates BEV data and extracts the track boundaries.
 
     Config kwargs
     -------------
     pose_buffer : PoseBuffer
-        Vehicle poses (position + orientation).
     segment_buffer : SegmentationBuffer
-        Wall masks from vision (currently unused).
+        Vision wall masks. Not used at the moment.
     pointcloud_buffer : PointCloudBuffer
-        3D wall points from LidarProjectionWorker.
+        3D wall points (LidarProjectionWorker or SLAM).
     boundary_buffer : TrackBoundaryBuffer
-        Output: extracted left / right track boundaries.
+        Where the left/right boundaries end up.
     loop_event : mp.Event
-        Set on loop closure (operator key [l] or SLAM); triggers extraction.
+        Loop closure (operator [l] or SLAM), kicks off extraction.
     mapping_done_event : mp.Event
-        Set by this worker when boundaries are extracted and ready.
+        We set this once boundaries are written.
     boundary_min_points : int
-        Minimum wall points before attempting extraction (default 50).
+        Don't try extracting with fewer wall points than this (default 50).
     boundary_save_path : str | None
-        If set, save ``outer_line.npy`` / ``inner_line.npy`` to this directory.
+        Directory for outer_line.npy / inner_line.npy, if given.
     bev_axes : list[int]
-        Two axis indices for the horizontal BEV plane.
-        Simulator (Z-up): [0, 1].  SLAM camera (Y-down): [0, 2].
+        The two horizontal axes. Sim is Z-up so [0, 1]; SLAM camera frame is
+        Y-down so [0, 2].
     forward_axis : int
-        Body axis pointing along the direction of travel (see
-        :func:`workers.bev.pose_to_bev`).  Simulator: 0.  SLAM camera: 2.
+        Body axis along the direction of travel, see workers.bev.pose_to_bev.
+        0 in the sim, 2 for the SLAM camera.
     """
 
     def __init__(self, name: str = "mapping", **kwargs: Any) -> None:
@@ -150,7 +138,7 @@ class MappingWorker(BaseWorker):
         self._bev_axes: tuple = (0, 2)
         self._save_path: Optional[str] = None
 
-        # _bev_trajectory holds one (x, y, heading_rad) row per pose
+        # trajectory: one (x, y, heading_rad) row per pose
         self._bev_wall_pts: list[np.ndarray] = []
         self._bev_trajectory: list[np.ndarray] = []
         self._last_pose_seq = 0
@@ -180,7 +168,6 @@ class MappingWorker(BaseWorker):
             time.sleep(0.5)
             return
 
-        # --- Read latest pose → accumulate trajectory (x, y, heading) ---
         pose_result = self._pose_buf.read_latest()
         if pose_result is not None:
             pose_header, pose, _, _ = pose_result
@@ -191,7 +178,7 @@ class MappingWorker(BaseWorker):
                 )
                 self._last_pose_seq = pose_header.seq_no
 
-        # --- Read latest point cloud (full deduplicated wall cloud) ---
+        # the cloud is the full deduplicated wall map, so replace rather than append
         pc_result = self._pc_buf.read_latest()
         if pc_result is not None:
             pc_header, pts_3d = pc_result
@@ -203,7 +190,6 @@ class MappingWorker(BaseWorker):
                     f"{len(self._bev_wall_pts[0])} BEV pts"
                 )
 
-        # --- Check loop closure → extract boundaries ---
         if (
             self._loop_event is not None
             and self._loop_event.is_set()
@@ -214,7 +200,6 @@ class MappingWorker(BaseWorker):
         time.sleep(0.01)
 
     def _extract_boundaries(self) -> None:
-        """Split accumulated wall points into left/right using trajectory."""
         if not self._bev_wall_pts:
             self.logger.warning("No wall points accumulated — will retry in 2s")
             time.sleep(2.0)
@@ -256,8 +241,8 @@ class MappingWorker(BaseWorker):
             time.sleep(2.0)
             return
 
-        # right → outer_line, left → inner_line: matches a counter-clockwise
-        # lap; for clockwise laps the labels are swapped.
+        # right -> outer, left -> inner. Correct for a CCW lap, swapped if
+        # the lap was driven clockwise
         self._boundary_buf.write(right_line, left_line)
         self._boundaries_extracted = True
 

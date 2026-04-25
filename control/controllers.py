@@ -1,8 +1,8 @@
 """
-Track-following controllers: lateral (Pure Pursuit, Stanley, LQR, MPC)
-combined with the curvature-based speed planner into a :class:`TrackFollower`.
+Track-following controllers. Lateral laws (Pure Pursuit, Stanley, LQR, MPC)
+get paired with the curvature speed planner inside TrackFollower.
 
-All controllers output a signed :class:`Command` (steering +1 = left).
+Output is a signed Command, steering +1 = left.
 """
 
 from __future__ import annotations
@@ -20,15 +20,15 @@ from .types import Command, VehicleParams, VehicleState, wrap_angle
 class LateralController(Protocol):
     def reset(self) -> None: ...
     def steer(self, state: VehicleState, track: TrackModel, proj: Projection) -> float:
-        """Return the road-wheel angle in radians (+ = left)."""
+        """Road-wheel angle, rad, + = left."""
         ...
 
 
 @dataclass
 class PurePursuit:
-    """Geometric path tracking towards a look-ahead point on the centre-line.
+    """Pure pursuit: chase a look-ahead point on the centre-line.
 
-    Reference: R. C. Coulter, "Implementation of the Pure Pursuit Path
+    R. C. Coulter, "Implementation of the Pure Pursuit Path
     Tracking Algorithm", CMU-RI-TR-92-01, 1992.
 
     ``L_d = clip(k_v * v + lookahead_min, lookahead_min, lookahead_max)``,
@@ -57,15 +57,15 @@ class PurePursuit:
 
 @dataclass
 class Stanley:
-    """Front-axle heading + cross-track error law.
+    """Stanley law (heading error + cross-track error at the front axle).
 
-    Reference: S. Thrun et al., "Stanley: The Robot that Won the DARPA Grand
+    See S. Thrun et al., "Stanley: The Robot that Won the DARPA Grand
     Challenge", J. Field Robotics 23(9), 2006; G. Hoffmann et al.,
     "Autonomous Automobile Trajectory Tracking for Off-Road Driving",
     ACC 2007.
 
-    ``delta = heading_error - atan(k * e / (k_soft + v))`` evaluated at the
-    front axle (pose reference is taken as the rear axle).
+    delta = heading_error - atan(k * e / (k_soft + v)), evaluated at the
+    front axle. Our pose reference is the rear axle, so we shift forward by L.
     """
 
     params: VehicleParams
@@ -88,16 +88,17 @@ class Stanley:
 
 @dataclass
 class SpeedConfig:
-    v_max: float = 1.3            # m/s — keep a margin below the safety speed cap (1.5)
+    # m/s, leave some margin under the safety cap (1.5)
+    v_max: float = 1.3
     lat_accel_fraction: float = 0.6   # use this fraction of friction_coeff * g for corners
     accel: float = 1.5            # m/s² used by the profile (well below the car's limit)
-    decel: float = 1.0            # m/s² — coasting + limited backward input
-    preview: float = 0.5          # s — look this far ahead for the speed reference
+    decel: float = 1.0            # m/s^2: coasting plus a little backward input
+    preview: float = 0.5          # s, how far ahead to sample the speed ref
     longitudinal: LongitudinalConfig = field(default_factory=LongitudinalConfig)
 
 
 class TrackFollower:
-    """Lateral controller + speed planner on a :class:`TrackModel`."""
+    """Lateral controller + speed planner on a TrackModel."""
 
     def __init__(
         self,
@@ -131,8 +132,8 @@ class TrackFollower:
         self._v_cmd = None
 
     def v_ref(self, proj: Projection, v: float, dt: float) -> float:
-        """Profile speed a short preview ahead, ramped at ``accel`` so the
-        reference never jumps ahead of the car (e.g. from standstill)."""
+        # Profile speed a little ahead, ramped at `accel` so the reference
+        # can't run away from the car (from standstill especially).
         s_preview = proj.s + max(abs(v), 0.3) * self.speed.preview
         target = float(self.v_profile[self.track.index_at(s_preview)])
         prev = self._v_cmd if self._v_cmd is not None else max(v, 0.0)
@@ -153,8 +154,7 @@ class TrackFollower:
         return Command(steering, throttle).clipped()
 
 
-# --- Registry ---
-
+# control_mode name -> lateral controller factory
 def _pure_pursuit(params: VehicleParams, cfg: Dict[str, Any]) -> LateralController:
     return PurePursuit(params, **cfg)
 
@@ -188,7 +188,6 @@ def build_track_follower(
     lateral_cfg: Dict[str, Any] | None = None,
     speed_cfg: Dict[str, Any] | None = None,
 ) -> TrackFollower:
-    """Build a :class:`TrackFollower` for ``control_mode`` ``mode``."""
     if mode not in LATERAL_CONTROLLERS:
         raise ValueError(f"Unknown track controller {mode!r}; options: {sorted(LATERAL_CONTROLLERS)}")
     speed_cfg = dict(speed_cfg or {})

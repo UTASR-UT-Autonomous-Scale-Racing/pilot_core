@@ -1,18 +1,10 @@
 """
-test_pipeline_integration.py — Integration tests across the pilot_core
-data path:
-    OAK-D camera → FrameBuffer → SLAMWorker → PoseBuffer
-                                → VisionWorker → SegmentationBuffer
-    PoseBuffer + SegmentationBuffer + PointCloudBuffer → MappingWorker
-    → TrackBoundaryBuffer → ControlWorker (PID) → ControlBuffer
+Integration tests along the data path:
 
-Categories:
-    - Worker lifecycle: BaseWorker run loop starts and stops in a child process
-    - Synthetic pipeline: data flows frame → pose → map → boundaries → control
-    - Null pipeline: workers stepped with no input write nothing and do not crash
-    - Race conditions: concurrent writer / reader processes
-    - Mapping helpers, start.py CLI, FTG controller in the control path
-    - OAK-D integration: real camera → pipeline; skipped unless OAKD_AVAILABLE=1
+    camera -> FrameBuffer -> SLAM -> PoseBuffer (+ vision -> SegmentationBuffer)
+    -> MappingWorker -> TrackBoundaryBuffer -> ControlWorker -> ControlBuffer
+
+The OAK-D tests only run with OAKD_AVAILABLE=1.
 """
 
 from __future__ import annotations
@@ -41,10 +33,8 @@ def _uid():
     return uuid.uuid4().hex[:8]
 
 
-# --- Helper: minimal worker that stops after N steps ---
-
 class _StepCounterWorker(BaseWorker):
-    """Test worker that counts steps and auto-stops."""
+    """Counts steps and sets its own stop event after max_steps."""
 
     def __init__(self, name, max_steps=10, **kwargs):
         super().__init__(name, **kwargs)
@@ -64,23 +54,22 @@ class _StepCounterWorker(BaseWorker):
         pass
 
 
-# --- Smoke test: BaseWorker run loop in a child process ---
+# BaseWorker run loop in a child process
 
 class TestWorkerLifecycle:
 
     def test_worker_runs_and_stops(self):
-        """A simple worker spawned in a process runs N steps and exits."""
         ctx = mp.get_context("fork")
         w = _StepCounterWorker(name="test_counter", max_steps=5)
         p = ctx.Process(target=w.run, name="test_counter", daemon=False)
         p.start()
         p.join(timeout=10)
         assert not p.is_alive()
-        # Exit code 0 expected; allow -11 (SIGSEGV from .so cleanup)
+        # expect 0, but allow -11 (SIGSEGV from .so cleanup)
         assert p.exitcode in (0, -11, None)
 
     def test_worker_stop_from_outside(self):
-        """Worker can be stopped via stop() → _stop_event from orchestrator."""
+        """stop() from the orchestrator side sets _stop_event and the loop exits."""
         ctx = mp.get_context("fork")
         w = _StepCounterWorker(name="test_stop", max_steps=999999)
         p = ctx.Process(target=w.run, name="test_stop", daemon=False)
@@ -95,13 +84,10 @@ class TestWorkerLifecycle:
             p.join(timeout=2)
 
 
-# --- Synthetic data pipeline: Frame → SLAM(stub) → Pose → MappingWorker ---
+# frame -> SLAM stub -> pose -> mapping, synthetic data
 
 class TestSyntheticPipeline:
-    """Full pipeline test using synthetic data (no hardware required)."""
-
     def test_frame_to_pose_pipeline(self):
-        """Write synthetic frames → SLAMWorker (stub) → read poses."""
         from workers import SLAMWorker
 
         fn = f"pipe_f_{_uid()}"
@@ -117,7 +103,7 @@ class TestSyntheticPipeline:
             w._logger = MagicMock()
             w._frame_buf = fb
             w._pose_buf = pb
-            w._slam = None  # stub
+            w._slam = None
             w._last_seq = 0
 
             for i in range(5):
@@ -126,7 +112,7 @@ class TestSyntheticPipeline:
                 fb.write(rgb, depth)
                 w.step()
 
-            # The stub publishes identity poses
+            # stub mode publishes identity poses
             result = pb.read_latest()
             assert result is not None
             _, pose, _, _ = result
@@ -136,7 +122,6 @@ class TestSyntheticPipeline:
             pb.unlink()
 
     def test_slam_to_mapping_pipeline(self):
-        """SLAM stub → PoseBuffer → MappingWorker accumulates data."""
         from workers import MappingWorker, SLAMWorker
 
         fn = f"sm_f_{_uid()}"
@@ -153,7 +138,6 @@ class TestSyntheticPipeline:
         loop_ev = ctx.Event()
         done_ev = ctx.Event()
         try:
-            # SLAM worker (stub)
             slam = SLAMWorker(
                 name="slam", input_buffer=fb, output_buffer=pb,
             )
@@ -163,7 +147,6 @@ class TestSyntheticPipeline:
             slam._slam = None
             slam._last_seq = 0
 
-            # Mapping worker
             mapper = MappingWorker(
                 name="mapping",
                 pose_buffer=pb,
@@ -177,14 +160,13 @@ class TestSyntheticPipeline:
             mapper._logger = MagicMock()
             mapper.setup()
 
-            # Generate synthetic frames + point clouds
             for i in range(10):
                 rgb = np.random.randint(0, 255, (400, 640, 3), dtype=np.uint8)
                 depth = np.random.uniform(0.5, 3.0, (400, 640)).astype(np.float32)
                 fb.write(rgb, depth)
                 slam.step()
 
-                # Synthetic point cloud (circle of wall points)
+                # ring of wall points
                 theta = np.linspace(0, 2 * np.pi, 50) + i * 0.1
                 pts = np.column_stack([
                     8.0 * np.cos(theta),
@@ -193,13 +175,11 @@ class TestSyntheticPipeline:
                 ]).astype(np.float32)
                 pcb.write(pts)
 
-                # Synthetic seg mask
                 mask = np.ones((400, 640), dtype=np.int32)
                 sb.write(mask)
 
                 mapper.step()
 
-            # Should have accumulated trajectory + wall points
             assert len(mapper._bev_trajectory) > 0
             assert len(mapper._bev_wall_pts) > 0
         finally:
@@ -210,7 +190,7 @@ class TestSyntheticPipeline:
             bb.unlink()
 
     def test_full_mapping_to_pid_pipeline(self):
-        """Full synthetic pipeline: mapping → boundary extraction → PID control."""
+        """mapping -> boundary extraction -> PID, end to end on synthetic data."""
         from workers import ControlWorker, MappingWorker
 
         pn = f"fp_p_{_uid()}"
@@ -227,7 +207,6 @@ class TestSyntheticPipeline:
         loop_ev = ctx.Event()
         done_ev = ctx.Event()
         try:
-            # 1. Setup mapping worker
             mapper = MappingWorker(
                 name="mapping",
                 pose_buffer=pb,
@@ -241,7 +220,7 @@ class TestSyntheticPipeline:
             mapper._logger = MagicMock()
             mapper.setup()
 
-            # 2. Feed synthetic data: oval wall + trajectory
+            # oval walls, then a trajectory along them
             theta = np.linspace(0, 2 * np.pi, 100, endpoint=False)
             outer_3d = np.column_stack([
                 8.0 * np.cos(theta), np.zeros(100), 5.0 * np.sin(theta)
@@ -259,20 +238,18 @@ class TestSyntheticPipeline:
                 sb.write(np.ones((400, 640), dtype=np.int32))
                 mapper.step()
 
-            # 3. Trigger loop closure → extract boundaries
+            # loop closure triggers boundary extraction
             loop_ev.set()
             mapper.step()
             assert mapper._boundaries_extracted
             assert done_ev.is_set()
 
-            # 4. Verify boundary data exists in buffer
             bnd_result = bb.read_latest()
             assert bnd_result is not None
             _, outer_line, inner_line = bnd_result
             assert len(outer_line) > 0
             assert len(inner_line) > 0
 
-            # 5. Setup PID control worker
             ctrl = ControlWorker(
                 name="control",
                 mode="pid",
@@ -291,7 +268,6 @@ class TestSyntheticPipeline:
             ctrl._logger = MagicMock()
             ctrl.setup()
 
-            # 6. Write a pose and step control
             T = np.eye(4, dtype=np.float32)
             T[0, 3] = 6.5
             T[2, 3] = 0.0
@@ -305,7 +281,7 @@ class TestSyntheticPipeline:
             _, steer, throttle = result
             assert 0.0 <= steer <= 1.0
             assert 0.0 <= throttle <= 1.0
-            # target_throttle 0.3 (signed) → 0.65 in the [0, 1], 0.5-neutral contract
+            # signed 0.3 maps to 0.65 in the [0, 1] buffer (0.5 = neutral)
             assert abs(throttle - 0.65) < 0.05
         finally:
             pb.unlink()
@@ -315,7 +291,7 @@ class TestSyntheticPipeline:
             cb.unlink()
 
 
-# --- Null pipeline: no data flows, nothing crashes ---
+# Nothing written anywhere. Workers should just do nothing
 
 class TestNullPipeline:
 
@@ -388,7 +364,7 @@ class TestNullPipeline:
             w.setup()
             for _ in range(5):
                 w.step()
-            # No mapping done → no control written
+            # mapping never finished, so no control output
             assert cb.read_latest() is None
         finally:
             cb.unlink()
@@ -396,10 +372,9 @@ class TestNullPipeline:
             bb.unlink()
 
 
-# --- Race conditions: writer and reader in parallel processes ---
+# writer/reader in separate processes
 
 def _pose_reader(name: str, n: int, results: mp.Queue):
-    """Read from PoseBuffer and count valid reads."""
     pb = PoseBuffer(slots=4, name=name, create=False)
     valid = 0
     for _ in range(n):
@@ -414,7 +389,6 @@ def _pose_reader(name: str, n: int, results: mp.Queue):
 class TestPipelineRaceConditions:
 
     def test_concurrent_pose_write_read(self):
-        """Parent writes poses, child reads concurrently."""
         name = f"race_p_{_uid()}"
         pb = PoseBuffer(slots=4, name=name, create=True)
         q = mp.Queue()
@@ -431,7 +405,7 @@ class TestPipelineRaceConditions:
         pb.unlink()
 
     def test_concurrent_frame_slam_chain(self):
-        """Writer → FrameBuffer ← SLAMWorker.step (same process, simulated)."""
+        """Interleaved frame writes and SLAM steps, single process."""
         from workers import SLAMWorker
 
         fn = f"chain_f_{_uid()}"
@@ -446,7 +420,6 @@ class TestPipelineRaceConditions:
             w._slam = None
             w._last_seq = 0
 
-            # Alternate rapid writes and steps
             for i in range(50):
                 rgb = np.full((400, 640, 3), i % 256, dtype=np.uint8)
                 depth = np.full((400, 640), 1.0, dtype=np.float32)
@@ -459,8 +432,6 @@ class TestPipelineRaceConditions:
             fb.unlink()
             pb.unlink()
 
-
-# --- Mapping helper functions ---
 
 class TestMappingHelpers:
 
@@ -479,7 +450,7 @@ class TestMappingHelpers:
         theta = np.linspace(0, 2 * np.pi, n, endpoint=False)
         outer = np.column_stack([10 * np.cos(theta), 10 * np.sin(theta)]).astype(np.float32)
         inner = np.column_stack([5 * np.cos(theta), 5 * np.sin(theta)]).astype(np.float32)
-        # Centre-line trajectory, heading = tangent of a counter-clockwise lap
+        # centre-line trajectory, heading is the tangent of a CCW lap
         traj = np.column_stack([
             7.5 * np.cos(theta), 7.5 * np.sin(theta), theta + np.pi / 2,
         ]).astype(np.float32)
@@ -489,7 +460,7 @@ class TestMappingHelpers:
         from workers.mapping_worker import split_walls_by_trajectory
         outer, inner, traj = self._ccw_lap()
         left, right = split_walls_by_trajectory(np.vstack([outer, inner]), traj)
-        # Counter-clockwise: inner wall on the left, outer on the right
+        # CCW, so inner wall is on the left and outer on the right
         np.testing.assert_allclose(np.linalg.norm(left, axis=1), 5.0, atol=1e-4)
         np.testing.assert_allclose(np.linalg.norm(right, axis=1), 10.0, atol=1e-4)
 
@@ -501,17 +472,14 @@ class TestMappingHelpers:
         assert np.all(np.diff(angles) >= -1e-6)  # monotonic along the lap
 
 
-# --- OAK-D hardware integration (OAKD_AVAILABLE=1) ---
+# needs a real OAK-D (OAKD_AVAILABLE=1)
 
 @pytest.mark.skipif(
     not os.environ.get("OAKD_AVAILABLE", ""),
     reason="OAK-D camera not available (set OAKD_AVAILABLE=1)"
 )
 class TestOAKDIntegration:
-    """Tests requiring a physical OAK-D camera producing RGBD frames."""
-
     def test_camera_produces_rgbd(self):
-        """OAK-D produces RGB (uint8) + depth (float32 metres) frames."""
         from workers import CameraWorker
 
         fn = f"oakd_f_{_uid()}"
@@ -544,7 +512,6 @@ class TestOAKDIntegration:
                 assert rgb.shape == (400, 640, 3)
                 assert depth.dtype == np.float32
                 assert depth.shape == (400, 640)
-                # Valid depth readings stay below 20 m
                 valid_depth = depth[depth > 0]
                 if len(valid_depth) > 0:
                     assert valid_depth.max() < 20.0
@@ -552,7 +519,7 @@ class TestOAKDIntegration:
             fb.unlink()
 
     def test_camera_to_slam_realtime(self):
-        """Real OAK-D → frames → SLAM (stub) → poses at 30fps for 2 seconds."""
+        """Real camera into the SLAM stub for 2 s at 30 fps."""
         from workers import CameraWorker, SLAMWorker
 
         fn = f"oakd_s_{_uid()}"
@@ -573,7 +540,7 @@ class TestOAKDIntegration:
             slam._logger = MagicMock()
             slam._frame_buf = fb
             slam._pose_buf = pb
-            slam._slam = None  # stub
+            slam._slam = None
             slam._last_seq = 0
 
             pose_count = 0
@@ -589,14 +556,13 @@ class TestOAKDIntegration:
                 time.sleep(0.01)
 
             cam.teardown()
-            # Should have processed multiple frames in 2 seconds
             assert pose_count >= 10, f"Only got {pose_count} poses in 2s"
         finally:
             fb.unlink()
             pb.unlink()
 
     def test_full_oakd_pipeline_with_resnet18_mask(self):
-        """OAK-D → frame → synthetic ResNet18 seg mask → SLAM stub → mapping accumulation."""
+        """OAK-D frames, a fake seg mask in place of ResNet18, SLAM stub, then mapping."""
         from workers import CameraWorker, MappingWorker, SLAMWorker
 
         fn = f"full_{_uid()}_f"
@@ -613,7 +579,6 @@ class TestOAKDIntegration:
         loop_ev = ctx.Event()
         done_ev = ctx.Event()
         try:
-            # Camera
             cam = CameraWorker(
                 name="camera", output_buffer=fb, fps=30, resolution=[640, 400]
             )
@@ -621,7 +586,6 @@ class TestOAKDIntegration:
             cam._logger.info = print
             cam.setup()
 
-            # SLAM stub
             slam = SLAMWorker(
                 name="slam", input_buffer=fb, output_buffer=pb,
                 pointcloud_buffer=pcb,
@@ -633,7 +597,6 @@ class TestOAKDIntegration:
             slam._slam = None
             slam._last_seq = 0
 
-            # Mapping
             mapper = MappingWorker(
                 name="mapping",
                 pose_buffer=pb, segment_buffer=sb,
@@ -644,7 +607,6 @@ class TestOAKDIntegration:
             mapper._logger = MagicMock()
             mapper.setup()
 
-            # Run pipeline for 2 seconds
             frame_count = 0
             t0 = time.time()
             while time.time() - t0 < 2.0:
@@ -654,14 +616,14 @@ class TestOAKDIntegration:
                 result = fb.read_latest()
                 if result is not None:
                     _, rgb, depth = result
-                    # Stand-in for ResNet18 segmentation: threshold depth
+                    # stand-in for ResNet18: threshold on depth
                     mask = np.zeros((400, 640), dtype=np.int32)
                     mask[depth < 2.0] = 1   # road
                     mask[depth >= 2.0] = 2  # wall
                     sb.write(mask)
                     frame_count += 1
 
-                    # Random stand-in point cloud
+                    # random points, just so the mapper has something
                     pcb.write(np.random.randn(50, 3).astype(np.float32) * 3)
 
                 mapper.step()
@@ -679,7 +641,7 @@ class TestOAKDIntegration:
             bb.unlink()
 
 
-# --- start.py CLI smoke tests ---
+# start.py CLI
 
 class TestStartCLI:
 
@@ -722,18 +684,14 @@ class TestStartCLI:
             load_config("nonexistent_config.yaml")
 
 
-# --- FTG controller in the control path ---
-
 class TestFTGControllerPipelineIntegration:
-    """Verify TrackFTGController can replace PID inside the ControlWorker path."""
+    """TrackFTGController should be a drop-in for PID in the ControlWorker path."""
 
     def test_ftg_reads_boundaries_produces_control(self):
-        """Synthetic oval boundaries → FTG step → valid (steering, throttle)."""
         from workers.track_ftg_controller import TrackFTGController
 
         ftg = TrackFTGController(noise_std=0.0, num_beams=180)
 
-        # Build a simple oval track
         t = np.linspace(0, 2 * np.pi, 80, endpoint=False)
         outer = np.column_stack([3.0 * np.cos(t), 2.0 * np.sin(t)])
         inner = np.column_stack([2.0 * np.cos(t), 1.0 * np.sin(t)])
@@ -746,7 +704,6 @@ class TestFTGControllerPipelineIntegration:
         assert -1.0 <= th <= 1.0
 
     def test_ftg_and_pid_same_interface(self):
-        """Both controllers accept identical arguments and return the same shape."""
         from workers.track_ftg_controller import TrackFTGController
         from workers.track_pid_controller import TrackPIDController
 
@@ -766,7 +723,6 @@ class TestFTGControllerPipelineIntegration:
             assert -1.0 <= val <= 1.0
 
     def test_ftg_multi_step_no_crash(self):
-        """Run 50 FTG iterations with varying position/heading."""
         from workers.track_ftg_controller import TrackFTGController
 
         ftg = TrackFTGController(noise_std=0.0)

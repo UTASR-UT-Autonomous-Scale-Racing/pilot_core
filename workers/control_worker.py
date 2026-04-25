@@ -1,25 +1,21 @@
 """
-ControlWorker — runs the configured control mode and writes steering /
-throttle into ControlBuffer.
+Runs whichever control mode is configured and writes steering/throttle to
+the ControlBuffer.
 
-Modes (``mode=``):
+The track-following modes (pure_pursuit, the default, plus stanley, lqr,
+mpc and policy; see control/) drive off the state estimate and the mapped
+boundaries, and can optionally drop to depth_ftg while the state estimate
+is stale. depth_ftg, vae and bc are map-free and work straight from depth
+frames (vae is the learned VAE control model, bc the behaviour-cloning
+CNN). pid and ftg are the older baselines on raw PoseBuffer poses +
+boundaries, and lidar_pid does LiDAR wall centering (sim only).
 
-* Track following on the state estimate + mapped boundaries:
-  ``pure_pursuit`` (default), ``stanley``, ``lqr``, ``mpc``, ``policy``
-  (see :mod:`control`).  Optional ``depth_ftg`` fallback while the state
-  estimate is stale.
-* Map-free, from depth frames: ``depth_ftg`` (Follow-the-Gap), ``vae``
-  (learned VAE control model) and ``bc`` (behaviour-cloning CNN).
-* Baseline controllers: ``pid`` and ``ftg`` (on raw PoseBuffer poses +
-  boundaries), ``lidar_pid`` (LiDAR wall centering, simulator only).
-
-Output contract: every value written to ControlBuffer is normalised to
-``[0, 1]`` with **0.5 = neutral** on both channels, matching
-:class:`control.pwm.PWMMapper` (linear over each channel's PWM [min, max])
-and the simulator bridge: steering 0 = full left, 1 = full right;
-throttle < 0.5 = backward, > 0.5 = forward.  Controllers work in signed
-``[-1, 1]`` space with **+steering = left** and are converted here with
-:func:`signed_to_unit`.
+Output contract, since everything downstream depends on it: ControlBuffer
+values are [0, 1] with 0.5 = neutral on both channels. That's what
+PWMMapper (linear over each channel's PWM [min, max]) and the sim bridge
+expect: steering 0 = full left, 1 = full right, throttle < 0.5 backward,
+> 0.5 forward. The controllers themselves work in signed [-1, 1] with
++steering = LEFT, and get converted by signed_to_unit() below.
 """
 
 from __future__ import annotations
@@ -34,13 +30,13 @@ from .base_worker import BaseWorker
 from .bev import pose_to_bev
 from shared_buffer import ControlBuffer, PoseBuffer
 
-# Optional — only needed in the pid / ftg modes
+# only needed for pid / ftg
 try:
     from shared_buffer.track_boundary_buffer import TrackBoundaryBuffer
 except ImportError:
     TrackBoundaryBuffer = None  # type: ignore[misc]
 
-# Optional — only needed in lidar_pid mode
+# only needed for lidar_pid
 try:
     from shared_buffer import LidarBuffer
 except ImportError:
@@ -48,45 +44,41 @@ except ImportError:
 
 
 def signed_to_unit(steering: float, throttle: float) -> tuple[float, float]:
-    """Convert signed controller output to the ControlBuffer ``[0, 1]`` contract.
+    """Signed controller output -> ControlBuffer [0, 1].
 
-    Signed convention (all track controllers and RL policies): steering
-    **+1 = full left** (ROS / REP-103, counter-clockwise), throttle +1 = full
-    forward, -1 = full brake / reverse.
-
-    ControlBuffer follows the car's PWM convention (adding to neutral steers
-    right): steering 0 = full left, 1 = full right, so steering is negated
-    here.  Both channels map 0 → 0.5 (neutral).
+    All the track controllers and RL policies use steering +1 = full left
+    (ROS / REP-103, CCW positive) and throttle +1 = full forward, -1 = full
+    brake/reverse. ControlBuffer follows the car's PWM instead, where going
+    above neutral steers right (0 = full left, 1 = full right), hence the
+    sign flip on steering. 0 maps to 0.5 on both channels.
     """
     steer_unit = float(np.clip((1.0 - steering) / 2.0, 0.0, 1.0))
     throttle_unit = float(np.clip((throttle + 1.0) / 2.0, 0.0, 1.0))
     return steer_unit, throttle_unit
 
 
-# Modes driven by the state estimate + mapped track boundaries
+# these use the state estimate + mapped boundaries
 TRACK_MODES = ("pure_pursuit", "stanley", "lqr", "mpc", "policy")
 
 
 def unit_to_signed(steering: float, throttle: float) -> tuple[float, float]:
-    """Inverse of :func:`signed_to_unit`."""
+    """Inverse of signed_to_unit()."""
     return 1.0 - 2.0 * steering, 2.0 * throttle - 1.0
 
 
 class ControlWorker(BaseWorker):
-    """Worker process for vehicle control.
+    """Vehicle control worker. Which kwargs matter depends on the mode.
 
-    Common kwargs: ``mode``, ``output_buffer`` (ControlBuffer).
-
-    Track modes: ``state_buffer``, ``boundary_buffer``, ``mapping_done_event``,
-    ``track_config`` (config ``track_control``), ``vehicle_params``; for the
-    fallback also ``frame_buffer`` / ``camera_settings`` / ``depth_ftg_config``.
-
-    Map-free modes: ``frame_buffer``, ``camera_settings`` + ``depth_ftg_config``
-    (``depth_ftg``), ``vae_config`` (``vae``) or ``bc_config`` (``bc``).
-
-    ``pid`` / ``ftg``: ``pose_buffer``, ``boundary_buffer``, ``mapping_done_event``,
-    ``pid_config`` / ``ftg_config``, ``bev_axes``, ``forward_axis``.
-    ``lidar_pid``: ``lidar_buffer``, ``pid_config``.
+    always: mode, output_buffer (ControlBuffer)
+    track modes: state_buffer, boundary_buffer, mapping_done_event,
+        track_config (the track_control config section), vehicle_params,
+        plus frame_buffer / camera_settings / depth_ftg_config if the
+        fallback is on
+    depth_ftg: frame_buffer, camera_settings, depth_ftg_config
+    vae / bc: frame_buffer, vae_config or bc_config
+    pid / ftg: pose_buffer, boundary_buffer, mapping_done_event,
+        pid_config or ftg_config, bev_axes, forward_axis
+    lidar_pid: lidar_buffer, pid_config
     """
 
     def __init__(self, name: str = "control", **kwargs: Any) -> None:
@@ -94,14 +86,14 @@ class ControlWorker(BaseWorker):
         self._mode: str = "pure_pursuit"
         self._pose_buf: PoseBuffer | None = None
         self._ctrl_buf: ControlBuffer | None = None
-        # pid / ftg mode state
+        # pid / ftg
         self._boundary_buf: Optional[Any] = None
         self._pid = None
         self._mapping_done_event: Optional[mp.Event] = None
         self._outer_line: Optional[np.ndarray] = None
         self._inner_line: Optional[np.ndarray] = None
         self._last_pose_seq = 0
-        # lidar_pid mode state
+        # lidar_pid
         self._lidar_buf: Optional[Any] = None
         self._lidar_wall_ctrl = None
         self._last_lidar_seq = 0
@@ -117,7 +109,7 @@ class ControlWorker(BaseWorker):
         setup()
 
     def _modes(self) -> Dict[str, tuple]:
-        """control_mode → (setup, step)."""
+        """mode name -> (setup, step)"""
         return {
             "pid": (self._setup_pid, self._step_pid),
             "ftg": (self._setup_ftg, self._step_pid),
@@ -134,7 +126,7 @@ class ControlWorker(BaseWorker):
         self._pose_buf = self.config["pose_buffer"]
         self._boundary_buf = self.config.get("boundary_buffer")
         self._mapping_done_event = self.config.get("mapping_done_event")
-        # Ground-plane / forward axes — see pose_to_bev(); must match MappingWorker
+        # ground-plane / forward axes (see pose_to_bev). Must match MappingWorker!
         self._bev_axes = tuple(self.config.get("bev_axes", [0, 2]))
         self._forward_axis = int(self.config.get("forward_axis", 2))
 
@@ -191,7 +183,7 @@ class ControlWorker(BaseWorker):
     def step(self) -> None:
         self._step_fn()
 
-    # --- Track-following modes (TRACK_MODES) ---
+    # track following
 
     def _setup_track(self) -> None:
         from control.types import VehicleParams
@@ -204,7 +196,7 @@ class ControlWorker(BaseWorker):
         self._follower = None
         self._last_state_seq = 0
         self._last_state_time = time.time()
-        # Optional map-free fallback while the state estimate is stale
+        # optional map-free fallback for when the state estimate goes stale
         self._fallback = None
         if self._track_cfg.get("fallback") == "depth_ftg":
             self._fallback = self._make_depth_follower()
@@ -277,7 +269,7 @@ class ControlWorker(BaseWorker):
                 f"steer={cmd.steering:+.3f} throttle={cmd.throttle:+.3f}"
             )
 
-    # --- Map-free depth Follow-the-Gap (mode, or fallback for track modes) ---
+    # depth Follow-the-Gap, either as its own mode or as the track-mode fallback
 
     def _make_depth_follower(self):
         from control.depth_ftg import DepthFTGConfig, DepthGapFollower, Intrinsics
@@ -291,7 +283,7 @@ class ControlWorker(BaseWorker):
         return DepthGapFollower(vehicle, K, cfg)
 
     def _setup_learned_depth(self) -> None:
-        """``vae`` / ``bc``: an exported depth → steering ONNX model."""
+        """vae / bc: both are an exported depth -> steering ONNX model."""
         from control.imitation import DepthPolicyConfig, DepthPolicyFollower
 
         self._frame_buf = self.config["frame_buffer"]
@@ -306,7 +298,7 @@ class ControlWorker(BaseWorker):
         self.logger.info("ControlWorker ready — depth_ftg mode (map-free)")
 
     def _depth_command(self, follower) -> bool:
-        """Run ``follower`` on the newest depth frame; False if none is new."""
+        """Returns False if there was no new depth frame."""
         result = self._frame_buf.read_latest()
         if result is None or result[0].seq_no <= self._last_frame_seq:
             return False
@@ -326,8 +318,6 @@ class ControlWorker(BaseWorker):
             self.logger.warning("State estimate stale — driving on depth_ftg fallback")
         if not self._depth_command(self._fallback):
             time.sleep(0.005)
-
-    # --- LIDAR wall-centering PID mode ---
 
     def _step_lidar_pid(self) -> None:
         result = self._lidar_buf.read_latest()
@@ -351,7 +341,7 @@ class ControlWorker(BaseWorker):
                 f"-> buffer ({steer_unit:.3f}, {throttle_unit:.3f})"
             )
 
-    # --- pid / ftg modes (raw pose + boundaries) ---
+    # old pid / ftg baselines, raw pose + boundaries
 
     def _step_pid(self) -> None:
         if (
@@ -361,7 +351,7 @@ class ControlWorker(BaseWorker):
             time.sleep(0.1)
             return
 
-        # Read boundaries once (they don't change after extraction)
+        # boundaries don't change after extraction, so only read them once
         if self._outer_line is None and self._boundary_buf is not None:
             bnd_result = self._boundary_buf.read_latest()
             if bnd_result is not None:
@@ -388,7 +378,7 @@ class ControlWorker(BaseWorker):
 
         current_bev, heading = pose_to_bev(pose, self._bev_axes, self._forward_axis)
 
-        # Controller output is signed [-1, 1] (steering +1 = left)
+        # signed [-1, 1], steering +1 = left
         steer_raw, throttle_raw = self._pid.step(
             current_bev, heading, self._outer_line, self._inner_line
         )

@@ -1,6 +1,4 @@
-"""
-workers — Multiprocessing worker processes for the pilot_core pipeline.
-"""
+"""Worker processes for the pilot_core pipeline (one multiprocessing.Process each)."""
 
 from .base_worker import BaseWorker
 from .camera_worker import CameraWorker

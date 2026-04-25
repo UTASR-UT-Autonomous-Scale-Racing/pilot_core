@@ -1,23 +1,22 @@
 """
-SafetySupervisor — the last stage between a controller and the actuators.
+SafetySupervisor sits between whatever controller is running and the
+actuators. Each output tick it takes the newest command and decides what
+actually gets sent. Checks run in this order:
 
-Every output tick it turns the newest command into the command actually
-sent, applying (in order):
+- arming: while disarmed, neutral throttle and centred steering
+- watchdog: newest command older than command_timeout -> neutral throttle,
+  steering held, car coasts to a stop
+- speed cap: forward throttle tapers linearly to zero over the last
+  cap_margin m/s below speed_cap, zero above it (coasts). The taper is there
+  to soak up lag in the pose-derived speed estimate. With no speed estimate
+  at all, forward throttle is limited to max_throttle_no_speed.
+  Separately, forward throttle never goes above speed_cap /
+  speed_per_throttle (the steady-state throttle for the cap), so estimator
+  lag can't let the car settle above the cap. Only works if
+  speed_per_throttle is actually calibrated.
+- slew limits on steering and throttle
 
-1. **Arming** — while disarmed: neutral throttle, centred steering.
-2. **Watchdog** — if the newest command is older than ``command_timeout``:
-   neutral throttle, steering held (the car coasts to a stop).
-3. **Speed cap** — forward throttle tapers linearly to zero over the last
-   ``cap_margin`` m/s below ``speed_cap`` and is zero above it (the car
-   coasts).  The taper absorbs the lag of a pose-derived speed estimate.
-   Without a speed estimate, forward throttle is limited to
-   ``max_throttle_no_speed``.  Independently of any estimate, forward
-   throttle never exceeds ``speed_cap / speed_per_throttle`` — the
-   steady-state throttle for the cap — so estimator lag cannot let the car
-   settle above it (requires a calibrated ``speed_per_throttle``).
-4. **Slew limits** on steering and throttle.
-
-Works in signed units (steering +1 = left, throttle 0 = neutral).
+Signed units throughout: steering +1 = left, throttle 0 = neutral.
 """
 
 from __future__ import annotations
@@ -34,8 +33,9 @@ from .types import Command
 class SafetyConfig:
     command_timeout: float = 0.150   # s
     speed_cap: float = 1.5           # m/s
-    cap_margin: float = 0.2          # m/s — forward throttle tapers to 0 over this band
-    speed_per_throttle: Optional[float] = 3.0   # m/s per unit throttle (calibrate on the car); None disables the bound
+    cap_margin: float = 0.2          # m/s band over which forward throttle tapers to 0
+    # m/s per unit throttle, calibrate on the car. None turns the bound off
+    speed_per_throttle: Optional[float] = 3.0
     max_throttle: float = 1.0        # forward throttle cap
     max_throttle_no_speed: float = 0.4
     steering_rate: float = 7.6       # signed units/s (~max_steering_vel / max_steering_angle)
@@ -93,12 +93,12 @@ class SafetySupervisor:
                 speed_limited = True
 
         if not armed:
-            # Disarming is immediate — no slew on the way to neutral
+            # disarm is immediate, no slew on the way to neutral
             self._out = Command(0.0, 0.0)
         else:
             self._out = Command(
                 _slew(self._out.steering, target.steering, c.steering_rate * dt),
-                # Dropping to neutral / coasting is never slew-limited
+                # never slew-limit a drop to neutral / coasting
                 target.throttle if (target.throttle == 0.0 or abs(target.throttle) < abs(self._out.throttle)
                                     and np.sign(target.throttle) == np.sign(self._out.throttle))
                 else _slew(self._out.throttle, target.throttle, c.throttle_rate * dt),

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Generate an ORB-SLAM3 RGB-D settings file from the connected OAK-D's
-factory calibration, matching exactly what CameraWorker publishes:
+Write an ORB-SLAM3 RGB-D settings file from the attached OAK-D's factory
+calibration, set up to match what CameraWorker actually publishes.
 
-    * RGB (CAM_A) intrinsics scaled to the configured output resolution
-    * undistorted RGB (CameraWorker requests enableUndistortion=True)
-    * RGB colour order (CameraWorker converts from DepthAI's BGR)
-    * depth in metres (CameraWorker divides by 1000) → DepthMapFactor 1.0
+That means CAM_A intrinsics scaled to the configured resolution, zero
+distortion (CameraWorker asks for enableUndistortion=True), RGB order since
+CameraWorker converts from DepthAI's BGR, and DepthMapFactor 1.0 because depth
+is already in metres (CameraWorker divides by 1000).
 
-Calibration is per unit — rerun this whenever the camera is swapped.  Needs
-the OAK-D connected.  --config and --output are relative to the repo root.
+Calibration is per unit, so rerun this if the camera gets swapped. The OAK-D
+has to be plugged in. --config and --output are relative to the repo root.
 
 Usage:
     python scripts/gen_orbslam_settings.py                       # uses config.yaml
@@ -112,7 +112,7 @@ def main() -> int:
         device_id = device.getDeviceId()
 
     K = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_A, width, height)
-    # Left↔right baseline (cm → m)
+    # left/right stereo baseline, cm -> m
     baseline = abs(calib.getBaselineDistance(dai.CameraBoardSocket.CAM_B, dai.CameraBoardSocket.CAM_C)) / 100.0
 
     out_path = os.path.join(REPO_ROOT, args.output)

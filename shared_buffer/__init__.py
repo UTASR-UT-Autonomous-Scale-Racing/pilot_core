@@ -1,10 +1,9 @@
 """
-shared_buffer — shared-memory ring buffers for inter-process communication.
+Shared-memory ring buffers used to pass data between the worker processes.
 
-Each buffer is a fixed-slot ring backed by multiprocessing.shared_memory with
-a single writer (seqlock-protected slots, see :mod:`.ring_buffer`); consumers
-read the most recent entry (pop-most-recent semantics).  Typed wrappers
-document their payload byte layout in their module docstrings.
+One writer per buffer, seqlock-protected slots (details in ring_buffer.py).
+Readers always get the newest entry. Each typed wrapper describes its payload
+byte layout at the top of its own module.
 """
 
 from .ring_buffer import SharedRingBuffer

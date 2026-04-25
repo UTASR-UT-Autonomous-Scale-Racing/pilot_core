@@ -1,11 +1,11 @@
 """
-StateWorker — fuses poses from PoseBuffer into a vehicle state estimate
-(:class:`control.PoseEKF`) and publishes it to StateBuffer at a fixed rate.
+StateWorker: runs PoseBuffer poses through control.PoseEKF and publishes the
+state to StateBuffer at a fixed rate.
 
-When poses stop arriving (e.g. SLAM tracking lost) the estimate goes stale
-after ``stale_after`` seconds and nothing is published — downstream, the
-controller stops producing commands and the actuator watchdog brings the
-car to neutral.
+If poses stop coming in (SLAM lost tracking, say) the estimate goes stale
+after ``stale_after`` seconds and we stop publishing. The controller then has
+nothing to act on, stops sending commands, and the actuator watchdog takes
+the car to neutral.
 """
 
 from __future__ import annotations
@@ -20,21 +20,16 @@ from .bev import pose_to_bev
 
 
 class StateWorker(BaseWorker):
-    """Fuses PoseBuffer poses into a BEV vehicle state published to StateBuffer.
+    """BEV vehicle state from PoseBuffer poses.
 
-    Config kwargs
-    -------------
-    pose_buffer : PoseBuffer
-        Camera-to-world (SLAM) or vehicle-to-world (simulator) poses.
-    output_buffer : StateBuffer
-    bev_axes, forward_axis : see :func:`workers.bev.pose_to_bev`
-    rate_hz : float
-        Publish rate (default 50).
-    use_pose_speed : bool
-        Also fuse the speed field of PoseBuffer (simulator ground truth).
-        SLAM does not provide speed, so this is off by default.
-    estimator : dict
-        :class:`control.EstimatorConfig` overrides.
+    Config:
+      pose_buffer     camera-to-world (SLAM) or vehicle-to-world (sim) poses
+      output_buffer   StateBuffer
+      bev_axes, forward_axis   passed to workers.bev.pose_to_bev
+      rate_hz         publish rate, default 50
+      use_pose_speed  also fuse PoseBuffer's speed field. Only the simulator
+                      fills it in (SLAM has no speed), hence off by default.
+      estimator       dict of EstimatorConfig overrides
     """
 
     def __init__(self, name: str = "state", **kwargs: Any) -> None:

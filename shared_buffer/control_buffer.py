@@ -1,11 +1,11 @@
 """
-ControlBuffer — typed wrapper for normalised steering + throttle.
+ControlBuffer: normalised steering + throttle.
 
-Payload layout:
-    [4 bytes]  float32  steering  (0.0–1.0; 0.5 = straight, below = left)
-    [4 bytes]  float32  throttle  (0.0–1.0; 0.5 = neutral, below = backward)
+Payload:
+    [4 bytes]  float32  steering  (0..1, 0.5 = straight, below = left)
+    [4 bytes]  float32  throttle  (0..1, 0.5 = neutral, below = reverse)
 
-Values map linearly onto PWM pulse widths (see :mod:`control.pwm`).
+Both map linearly onto PWM pulse widths, see control/pwm.py.
 """
 
 from __future__ import annotations
@@ -21,17 +21,8 @@ _PAYLOAD_SIZE = struct.calcsize(_CTRL_FMT)  # 8 bytes
 
 
 class ControlBuffer:
-    """High-level buffer for normalised control outputs.
-
-    Parameters
-    ----------
-    slots : int
-        Number of ring-buffer slots (default 8).
-    name : str
-        Shared-memory block name.
-    create : bool
-        Pass *True* from orchestrator, *False* from workers.
-    """
+    """Normalised control outputs. create=True from the orchestrator,
+    False from workers."""
 
     def __init__(
         self,
@@ -48,25 +39,11 @@ class ControlBuffer:
         )
 
     def write(self, steering: float, throttle: float) -> SlotHeader:
-        """Write normalised steering and throttle.
-
-        Parameters
-        ----------
-        steering : float
-            Normalised steering value (0.0–1.0).
-        throttle : float
-            Normalised throttle value (0.0–1.0).
-        """
         payload = struct.pack(_CTRL_FMT, steering, throttle)
         return self._rb.write(payload)
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, float, float]]:
-        """Read the most recent control output.
-
-        Returns
-        -------
-        (header, steering, throttle) or *None*.
-        """
+        """-> (header, steering, throttle), or None."""
         result = self._rb.read_latest()
         if result is None:
             return None

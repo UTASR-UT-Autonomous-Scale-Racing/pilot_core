@@ -1,28 +1,21 @@
 """
-SharedRingBuffer — fixed-slot, single-producer / multi-consumer ring buffer
-backed by multiprocessing.shared_memory.
+Fixed-slot ring buffer on top of multiprocessing.shared_memory. One producer,
+any number of consumers.
 
-Design goals
-------------
-* **Zero-copy** for readers on the same machine (shared memory, no pickle).
-* **Non-blocking** writes — old slots are silently overwritten.
-* **Pop-most-recent** reads — consumers always get the freshest data.
-* **Timestamp contract** — every slot carries ``produced_ts`` and ``read_ts``.
+Readers on the same box get the data without pickling. Writes never block,
+the oldest slot just gets overwritten, and reads always return the newest
+slot rather than draining a queue. Every slot carries produced_ts and read_ts
+so we can measure lag end to end.
 
-Thread / process safety
------------------------
-A single writer is assumed per buffer instance.  Slots follow a seqlock
-protocol so readers never see a torn record:
+Only one writer per buffer is supported. Slots use a seqlock so a reader
+can't see a half-written record: the writer zeroes seq_no first (readers
+skip zeroed slots), then writes the payload, then writes the header with the
+new seq_no last. The reader copies header + payload, re-reads seq_no, and
+retries if the writer lapped it mid-copy.
 
-1. the writer zeroes the slot's ``seq_no`` (readers skip the slot),
-2. writes the payload,
-3. publishes the header with the new ``seq_no`` last;
-
-the reader copies header + payload, then re-reads ``seq_no`` and retries if
-the writer lapped the slot mid-copy.  Readers *write* ``read_ts`` as a
-single naturally aligned 8-byte ``float64`` store (atomic on x86/ARM64).
-The write counter is an ``mp.Value('Q')`` owned by the creating handle and
-protected by its built-in lock.
+Readers do write one thing: read_ts, as a single aligned 8-byte float64
+store, which is atomic on x86 and ARM64. The write counter is an
+mp.Value('Q') held by whoever created the buffer, guarded by its own lock.
 """
 
 from __future__ import annotations
@@ -35,29 +28,28 @@ from typing import Optional, Tuple
 
 from .schema import HEADER_SIZE, SCHEMA_VERSION, DTypeTag, SlotHeader
 
-# Seqlock read attempts before giving up for this call (writer lapping us
-# repeatedly means the reader is far too slow for the slot count anyway).
+# seqlock retries per read_latest() call. If the writer laps us this many
+# times in a row the reader is way too slow for the slot count anyway
 _READ_RETRIES = 8
 
 
 class SharedRingBuffer:
-    """A shared-memory ring buffer with fixed-size slots.
+    """Shared-memory ring buffer with fixed-size slots.
 
     Parameters
     ----------
     name : str
-        Unique name for the shared memory block (e.g. ``"frame_buf"``).
+        Name of the shm block, e.g. "frame_buf".
     slots : int
         Number of slots in the ring.
     slot_payload_size : int
-        Maximum payload size (bytes) per slot.  Larger payloads are
-        **truncated** so a write can never overflow into the next slot.
+        Max payload bytes per slot. Anything longer gets truncated so a
+        write can't spill into the next slot.
     dtype_tag : DTypeTag
-        The type tag written into every slot header.
+        Tag stamped into every slot header.
     create : bool
-        If *True* (default for the orchestrator), create the shm block.
-        Workers that only read should pass *False* and attach to an existing
-        block by *name*.
+        True creates the block (the orchestrator does this). Read-only
+        workers pass False and attach to the existing block by name.
     """
 
     def __init__(
@@ -76,7 +68,7 @@ class SharedRingBuffer:
         self._total_size = self.slots * self.slot_size
 
         if create:
-            # Remove a stale block left behind by a crashed run
+            # a crashed run can leave the block behind, clear it first
             try:
                 stale = shared_memory.SharedMemory(name=name, create=False)
                 stale.close()
@@ -86,31 +78,25 @@ class SharedRingBuffer:
             self._shm = shared_memory.SharedMemory(
                 name=name, create=True, size=self._total_size
             )
-            # Zero-initialise (seq_no == 0 means "unwritten")
+            # seq_no == 0 means unwritten
             self._shm.buf[: self._total_size] = b"\x00" * self._total_size
         else:
             self._shm = shared_memory.SharedMemory(name=name, create=False)
 
-        # Write counter shared across processes; only the producer increments it.
+        # cross-process write counter, only the producer bumps it
         if create:
             self._seq = mp.Value("Q", 0, lock=True)  # uint64
         else:
-            # Readers don't need the counter; they scan slot headers.
+            # readers scan slot headers instead
             self._seq = None
 
-    # --- helpers ---
-
     def _slot_offset(self, index: int) -> int:
-        """Byte offset of slot *index* in the shared memory block."""
         return index * self.slot_size
 
-    # --- write (producer) ---
-
     def write(self, payload: bytes) -> SlotHeader:
-        """Write *payload* into the next slot, returning the header written.
+        """Write raw bytes into the next slot and return the header.
 
-        The caller is responsible for serialising their domain object into
-        ``bytes`` before calling this method (typed wrappers do this).
+        Serialising is the caller's job; the typed wrappers handle that.
         """
         if self._seq is None:
             raise RuntimeError("Cannot write from a read-only buffer handle.")
@@ -136,21 +122,19 @@ class SharedRingBuffer:
             dtype_tag=int(self.dtype_tag),
         )
 
-        # Seqlock publish: invalidate → payload → header (seq_no last)
+        # seqlock publish: invalidate -> payload -> header (seq_no goes last)
         struct.pack_into("<Q", self._shm.buf, offset, 0)
         self._shm.buf[offset + HEADER_SIZE : offset + HEADER_SIZE + payload_len] = payload
         self._shm.buf[offset : offset + HEADER_SIZE] = header.pack()
 
         return header
 
-    # --- read (consumer) ---
-
     def read_latest(self) -> Optional[Tuple[SlotHeader, bytes]]:
-        """Return ``(header, payload_bytes)`` for the slot with the highest
-        ``seq_no``, or *None* if no complete slot has been written yet.
+        """(header, payload) for the slot with the highest seq_no, or None
+        if nothing complete has been written yet.
 
-        After reading, ``read_ts`` in the slot header is updated to
-        ``time.time()`` so producers/monitors can track consumer lag.
+        Also stamps read_ts in the slot header with time.time(), which is
+        how the monitors track consumer lag.
         """
         for _ in range(_READ_RETRIES):
             result = self._try_read_latest()
@@ -165,14 +149,14 @@ class SharedRingBuffer:
         )
 
     def _try_read_latest(self) -> Optional[Tuple[SlotHeader, bytes]]:
-        """One seqlock read attempt; *None* if the slot changed mid-copy."""
+        """Single seqlock attempt. None if the slot changed under us."""
         best_seq = 0
         best_idx = -1
 
         for i in range(self.slots):
             offset = self._slot_offset(i)
             raw_header = bytes(self._shm.buf[offset : offset + HEADER_SIZE])
-            # seq_no is the first 8 bytes (little-endian uint64)
+            # seq_no = first 8 bytes, LE uint64
             (seq_no,) = struct.unpack_from("<Q", raw_header, 0)
             if seq_no > best_seq:
                 best_seq = seq_no
@@ -194,27 +178,25 @@ class SharedRingBuffer:
             ]
         )
 
-        # Validate: the writer must not have touched the slot during the copy
+        # writer touched the slot during the copy? then throw it away
         (seq_after,) = struct.unpack_from("<Q", self._shm.buf, offset)
         if seq_after != header.seq_no:
             return None
 
-        # read_ts is the float64 at header offset 16 (see schema.py)
+        # read_ts lives at header offset 16, see schema.py
         now = time.time()
         struct.pack_into("<d", self._shm.buf, offset + 16, now)
         header.read_ts = now
 
         return header, payload
 
-    # --- lifecycle ---
-
     def close(self) -> None:
-        """Close (but don't unlink) the shared memory handle."""
+        """Close our handle. Doesn't unlink."""
         self._shm.close()
 
     def unlink(self) -> None:
-        """Unlink (destroy) the shared memory block.  Only call from the
-        process that created it (typically the orchestrator)."""
+        """Destroy the shm block. Only the creating process (normally the
+        orchestrator) should call this."""
         self._shm.close()
         self._shm.unlink()
 

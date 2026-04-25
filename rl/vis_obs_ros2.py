@@ -1,18 +1,16 @@
 """
-ROS2 node that bridges the TrackEnv observation ZMQ publisher → RViz MarkerArray.
+Shows what TrackEnv is actually observing, in RViz.
 
-TrackEnv (rl/track_env.py) pushes the boundary points it puts into each
-observation (world frame) over a ZMQ PUSH socket (``vis_zmq_port``, default
-5558).  Run this node in any ROS2 environment (e.g. the autodrive_devkit
-container) on the same host while rl/train.py is running.
+TrackEnv pushes the world-frame boundary points of each observation over a
+ZMQ PUSH socket (vis_zmq_port, 5558 by default). This node pulls them and
+republishes as a MarkerArray on /pilot/obs_points. Run it on the same host as
+rl/train.py from anywhere with ROS2, e.g. the autodrive_devkit container:
 
-Usage:
     python3 rl/vis_obs_ros2.py [--port 5558] [--frame-id world]
 
-Topic published: /pilot/obs_points (visualization_msgs/MarkerArray)
-    ns "obs_outer" — yellow line strip (drawn from the message's "inner" points)
-    ns "obs_inner" — cyan line strip   (drawn from the message's "outer" points)
-    ns "obs_pos"   — white sphere: current vehicle position
+Markers: yellow strip "obs_outer" (from the message's "inner" points - see
+the note in _publish_markers), cyan strip "obs_inner" (from "outer"), and a
+white sphere "obs_pos" at the car.
 """
 
 import argparse
@@ -41,12 +39,11 @@ def _make_line_marker(frame_id: str, ns: str, mid: int,
     m.color.g = g
     m.color.b = b
     m.color.a = 1.0
-    m.pose.orientation.w = 1.0  # required — zero quaternion is invalid
+    m.pose.orientation.w = 1.0  # all-zero quaternion is invalid, RViz complains
     return m
 
 
 class ObsVisNode(Node):
-    """Polls the TrackEnv ZMQ socket and republishes each message as markers."""
 
     def __init__(self, zmq_port: int, frame_id: str):
         super().__init__("obs_vis")
@@ -59,7 +56,7 @@ class ObsVisNode(Node):
         self._sock.setsockopt(zmq.RCVHWM, 1)
         self._sock.connect(f"tcp://localhost:{zmq_port}")
 
-        # Publish a static TF so RViz knows about the 'world' frame
+        # static TF, otherwise RViz doesn't know the 'world' frame exists
         self._tf_broadcaster = StaticTransformBroadcaster(self)
         tf = TransformStamped()
         tf.header.stamp = self.get_clock().now().to_msg()
@@ -68,7 +65,7 @@ class ObsVisNode(Node):
         tf.transform.rotation.w = 1.0
         self._tf_broadcaster.sendTransform(tf)
 
-        # Non-blocking poll so we don't freeze ROS2 spin
+        # poll on a timer with NOBLOCK so spin never stalls
         self.create_timer(1.0 / 30.0, self._poll)
         self.get_logger().info(
             f"Subscribed to tcp://localhost:{zmq_port} → /pilot/obs_points"
@@ -100,8 +97,8 @@ class ObsVisNode(Node):
         now = self.get_clock().now().to_msg()
         ma = MarkerArray()
 
-        # "inner" points → yellow "obs_outer" marker.  Labels are swapped on
-        # purpose: the saved boundary .npy files name the walls the other way round.
+        # NB: swapped on purpose. The saved .npy files name the walls the other
+        # way round, so "inner" points go into the yellow obs_outer marker
         mo = _make_line_marker(self._frame_id, "obs_outer", 0, 1.0, 1.0, 0.0)
         mo.header.stamp = now
         for pt in inner:
@@ -110,7 +107,7 @@ class ObsVisNode(Node):
             mo.points.append(p)
         ma.markers.append(mo)
 
-        # "outer" points → cyan "obs_inner" marker
+        # and "outer" -> cyan obs_inner
         mi = _make_line_marker(self._frame_id, "obs_inner", 1, 0.0, 1.0, 1.0)
         mi.header.stamp = now
         for pt in outer:
@@ -119,7 +116,7 @@ class ObsVisNode(Node):
             mi.points.append(p)
         ma.markers.append(mi)
 
-        # Vehicle position — white sphere
+        # car position
         mp = Marker()
         mp.header.stamp = now
         mp.header.frame_id = self._frame_id

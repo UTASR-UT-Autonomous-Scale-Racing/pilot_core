@@ -1,12 +1,12 @@
 """
-Longitudinal control: a curvature-based speed profile and a throttle
-controller for a drivetrain with **no brake** — neutral coasts, and a
-backward input actively decelerates (and would reverse once stopped).
+Longitudinal control. Curvature-based speed profile plus a throttle
+controller for a drivetrain with no brake: neutral just coasts, and backward
+input actively decelerates (and will reverse once stopped, so be careful).
 
-Reference (speed profile, forward/backward passes): N. R. Kapania,
+Speed profile with forward/backward passes follows N. R. Kapania,
 J. Subosits, J. C. Gerdes, "A Sequential Two-Step Algorithm for Fast
 Generation of Vehicle Racing Trajectories", J. Dyn. Sys., Meas., Control
-138(9), 2016.  PI control: K. J. Åström, R. M. Murray, "Feedback Systems",
+138(9), 2016. For the PI part see K. J. Åström, R. M. Murray, "Feedback Systems",
 Princeton University Press, 2008.
 """
 
@@ -28,21 +28,22 @@ def speed_profile(
     a_accel: float,
     a_decel: float,
 ) -> np.ndarray:
-    """Maximum speed per centre-line sample.
+    """Max speed at each centre-line sample.
 
-    ``v <= sqrt(a_lat_max / |kappa|)`` capped at ``v_max``, then forward
-    (acceleration) and backward (deceleration) passes around the closed
-    loop so the profile is reachable with the given limits.
+    Starts from v <= sqrt(a_lat_max / |kappa|), capped at v_max, then does
+    forward (accel) and backward (decel) passes around the loop so the
+    profile is actually reachable under those limits.
     """
     kappa = np.abs(track.curvature)
     v = np.minimum(v_max, np.sqrt(a_lat_max / np.maximum(kappa, 1e-6)))
     ds = np.diff(np.concatenate([track.s, [track.length]]))
     n = len(v)
-    for _ in range(2):  # two laps of each pass settle the wrap-around
-        for i in range(n):                      # forward: acceleration limit
+    # two laps of each pass to settle the wrap-around
+    for _ in range(2):
+        for i in range(n):                      # forward: accel limit
             j = (i + 1) % n
             v[j] = min(v[j], np.sqrt(v[i] ** 2 + 2 * a_accel * ds[i]))
-        for i in range(n - 1, -1, -1):          # backward: deceleration limit
+        for i in range(n - 1, -1, -1):          # backward: decel limit
             j = (i + 1) % n
             v[i] = min(v[i], np.sqrt(v[j] ** 2 + 2 * a_decel * ds[i]))
     return v
@@ -50,16 +51,17 @@ def speed_profile(
 
 @dataclass
 class LongitudinalConfig:
-    speed_per_throttle: float = 3.0   # m/s of steady-state speed per unit throttle (calibrate on the car)
+    # steady-state m/s per unit throttle. calibrate this on the car
+    speed_per_throttle: float = 3.0
     kp: float = 0.25                  # throttle per m/s of speed error
     ki: float = 0.15
-    integral_limit: float = 0.15      # anti-windup clamp on the I-term (throttle units)
+    integral_limit: float = 0.15      # anti-windup clamp on I, in throttle units
     max_backward: float = 0.3         # most negative throttle used to slow down
-    min_speed_for_backward: float = 0.3  # never push backward below this speed (would reverse)
+    min_speed_for_backward: float = 0.3  # below this, backward input would reverse us
 
 
 class LongitudinalController:
-    """PI speed controller with steady-state feed-forward."""
+    """PI on speed, plus steady-state feed-forward."""
 
     def __init__(self, cfg: LongitudinalConfig | None = None) -> None:
         self.cfg = cfg or LongitudinalConfig()

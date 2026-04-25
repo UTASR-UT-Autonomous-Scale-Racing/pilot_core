@@ -1,9 +1,6 @@
 """
-LidarBuffer — typed wrapper for a 2D LIDAR scan (1080 float32 range values).
-
-Payload layout:
-    [1080 × float32]  range values in metres, ordered from angle_min to angle_max
-    Total = 4320 bytes
+2D lidar scan: 1080 float32 ranges in metres, angle_min first, angle_max last
+(4320 bytes).
 """
 
 from __future__ import annotations
@@ -20,17 +17,6 @@ _PAYLOAD_SIZE = _N_RAYS * 4  # 4320 bytes
 
 
 class LidarBuffer:
-    """High-level buffer for a single 2D LIDAR scan.
-
-    Parameters
-    ----------
-    slots : int
-        Number of ring-buffer slots.
-    name : str
-        Shared-memory block name.
-    create : bool
-        Pass *True* from orchestrator, *False* from workers.
-    """
 
     def __init__(
         self,
@@ -47,23 +33,11 @@ class LidarBuffer:
         )
 
     def write(self, ranges: np.ndarray) -> SlotHeader:
-        """Write a 1080-float range array.
-
-        Parameters
-        ----------
-        ranges : np.ndarray
-            Shape ``(1080,)``, dtype ``float32``, values in metres.
-        """
+        """ranges: (1080,), metres"""
         payload = ranges.astype(np.float32).tobytes()
         return self._rb.write(payload)
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray]]:
-        """Read the most recent LIDAR scan.
-
-        Returns
-        -------
-        (header, ranges) or *None*.  ``ranges`` is ``(1080,) float32``.
-        """
         result = self._rb.read_latest()
         if result is None:
             return None

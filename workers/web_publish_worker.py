@@ -1,29 +1,21 @@
 """
-WebPublishWorker — optional worker that periodically publishes the car's
-live telemetry (pose, trajectory, track boundaries, control state) to a
-remote HTTP endpoint as JSON, e.g. for a pit-lane dashboard.
+Optional: POSTs live telemetry (pose, trajectory, track boundaries, control)
+as JSON to some HTTP endpoint every so often. Meant for a pit-lane dashboard
+or similar.
 
-Positions are taken as the (x, z) translation of the PoseBuffer pose
-(camera-to-world), i.e. the ground plane of the ORB-SLAM3 camera frame.
+Positions are the (x, z) translation of the camera-to-world pose from
+PoseBuffer, i.e. the ground plane of the ORB-SLAM3 camera frame.
 
-Config kwargs
--------------
-pose_buffer : PoseBuffer
-    Camera-to-world poses (SLAM).
-boundary_buffer : TrackBoundaryBuffer | None
-    Extracted track boundaries (optional — omitted when SLAM disabled).
-control_buffer : ControlBuffer | None
-    Latest steering / throttle, published as-is in [0, 1] (0.5 = neutral).
-endpoint : str
-    Full URL to POST JSON payloads to (e.g. ``http://10.0.0.1:8080/api/telemetry``).
-publish_interval : float
-    Seconds between publishes (default 1.0).
-timeout : float
-    HTTP POST timeout in seconds (default 2.0).
-vehicle_id : str
-    Arbitrary identifier for the vehicle (default ``"pilot_1"``).
-max_trajectory_pts : int
-    Cap on how many trajectory points to include per payload (default 500).
+Config:
+    pose_buffer         Twc poses from SLAM
+    boundary_buffer     optional, left out when SLAM is disabled
+    control_buffer      optional; steering/throttle go out as-is, in [0, 1]
+                        with 0.5 = neutral
+    endpoint            full URL, e.g. http://10.0.0.1:8080/api/telemetry
+    publish_interval    seconds, default 1.0
+    timeout             POST timeout in seconds, default 2.0
+    vehicle_id          any string, default "pilot_1"
+    max_trajectory_pts  only the newest N trajectory points are sent (500)
 """
 
 from __future__ import annotations
@@ -39,7 +31,7 @@ import numpy as np
 
 from .base_worker import BaseWorker
 
-# Buffers arrive as kwargs at runtime; these imports are for type hints only.
+# type hints only, the buffers themselves come in as kwargs
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -49,9 +41,9 @@ if TYPE_CHECKING:
 
 
 class WebPublishWorker(BaseWorker):
-    """Periodically POST live telemetry to an HTTP endpoint.
+    """Telemetry POSTer. Config is described in the module docstring.
 
-    Example JSON payload::
+    A payload looks like::
 
         {
             "vehicle_id": "pilot_1",
@@ -64,8 +56,6 @@ class WebPublishWorker(BaseWorker):
                 "inner": [[x, z], ...]
             }
         }
-
-    Parameters are documented at module level.
     """
 
     def __init__(self, name: str = "web_publish", **kwargs: Any) -> None:
@@ -85,9 +75,7 @@ class WebPublishWorker(BaseWorker):
         self._last_pose_seq: int = 0
         self._last_publish: float = 0.0
         self._consecutive_errors: int = 0
-        self._MAX_BACKOFF: float = 30.0  # max sleep on repeated failures
-
-    # --- Lifecycle ---
+        self._MAX_BACKOFF: float = 30.0  # s, cap on the failure back-off
 
     def setup(self) -> None:
         self._pose_buf = self.config.get("pose_buffer")
@@ -126,10 +114,8 @@ class WebPublishWorker(BaseWorker):
             f"{len(self._trajectory)} trajectory pts accumulated"
         )
 
-    # --- Data ingestion helpers ---
-
     def _ingest_pose(self) -> None:
-        """Read the latest pose and append its ground-plane position to the trajectory."""
+        """Append the newest pose's ground-plane position, if there is a new one."""
         if self._pose_buf is None:
             return
         result = self._pose_buf.read_latest()
@@ -143,12 +129,10 @@ class WebPublishWorker(BaseWorker):
         a0, a1 = self._bev_axes
         self._trajectory.append([float(pose[a0, 3]), float(pose[a1, 3])])
 
-        # Cap to the most recent N points
         if len(self._trajectory) > self._max_traj:
             self._trajectory = self._trajectory[-self._max_traj:]
 
     def _read_control(self) -> Optional[Dict[str, float]]:
-        """Snapshot latest steering + throttle."""
         if self._ctrl_buf is None:
             return None
         result = self._ctrl_buf.read_latest()
@@ -159,7 +143,6 @@ class WebPublishWorker(BaseWorker):
                 "throttle": round(float(throttle), 4)}
 
     def _read_boundaries(self) -> Optional[Dict[str, list]]:
-        """Snapshot outer / inner track boundaries."""
         if self._boundary_buf is None:
             return None
         result = self._boundary_buf.read_latest()
@@ -171,10 +154,8 @@ class WebPublishWorker(BaseWorker):
             "inner": _ndarray_to_list(inner),
         }
 
-    # --- Payload construction ---
-
     def _build_payload(self) -> Dict[str, Any]:
-        """Assemble the JSON-serialisable telemetry dict."""
+        # pose/control/track keys are left out when there's nothing to send
         payload: Dict[str, Any] = {
             "vehicle_id": self._vehicle_id,
             "timestamp": time.time(),
@@ -196,14 +177,11 @@ class WebPublishWorker(BaseWorker):
 
         return payload
 
-    # --- HTTP transport ---
-
     def _post(self, payload: Dict[str, Any]) -> None:
-        """POST JSON payload to the configured endpoint.
+        """POST to the endpoint with plain urllib (no requests dependency).
 
-        Uses stdlib ``urllib`` to avoid an external dependency on
-        ``requests``.  Applies exponential back-off on repeated failures
-        so a flaky network doesn't flood the logs.
+        Failures back off exponentially, capped at _MAX_BACKOFF, so a flaky
+        network doesn't flood the log.
         """
         body = json.dumps(payload, default=_json_default).encode("utf-8")
         req = Request(
@@ -234,8 +212,7 @@ class WebPublishWorker(BaseWorker):
             )
             time.sleep(backoff)
 
-    # --- Logger (also usable before run()) ---
-
+    # lazy so it also works before run()
     @property
     def logger(self) -> logging.Logger:
         if self._logger is None:
@@ -243,20 +220,15 @@ class WebPublishWorker(BaseWorker):
         return self._logger
 
 
-# --- Module-level helpers ---
-
 def _ndarray_to_list(arr: np.ndarray, decimals: int = 4) -> list:
-    """Convert an (N, 2) float32 ndarray to a JSON-friendly nested list.
-
-    Rounds to *decimals* decimal places to keep payloads compact.
-    """
+    """(N, 2) array -> nested list, rounded to keep the payload small."""
     if arr is None or len(arr) == 0:
         return []
     return np.round(arr, decimals=decimals).tolist()
 
 
 def _json_default(obj: Any) -> Any:
-    """Fallback serialiser for ``json.dumps`` — handles numpy scalars."""
+    """json.dumps default= hook for numpy scalars/arrays."""
     if isinstance(obj, (np.integer,)):
         return int(obj)
     if isinstance(obj, (np.floating,)):

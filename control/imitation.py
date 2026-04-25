@@ -1,18 +1,18 @@
 """
-Shared infrastructure for the learned, map-free depth controllers
-(``vae`` and ``bc``): depth preprocessing, expert demonstration collection
-on the bench, ONNX export and the on-car ONNX follower.
+Common bits for the learned map-free depth controllers (vae, bc): depth
+preprocessing, demo collection on the bench, ONNX export, and the on-car
+follower that runs the exported model.
 
-Demonstrations: an LQR expert drives random bench tracks from the true
-state while depth frames are rendered.  Correlated steering noise is
-injected into the *executed* command so the data contains recoveries,
-while the label is always the expert's clean command — M. Laskey et al.,
-"DART: Noise Injection for Robust Imitation Learning", CoRL 2017.  Frames
-are mirrored (steering negated) to balance left and right turns.
+Demos come from an LQR expert driving random bench tracks off the true state
+while we render depth. Correlated steering noise goes into the command that
+actually gets executed, so the data includes recoveries, but the label is
+always the expert's clean command (DART: M. Laskey et al., "DART: Noise
+Injection for Robust Imitation Learning", CoRL 2017). Frames are also
+mirrored with steering negated to balance left/right turns.
 
-Model contract: ONNX input ``depth`` ``(N, 1, INPUT_H, INPUT_W)`` in
-``[0, 1]`` → output ``steering`` ``(N, 1)`` in ``[-1, 1]`` (+1 = left), plus
-a ``<model>.json`` sidecar with at least ``max_range``.
+Model contract: ONNX input "depth" (N, 1, INPUT_H, INPUT_W) in [0, 1],
+output "steering" (N, 1) in [-1, 1], +1 = left. Needs a <model>.json sidecar
+next to it with at least max_range.
 """
 
 from __future__ import annotations
@@ -30,20 +30,20 @@ INPUT_H, INPUT_W = 40, 64
 
 
 def preprocess_depth(depth: np.ndarray, max_range: float) -> np.ndarray:
-    """Depth (H, W) metres → ``(INPUT_H, INPUT_W)`` float32 in ``[0, 1]``."""
+    """Depth (H, W) in metres -> (INPUT_H, INPUT_W) float32 in [0, 1]."""
     d = np.nan_to_num(depth.astype(np.float32), nan=0.0, posinf=0.0)
     d = np.clip(d, 0.0, max_range) / max_range
     return cv2.resize(d, (INPUT_W, INPUT_H), interpolation=cv2.INTER_AREA)
 
 
-# --- Demonstrations ---
+# demo collection
 
 RENDER_W, RENDER_H = 160, 100   # rendered depth size (px)
 CAM_HEIGHT = 0.12               # m, camera height above ground on the bench
 
 
 def bench_intrinsics(settings: str = "orbslam_oakd_rgbd.yaml"):
-    """OAK-D RGB intrinsics scaled from 640×400 to the rendered 160×100."""
+    """OAK-D RGB intrinsics, scaled from 640x400 down to the 160x100 render."""
     from .depth_ftg import Intrinsics
 
     K = Intrinsics.from_orbslam_settings(settings)
@@ -54,10 +54,10 @@ def bench_intrinsics(settings: str = "orbslam_oakd_rgbd.yaml"):
 def collect_depth_demos(params, K, n_tracks: int, seconds: float, speed: float, max_range: float,
                         seed: int = 0, noise_std: float = 0.3, dt: float = 0.01, rate: float = 15.0,
                         verbose: bool = True):
-    """Expert (LQR) demonstrations with DART noise → ``(frames, steering)``.
+    """LQR expert demos with DART noise.
 
-    Returns ``x`` ``(N, 1, INPUT_H, INPUT_W)`` float32 and ``y`` ``(N, 1)``,
-    including the mirrored copies.
+    Returns x (N, 1, INPUT_H, INPUT_W) float32 and y (N, 1). Mirrored copies
+    are already included.
     """
     from .controllers import build_track_follower
     from .sim import BicyclePlant, PlantConfig, random_track, render_depth
@@ -91,10 +91,8 @@ def collect_depth_demos(params, K, n_tracks: int, seconds: float, speed: float, 
     return np.concatenate([x, x[..., ::-1]]).astype(np.float32), np.concatenate([y, -y])
 
 
-# --- Export ---
-
 def export_steering_onnx(model, path: str, meta: dict) -> str:
-    """Export a torch module ``depth (N,1,H,W) → steering (N,1)`` + JSON sidecar."""
+    """torch module -> ONNX (depth (N,1,H,W) -> steering (N,1)), plus the JSON sidecar."""
     import torch
 
     torch.onnx.export(model.eval(), torch.zeros(1, 1, INPUT_H, INPUT_W), path,
@@ -106,17 +104,15 @@ def export_steering_onnx(model, path: str, meta: dict) -> str:
     return path
 
 
-# --- Inference ---
-
 @dataclass
 class DepthPolicyConfig:
     cruise_speed: float = 0.8          # m/s
-    speed_per_throttle: float = 3.0    # m/s per unit throttle (shared calibration)
+    speed_per_throttle: float = 3.0    # m/s per unit throttle, shared calibration
     steer_slowdown: float = 0.5        # speed *= 1 - steer_slowdown * |steering|
 
 
 class DepthPolicyFollower:
-    """Map-free controller running an exported depth → steering ONNX model."""
+    """Runs an exported depth -> steering ONNX model on the car. No map needed."""
 
     def __init__(self, onnx_path: str, cfg: DepthPolicyConfig | None = None) -> None:
         import onnxruntime as ort

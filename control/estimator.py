@@ -1,14 +1,12 @@
 """
-Vehicle state estimator: an EKF on a unicycle model
-``[x, y, yaw, v, yaw_rate]`` fed by pose measurements (SLAM, ~15 Hz) and,
-when available, a direct speed measurement (e.g. simulator ground truth).
+EKF on a unicycle model, state [x, y, yaw, v, yaw_rate]. Fed by SLAM poses
+(~15 Hz) and a direct speed measurement when we have one (sim ground truth).
 
-Reference: S. Thrun, W. Burgard, D. Fox, "Probabilistic Robotics",
-MIT Press, 2005 (Ch. 3, extended Kalman filter).
+Thrun, Burgard, Fox, "Probabilistic Robotics", MIT Press 2005, ch. 3.
 
-The car has no wheel encoders, so speed is inferred from successive poses;
-the filter smooths that and lets controllers query the state at any time
-between pose updates (``predict_to``).
+No wheel encoders on the car, so speed only comes from successive poses. The
+filter smooths that out, and predict_to() lets the controllers ask for the
+state between pose updates.
 """
 
 from __future__ import annotations
@@ -25,9 +23,10 @@ class EstimatorConfig:
     pos_std: float = 0.03          # m, pose position measurement noise
     yaw_std: float = 0.03          # rad, pose yaw measurement noise
     speed_std: float = 0.05        # m/s, direct speed measurement noise
-    accel_std: float = 2.0         # m/s², process noise on v
+    accel_std: float = 2.0         # m/s^2, process noise on v
     yaw_accel_std: float = 4.0     # rad/s², process noise on yaw rate
-    stale_after: float = 0.5       # s without a pose → estimate no longer valid
+    # s without a pose before the estimate is treated as invalid
+    stale_after: float = 0.5
 
 
 class PoseEKF:
@@ -46,8 +45,6 @@ class PoseEKF:
         self.x = None
         self.t = None
         self.last_pose_t = None
-
-    # --- Internals ---
 
     def _predict(self, dt: float) -> None:
         if dt <= 0:
@@ -82,15 +79,13 @@ class PoseEKF:
             self._predict(t - self.t)
         self.t = t
 
-    # --- Inputs ---
-
     def update_pose(self, t: float, x: float, y: float, yaw: float) -> None:
         if self.x is None:
             self.x = np.array([x, y, wrap_angle(yaw), 0.0, 0.0])
             self.P = np.diag([self.cfg.pos_std ** 2] * 2 + [self.cfg.yaw_std ** 2, 1.0, 1.0])
             self.t = self.last_pose_t = t
             return
-        if t < self.t:          # out-of-order sample
+        if t < self.t:  # out of order, drop it
             return
         self._advance(t)
         H = np.zeros((3, 5))
@@ -107,13 +102,11 @@ class PoseEKF:
         H[0, 3] = 1.0
         self._update(np.array([v]), H, np.array([[self.cfg.speed_std ** 2]]))
 
-    # --- Output ---
-
     def valid(self, t: float) -> bool:
         return self.last_pose_t is not None and (t - self.last_pose_t) <= self.cfg.stale_after
 
     def predict_to(self, t: float) -> VehicleState | None:
-        """State extrapolated to ``t`` (does not modify the filter)."""
+        """Extrapolate to t without touching the filter state."""
         if self.x is None or not self.valid(t):
             return None
         dt = max(t - self.t, 0.0)

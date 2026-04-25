@@ -1,19 +1,18 @@
 """
-VAE control model: a variational auto-encoder compresses each depth frame
-into a small latent vector, and a separate controller head maps the latent
-to a steering command ("World Models" V + C decomposition).
+VAE control model. A variational autoencoder squeezes each depth frame into a
+small latent, and a separate head maps latent -> steering. This is the
+"World Models" V + C split.
 
-References: D. Ha, J. Schmidhuber, "World Models", arXiv:1803.10122, 2018;
+D. Ha, J. Schmidhuber, "World Models", arXiv:1803.10122, 2018;
 D. P. Kingma, M. Welling, "Auto-Encoding Variational Bayes", ICLR 2014
-(β-weighted KL: I. Higgins et al., "β-VAE", ICLR 2017).  The head is trained
-by behaviour cloning with noise-injected demonstrations: M. Laskey et al.,
-"DART: Noise Injection for Robust Imitation Learning", CoRL 2017.
+(beta-weighted KL from I. Higgins et al., "β-VAE", ICLR 2017). Head is trained
+by behaviour cloning on noise-injected demos, see M. Laskey et al., "DART:
+Noise Injection for Robust Imitation Learning", CoRL 2017.
 
-On the car the exported ONNX graph (encoder mean → head) runs through the
-shared :class:`control.imitation.DepthPolicyFollower`, so torch is only
-needed for training (``scripts/train_vae_policy.py``).  Preprocessing,
-demonstrations and the follower are shared with the BC model
-(:mod:`control.imitation`).
+On the car, the exported ONNX graph (encoder mean -> head) runs through
+control.imitation.DepthPolicyFollower, same as BC. So torch is only needed
+for training (scripts/train_vae_policy.py). Preprocessing, demos and the
+follower all live in control.imitation.
 """
 
 from __future__ import annotations
@@ -33,10 +32,8 @@ __all__ = [
 ]
 
 
-# --- Training ---
-
 def build_models(latent_dim: int = 16):
-    """Return ``(vae, head)`` torch modules (torch imported lazily)."""
+    """(vae, head) torch modules. torch is imported lazily."""
     import torch
     from torch import nn
 
@@ -45,9 +42,9 @@ def build_models(latent_dim: int = 16):
             super().__init__()
             self.latent_dim = latent_dim
             self.enc = nn.Sequential(
-                nn.Conv2d(1, 16, 4, 2, 1), nn.ReLU(),     # 40×64 → 20×32
-                nn.Conv2d(16, 32, 4, 2, 1), nn.ReLU(),    # → 10×16
-                nn.Conv2d(32, 64, 4, 2, 1), nn.ReLU(),    # → 5×8
+                nn.Conv2d(1, 16, 4, 2, 1), nn.ReLU(),     # 40x64 -> 20x32
+                nn.Conv2d(16, 32, 4, 2, 1), nn.ReLU(),    # -> 10x16
+                nn.Conv2d(32, 64, 4, 2, 1), nn.ReLU(),    # -> 5x8
                 nn.Flatten(),
             )
             self.fc_mu = nn.Linear(64 * 5 * 8, latent_dim)
@@ -80,7 +77,7 @@ def build_models(latent_dim: int = 16):
 
 
 def vae_loss(recon, x, mu, logvar, beta: float = 1.0):
-    """Reconstruction (sum of squared errors) + β·KL, averaged per sample."""
+    """SSE reconstruction + beta * KL, averaged per sample."""
     import torch
 
     rec = torch.sum((recon - x) ** 2) / x.shape[0]
@@ -89,7 +86,7 @@ def vae_loss(recon, x, mu, logvar, beta: float = 1.0):
 
 
 def export_onnx(vae, head, path: str, meta: dict) -> str:
-    """Export encoder-mean → head as one graph ``depth (N,1,H,W) → steering (N,1)``."""
+    """Exports encoder-mean -> head as a single depth -> steering graph."""
     from torch import nn
 
     class Inference(nn.Module):

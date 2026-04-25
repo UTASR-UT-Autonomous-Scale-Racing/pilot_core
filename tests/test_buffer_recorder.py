@@ -1,16 +1,4 @@
-"""
-test_buffer_recorder.py — BufferRecorderWorker, the per-buffer binary
-recorder: file format, decimation, record cap and every typed buffer.
-
-Covers:
-    - File header writing & reading
-    - Record writing & reading (round-trip)
-    - sample_k decimation
-    - top_n record cap + wraparound
-    - Integration with each typed buffer (Frame, IMU, Seg, Pose, Control, PC, Boundary)
-    - Edge cases: nothing written, repeated seq_no, end of file
-    - config.yaml recording settings read by start.py
-"""
+"""BufferRecorderWorker file format, sample_k/top_n, and a round trip per buffer type."""
 
 from __future__ import annotations
 
@@ -42,7 +30,7 @@ def _uid():
     return uuid.uuid4().hex[:8]
 
 
-# --- Helpers: build a recorder wired to a real shared-memory buffer ---
+# recorder wired to a real shm buffer
 
 def _make_recorder(
     buf,
@@ -73,8 +61,6 @@ def _bin_files(tmp_path) -> list[str]:
         if f.endswith(".bin")
     )
 
-
-# --- File header ---
 
 class TestFileHeader:
 
@@ -113,7 +99,7 @@ class TestFileHeader:
             buf.unlink()
 
 
-# --- Record round-trip ---
+# round trip
 
 class TestRecordRoundTrip:
 
@@ -168,12 +154,12 @@ class TestRecordRoundTrip:
             buf.unlink()
 
 
-# --- Decimation (sample_k) ---
+# sample_k decimation
 
 class TestSampleK:
 
     def test_every_other(self, tmp_path):
-        """sample_k=2 → only even seq_no get recorded."""
+        # sample_k=2: only even seq_no should land in the file
         name = f"sk_{_uid()}"
         buf = IMUBuffer(slots=8, name=name, create=True)
         try:
@@ -226,12 +212,10 @@ class TestSampleK:
             buf.unlink()
 
 
-# --- Top-N cap ---
-
 class TestTopN:
 
     def test_top_n_limits_records(self, tmp_path):
-        """After top_n records the file pointer wraps — total file size stays bounded."""
+        """After top_n records the file pointer wraps, so the file size stays bounded."""
         name = f"tn_{_uid()}"
         buf = IMUBuffer(slots=8, name=name, create=True)
         try:
@@ -263,7 +247,7 @@ class TestTopN:
             buf.unlink()
 
 
-# --- Typed buffer integration — one test per buffer type ---
+# one round trip per typed buffer
 
 class TestFrameRecorder:
 
@@ -287,7 +271,7 @@ class TestFrameRecorder:
             hdr, payload = rec
             assert hdr["seq_no"] == 1
             assert hdr["payload_size"] > 0
-            # Payload should contain 16 bytes meta + rgb + depth
+            # 16 bytes meta + rgb + depth
             expected_min = 16 + 400 * 640 * 3 + 400 * 640 * 4
             assert len(payload) == expected_min
         finally:
@@ -333,7 +317,7 @@ class TestSegmentationRecorder:
                 rec = BufferRecorderWorker.read_record(f)
             assert rec is not None
             _, payload = rec
-            # 8 bytes meta + 400×640 4-byte mask
+            # 8 bytes meta + 400x640 int32 mask
             assert len(payload) == 8 + 400 * 640 * 4
         finally:
             buf.unlink()
@@ -432,12 +416,9 @@ class TestBoundaryRecorder:
             buf.unlink()
 
 
-# --- Edge cases ---
-
 class TestEdgeCases:
 
     def test_no_data_available(self, tmp_path):
-        """step() with nothing written to buffer → no record."""
         name = f"nd_{_uid()}"
         buf = IMUBuffer(slots=4, name=name, create=True)
         try:
@@ -449,7 +430,6 @@ class TestEdgeCases:
             buf.unlink()
 
     def test_duplicate_seq_not_recorded_twice(self, tmp_path):
-        """Reading the same seq_no again should not produce a second record."""
         name = f"dup_{_uid()}"
         buf = IMUBuffer(slots=4, name=name, create=True)
         try:
@@ -463,7 +443,6 @@ class TestEdgeCases:
             buf.unlink()
 
     def test_read_record_at_eof(self, tmp_path):
-        """read_record returns None at end of file."""
         name = f"eof_{_uid()}"
         buf = IMUBuffer(slots=4, name=name, create=True)
         try:
@@ -477,10 +456,8 @@ class TestEdgeCases:
             buf.unlink()
 
 
-# --- config.yaml recording settings ---
-
 class TestStartPyRecorderConfig:
-    """config.yaml provides the recording settings start.py uses to spawn recorders."""
+    """start.py spawns the recorders from these config.yaml settings."""
 
     def test_recording_config_keys(self):
         import yaml
@@ -489,7 +466,6 @@ class TestStartPyRecorderConfig:
         rec_cfg = cfg.get("recording_config", {})
         assert "sample_k" in rec_cfg
         assert "top_n" in rec_cfg
-        # Per-buffer override keys
         for key in ("frame", "imu", "segmentation", "pose", "control"):
             assert key in rec_cfg, f"Missing per-buffer config for {key}"
 
@@ -498,5 +474,5 @@ class TestStartPyRecorderConfig:
         with open("config.yaml", "r") as f:
             cfg = yaml.safe_load(f)
         rec_cfg = cfg["recording_config"]
-        # Frame should sample less frequently than IMU
+        # frames are big, they should be sampled no more often than IMU
         assert rec_cfg["frame"]["sample_k"] >= rec_cfg["imu"]["sample_k"]

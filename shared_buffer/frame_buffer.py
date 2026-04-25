@@ -1,17 +1,17 @@
 """
-FrameBuffer — typed wrapper for RGB + Depth frame pairs.
+RGB + depth frame pairs.
 
-Payload layout (contiguous bytes):
+Payload (contiguous):
     [4 bytes]  uint32  rgb_height
     [4 bytes]  uint32  rgb_width
     [4 bytes]  uint32  depth_height
     [4 bytes]  uint32  depth_width
-    [H*W*3]    uint8   RGB data   (row-major, RGB channel order)
-    [H*W*4]    float32 Depth data (metres; the camera workers write float32)
+    [H*W*3]    uint8   RGB, row-major, RGB channel order
+    [H*W*4]    float32 depth in metres (what the camera workers write)
                 or
-    [H*W*2]    uint16  Depth data (raw, e.g. millimetres)
+    [H*W*2]    uint16  raw depth, e.g. mm
 
-The reader infers the depth dtype from the remaining payload size.
+Depth dtype isn't stored; the reader works it out from what's left of the payload.
 """
 
 from __future__ import annotations
@@ -24,14 +24,13 @@ import numpy as np
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader
 
-# Slot sizing — 640×480 RGB (3ch uint8) + 640×480 depth (float32)
+# slots are sized for 640x480 RGB (uint8) + 640x480 float32 depth
 _DEFAULT_RGB_SHAPE = (480, 640, 3)
 _DEFAULT_DEPTH_SHAPE = (480, 640)
 
-_META_FMT = "<IIII"  # 4 × uint32 = 16 bytes
+_META_FMT = "<IIII"  # 16 bytes
 _META_SIZE = struct.calcsize(_META_FMT)
 
-# Max payload = meta + rgb (uint8) + depth (float32, 4 bytes per pixel)
 _MAX_PAYLOAD = (
     _META_SIZE
     + _DEFAULT_RGB_SHAPE[0] * _DEFAULT_RGB_SHAPE[1] * _DEFAULT_RGB_SHAPE[2]
@@ -40,19 +39,9 @@ _MAX_PAYLOAD = (
 
 
 class FrameBuffer:
-    """High-level buffer for camera frame pairs (RGB + Depth).
+    """Camera frame pairs (RGB + depth).
 
-    Parameters
-    ----------
-    slots : int
-        Number of ring-buffer slots (default 8).
-    name : str
-        Shared-memory block name.
-    create : bool
-        Pass *True* from the orchestrator, *False* from workers.
-    max_payload : int
-        Override the maximum per-slot payload size if a different resolution
-        is needed.
+    Pass a bigger max_payload if you run the camera above 640x480.
     """
 
     def __init__(
@@ -70,18 +59,8 @@ class FrameBuffer:
             create=create,
         )
 
-    # --- write ---
-
     def write(self, rgb: np.ndarray, depth: np.ndarray) -> SlotHeader:
-        """Serialise and write an RGB + depth frame pair.
-
-        Parameters
-        ----------
-        rgb : np.ndarray
-            Shape ``(H, W, 3)``, dtype ``uint8``.
-        depth : np.ndarray
-            Shape ``(H, W)``, dtype ``float32`` (metres) or ``uint16``.
-        """
+        """rgb: (H, W, 3) uint8. depth: (H, W) float32 metres, or uint16."""
         rh, rw = rgb.shape[:2]
         dh, dw = depth.shape[:2]
 
@@ -89,16 +68,10 @@ class FrameBuffer:
         payload = meta + rgb.tobytes() + depth.tobytes()
         return self._rb.write(payload)
 
-    # --- read ---
-
     def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray, np.ndarray]]:
-        """Read the most recent frame pair.
+        """Newest (header, rgb, depth), or None if nothing's been written.
 
-        Returns
-        -------
-        (header, rgb, depth) or *None* if no frame has been written.
-        ``rgb`` is ``(H, W, 3) uint8``; ``depth`` is ``(H, W)`` ``float32``
-        or ``uint16``, as written.
+        depth comes back in whatever dtype it was written as.
         """
         result = self._rb.read_latest()
         if result is None:
@@ -113,7 +86,7 @@ class FrameBuffer:
         )
 
         depth_offset = _META_SIZE + rgb_size
-        # Depth dtype is inferred from the remaining size (4 B/px → float32)
+        # 4 B/px left over -> float32, otherwise uint16
         remaining = len(payload) - depth_offset
         depth_pixels = dh * dw
         if remaining == depth_pixels * 4:
@@ -126,8 +99,6 @@ class FrameBuffer:
             )
 
         return header, rgb.copy(), depth.copy()
-
-    # --- lifecycle ---
 
     def close(self):
         self._rb.close()

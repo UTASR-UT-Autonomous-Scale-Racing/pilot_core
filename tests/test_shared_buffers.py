@@ -1,14 +1,6 @@
 """
-test_shared_buffers.py — The shared-memory buffers in shared_buffer/: the
-slot header, the low-level SharedRingBuffer and every typed buffer.
-
-Categories:
-    - Smoke tests: basic instantiation, single write/read
-    - I/O round-trip: write data, read back, assert equality
-    - Null/empty checks: read before write, zero-length data
-    - Initialisation: correct shm allocation, dtype tags
-    - Race conditions: concurrent writer + reader across processes
-    - Overwrite ring: write more than slots, verify latest
+shared_buffer/: SlotHeader, the raw SharedRingBuffer and each typed buffer,
+plus a few cross-process read/write checks at the end.
 """
 
 from __future__ import annotations
@@ -40,11 +32,7 @@ def _uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
-# --- Schema & SlotHeader ---
-
 class TestSlotHeader:
-    """Smoke + round-trip tests for the SlotHeader dataclass."""
-
     def test_header_size_is_64(self):
         assert HEADER_SIZE == 64
 
@@ -66,13 +54,12 @@ class TestSlotHeader:
         assert abs(h2.produced_ts - 1234567890.123) < 1e-6
 
     def test_unpack_zeroed_buffer(self):
-        """Unpack an all-zeros header — should not crash."""
         h = SlotHeader.unpack(b"\x00" * HEADER_SIZE)
         assert h.seq_no == 0
         assert h.payload_size == 0
 
 
-# --- SharedRingBuffer (low-level) ---
+# raw ring buffer
 
 class TestSharedRingBuffer:
 
@@ -103,7 +90,6 @@ class TestSharedRingBuffer:
         rb.unlink()
 
     def test_overwrite_ring_returns_latest(self):
-        """Write more than `slots` times → read_latest returns the newest."""
         name = f"test_rb_{_uid()}"
         rb = SharedRingBuffer(name=name, slots=2, slot_payload_size=8, create=True)
         for i in range(10):
@@ -111,7 +97,7 @@ class TestSharedRingBuffer:
         result = rb.read_latest()
         assert result is not None
         h, data = result
-        assert h.seq_no == 10  # latest
+        assert h.seq_no == 10
         val = struct.unpack("<Q", data)[0]
         assert val == 9
         rb.unlink()
@@ -131,7 +117,7 @@ class TestSharedRingBuffer:
             rb.write(b"\xff" * 16)
             result = rb.read_latest()
             assert result is not None
-        # Leaving the context closes but does not unlink — unlink here
+        # the context manager only closes, it doesn't unlink, so do that here
         try:
             stale = shared_memory.SharedMemory(name=name, create=False)
             stale.close()
@@ -140,10 +126,10 @@ class TestSharedRingBuffer:
             pass
 
     def test_payload_truncation(self):
-        """Payloads larger than slot_payload_size are silently truncated."""
+        """Oversized payloads get truncated to slot_payload_size, no error."""
         name = f"test_rb_{_uid()}"
         rb = SharedRingBuffer(name=name, slots=2, slot_payload_size=8, create=True)
-        rb.write(b"\xAA" * 100)  # way larger than 8
+        rb.write(b"\xAA" * 100)
         result = rb.read_latest()
         assert result is not None
         _, data = result
@@ -151,8 +137,6 @@ class TestSharedRingBuffer:
         assert data == b"\xAA" * 8
         rb.unlink()
 
-
-# --- FrameBuffer ---
 
 class TestFrameBuffer:
 
@@ -191,8 +175,6 @@ class TestFrameBuffer:
         np.testing.assert_allclose(depth_out, 5.0, atol=1e-6)
 
 
-# --- IMUBuffer ---
-
 class TestIMUBuffer:
 
     def test_smoke_init(self, imu_buffer):
@@ -216,17 +198,14 @@ class TestIMUBuffer:
         assert vec.dtype == np.float32
 
     def test_wrong_size_vector_write_succeeds(self, imu_buffer):
-        """Writing a wrong-sized vector succeeds (raw bytes), read may fail."""
         short = np.zeros(5, dtype=np.float32)
-        # Write succeeds — underlying ring buffer stores raw bytes
+        # the ring buffer just stores raw bytes, so the write goes through
         header = imu_buffer.write(short)
         assert header.seq_no == 1
-        # Read will fail because it expects 9 floats but only 5 present
+        # ...but the read expects 9 floats and only gets 5
         with pytest.raises(ValueError):
             imu_buffer.read_latest()
 
-
-# --- SegmentationBuffer ---
 
 class TestSegmentationBuffer:
 
@@ -250,8 +229,6 @@ class TestSegmentationBuffer:
         assert mask_out.shape == (400, 640)
 
 
-# --- PoseBuffer ---
-
 class TestPoseBuffer:
 
     def test_smoke_init(self, pose_buffer):
@@ -271,7 +248,6 @@ class TestPoseBuffer:
         assert speed == 0.0
 
     def test_write_pose_with_map_points(self, pose_buffer, pose_4x4, point_cloud):
-        # Use only first 100 points to stay within limits
         pts = point_cloud[:100]
         pose_buffer.write(pose_4x4, map_points=pts)
         result = pose_buffer.read_latest()
@@ -293,8 +269,6 @@ class TestPoseBuffer:
         assert mp_out.shape == (10, 3)
         assert speed == pytest.approx(2.5)
 
-
-# --- ControlBuffer ---
 
 class TestControlBuffer:
 
@@ -325,8 +299,6 @@ class TestControlBuffer:
         assert throttle == 0.0
 
 
-# --- PointCloudBuffer ---
-
 class TestPointCloudBuffer:
 
     def test_smoke_init(self, pointcloud_buffer):
@@ -350,7 +322,6 @@ class TestPointCloudBuffer:
         assert pts_out.shape == (0, 3)
 
     def test_large_point_cloud_clamped(self):
-        """Points beyond max_points are clamped."""
         name = f"test_pc_{_uid()}"
         buf = PointCloudBuffer(slots=2, name=name, create=True, max_points=100)
         big = np.random.randn(500, 3).astype(np.float32)
@@ -360,8 +331,6 @@ class TestPointCloudBuffer:
         np.testing.assert_allclose(pts, big[:100], atol=1e-6)
         buf.unlink()
 
-
-# --- TrackBoundaryBuffer ---
 
 class TestTrackBoundaryBuffer:
 
@@ -397,10 +366,9 @@ class TestTrackBoundaryBuffer:
         assert i.shape == (200, 2)
 
 
-# --- Race conditions: concurrent write/read across processes ---
+# cross-process write/read
 
 def _reader_process(name: str, n_reads: int, results: mp.Queue):
-    """Child process: reads from buffer and counts valid reads."""
     from shared_buffer import ControlBuffer
     buf = ControlBuffer(slots=8, name=name, create=False)
     valid = 0
@@ -419,7 +387,6 @@ def _reader_process(name: str, n_reads: int, results: mp.Queue):
 class TestRaceConditions:
 
     def test_concurrent_write_read(self):
-        """Parent writes to ControlBuffer, child reads concurrently."""
         name = f"test_race_{_uid()}"
         buf = ControlBuffer(slots=8, name=name, create=True)
 
@@ -438,12 +405,11 @@ class TestRaceConditions:
         assert not reader.is_alive()
 
         result = results_q.get(timeout=5)
-        # Reader should have gotten at least *some* valid reads
         assert result["valid"] > 0
         buf.unlink()
 
     def test_multiple_concurrent_readers(self):
-        """Parent writes, two concurrent readers — no crash or corruption."""
+        """One writer, two readers at once, neither should crash."""
         name = f"test_mr_{_uid()}"
         buf = ControlBuffer(slots=8, name=name, create=True)
 
@@ -468,7 +434,6 @@ class TestRaceConditions:
 
 
 def _frame_reader(name: str, n_reads: int, results: mp.Queue):
-    """Child process: reads frames from FrameBuffer."""
     from shared_buffer import FrameBuffer
     fb = FrameBuffer(slots=4, name=name, create=False)
     valid = 0
@@ -487,7 +452,6 @@ def _frame_reader(name: str, n_reads: int, results: mp.Queue):
 class TestFrameBufferRace:
 
     def test_concurrent_frame_write_read(self):
-        """Parent writes frames, child reads concurrently."""
         name = f"test_fr_{_uid()}"
         buf = FrameBuffer(slots=4, name=name, create=True)
         q = mp.Queue()

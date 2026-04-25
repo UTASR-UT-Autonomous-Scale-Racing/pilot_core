@@ -1,14 +1,12 @@
 """
-TrackPIDController — minimal PID that aligns the vehicle heading with the
-local track direction, estimated from the nearest outer / inner boundary
-points.
+Bare-bones heading PID for track following. The local track direction is
+estimated from the nearest outer and inner boundary points and the car is
+steered to line up with it.
 
-Reference (PID): K. J. Åström, R. M. Murray, "Feedback Systems",
-Princeton University Press, 2008.
+PID reference: Åström & Murray, "Feedback Systems", Princeton UP, 2008.
 
-Output: (steering, throttle) both in [-1, 1], steering +1 = LEFT,
-stochastically sampled from the PID output with configurable Gaussian
-noise.
+Output is (steering, throttle) in [-1, 1], +1 steer = left. Gaussian noise
+is added on top of the PID output, so it's stochastic unless noise_std=0.
 """
 
 from __future__ import annotations
@@ -17,26 +15,15 @@ import numpy as np
 
 
 def _angle_diff(a: float, b: float) -> float:
-    """Signed shortest angular difference in radians."""
+    """a - b wrapped to [-pi, pi)."""
     d = a - b
     return (d + np.pi) % (2 * np.pi) - np.pi
 
 
 class TrackPIDController:
-    """PID controller for autonomous track following.
+    """Heading PID. Throttle is constant (target_throttle) plus noise.
 
-    Parameters
-    ----------
-    kp_steer : float
-        Proportional gain for steering.
-    ki_steer : float
-        Integral gain for steering.
-    kd_steer : float
-        Derivative gain for steering.
-    target_throttle : float
-        Base throttle in [-1, 1] (default 0.3).
-    noise_std : float
-        Gaussian noise std for stochastic sampling (default 0.05).
+    noise_std is the steering noise std; throttle gets half of it.
     """
 
     def __init__(
@@ -62,31 +49,26 @@ class TrackPIDController:
         outer_line: np.ndarray,
         inner_line: np.ndarray,
     ) -> tuple[float, float]:
-        """Compute one PID control step.
+        """One control step.
 
         Parameters
         ----------
         current_bev : np.ndarray
-            ``(2,)`` current vehicle position in the BEV plane.
+            (2,) vehicle position in the BEV plane.
         heading_rad : float
-            Vehicle heading in the BEV plane (see :func:`workers.bev.pose_to_bev`).
-        outer_line : np.ndarray
-            ``(N, 2)`` ordered outer boundary vertices.
-        inner_line : np.ndarray
-            ``(M, 2)`` ordered inner boundary vertices.
+            BEV heading, same convention as workers.bev.pose_to_bev.
+        outer_line, inner_line : np.ndarray
+            (N, 2) / (M, 2) ordered boundary vertices.
 
-        Returns
-        -------
-        (steering, throttle) — both clipped to [-1, 1].
+        Returns (steering, throttle), clipped to [-1, 1].
         """
-        # 1. Find closest point on each boundary
         d_outer = np.linalg.norm(outer_line - current_bev, axis=1)
         d_inner = np.linalg.norm(inner_line - current_bev, axis=1)
         closest_outer = outer_line[d_outer.argmin()]
         closest_inner = inner_line[d_inner.argmin()]
 
-        # 2. Track direction = perpendicular to the inner → outer vector,
-        #    oriented to agree with the current heading
+        # track direction is perpendicular to inner->outer; flip it if it
+        # points against our current heading
         n_dir = closest_outer - closest_inner
         heading_vec = np.array([np.cos(heading_rad), np.sin(heading_rad)])
         target_heading = np.array([-n_dir[1], n_dir[0]])
@@ -94,11 +76,10 @@ class TrackPIDController:
         if np.dot(target_heading, heading_vec) < 0:
             target_heading = -target_heading
 
-        # 3. Heading error (positive = track direction is to the left)
+        # positive error = track heads off to our left
         target_angle = np.arctan2(target_heading[1], target_heading[0])
         error = _angle_diff(target_angle, heading_rad)
 
-        # 4. PID
         self._integral += error
         derivative = error - self._prev_error
         self._prev_error = error
@@ -108,7 +89,6 @@ class TrackPIDController:
         )
         raw_throttle = self.target_throttle
 
-        # 5. Stochastic sampling
         steer = np.clip(
             raw_steer + np.random.normal(0, self.noise_std), -1.0, 1.0
         )
@@ -121,6 +101,5 @@ class TrackPIDController:
         return float(steer), float(throttle)
 
     def reset(self) -> None:
-        """Reset integrator and derivative state."""
         self._prev_error = 0.0
         self._integral = 0.0

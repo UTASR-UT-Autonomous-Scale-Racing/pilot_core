@@ -1,13 +1,9 @@
-"""
-control — vehicle control library (pure Python, no worker/IPC dependencies).
+"""Vehicle control library. Pure Python, nothing in here should import the
+workers or the IPC buffers.
 
-    types        VehicleParams, VehicleState, Command
-    track        TrackModel (centre-line, curvature, projection)
-    controllers  PurePursuit, Stanley, TrackFollower, build_track_follower
-    speed        curvature speed profile + no-brake longitudinal controller
-    estimator    PoseEKF (pose [+ speed] → state)
-    safety       SafetySupervisor (arming, watchdog, speed cap, slew limits)
-    sim          closed-loop bicycle bench for evaluation
+Rough map: types (params/state/command), track (centre-line model),
+controllers + speed (lateral laws and the speed planner), estimator (pose EKF),
+safety (arming, watchdog, caps), sim (closed-loop bicycle bench).
 """
 
 from .controllers import PurePursuit, Stanley, TrackFollower, build_track_follower

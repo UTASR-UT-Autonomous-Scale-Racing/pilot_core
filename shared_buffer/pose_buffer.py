@@ -1,5 +1,5 @@
 """
-PoseBuffer — typed wrapper for SLAM pose + map-point data.
+PoseBuffer: SLAM pose + map points (+ speed).
 
 Payload layout:
     [64 bytes]  float32[4][4]   pose matrix (row-major, camera-to-world)
@@ -18,26 +18,15 @@ import numpy as np
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader
 
-_POSE_BYTES = 4 * 4 * 4  # 4×4 float32 matrix = 64 bytes
+_POSE_BYTES = 4 * 4 * 4  # 4x4 float32
 _COUNT_FMT = "<I"
 _COUNT_SIZE = 4
 _MAX_MAP_POINTS = 2048
-_SPEED_SIZE = 4  # float32
+_SPEED_SIZE = 4
 _MAX_PAYLOAD = _POSE_BYTES + _COUNT_SIZE + _MAX_MAP_POINTS * 3 * 4 + _SPEED_SIZE  # ~25 KB
 
 
 class PoseBuffer:
-    """High-level buffer for SLAM pose + map points.
-
-    Parameters
-    ----------
-    slots : int
-        Number of ring-buffer slots (default 8).
-    name : str
-        Shared-memory block name.
-    create : bool
-        Pass *True* from orchestrator, *False* from workers.
-    """
 
     def __init__(
         self,
@@ -56,17 +45,8 @@ class PoseBuffer:
     def write(
         self, pose: np.ndarray, map_points: Optional[np.ndarray] = None, speed: float = 0.0
     ) -> SlotHeader:
-        """Write a 4×4 pose matrix and optional map points.
-
-        Parameters
-        ----------
-        pose : np.ndarray
-            Shape ``(4, 4)``, dtype float32, camera-to-world.
-        map_points : np.ndarray, optional
-            Shape ``(N, 3)``, dtype float32.  May be *None* or empty;
-            truncated to 2048 points.
-        speed : float
-            Speed in m/s (0.0 when unknown).
+        """pose is the 4x4 camera-to-world matrix. map_points (N, 3) can be
+        None/empty and gets cut to 2048. speed is m/s, 0.0 if unknown.
         """
         pose_bytes = pose.astype(np.float32).tobytes()
 
@@ -85,13 +65,7 @@ class PoseBuffer:
     def read_latest(
         self,
     ) -> Optional[Tuple[SlotHeader, np.ndarray, np.ndarray, float]]:
-        """Read the most recent pose + map points.
-
-        Returns
-        -------
-        (header, pose, map_points, speed) or *None*.
-        ``pose`` is ``(4,4) float32``; ``map_points`` is ``(N,3) float32``; ``speed`` is float m/s.
-        """
+        """(header, pose 4x4, map_points Nx3, speed m/s) or None."""
         result = self._rb.read_latest()
         if result is None:
             return None

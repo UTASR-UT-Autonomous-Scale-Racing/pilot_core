@@ -1,7 +1,7 @@
 """
-SegmentationBuffer — typed wrapper for segmentation masks.
+Segmentation masks.
 
-Payload layout:
+Payload:
     [4 bytes]  uint32  height
     [4 bytes]  uint32  width
     [H*W*4]    float32 mask data (row-major)
@@ -24,19 +24,7 @@ _MAX_PAYLOAD = _META_SIZE + _DEFAULT_SHAPE[0] * _DEFAULT_SHAPE[1] * 4  # float32
 
 
 class SegmentationBuffer:
-    """High-level buffer for segmentation masks.
-
-    Parameters
-    ----------
-    slots : int
-        Number of ring-buffer slots (default 4).
-    name : str
-        Shared-memory block name.
-    create : bool
-        Pass *True* from orchestrator, *False* from workers.
-    max_payload : int
-        Override per-slot max payload if resolution differs.
-    """
+    """Masks up to 640x480 by default; bump max_payload for bigger ones."""
 
     def __init__(
         self,
@@ -54,13 +42,7 @@ class SegmentationBuffer:
         )
 
     def write(self, mask: np.ndarray) -> SlotHeader:
-        """Write a segmentation mask.
-
-        Parameters
-        ----------
-        mask : np.ndarray
-            Shape ``(H, W)``, any numeric dtype (stored as float32).
-        """
+        """Any numeric (H, W) mask; stored as float32."""
         mask_f32 = mask.astype(np.float32)
         h, w = mask_f32.shape[:2]
         meta = struct.pack(_META_FMT, h, w)
@@ -68,12 +50,6 @@ class SegmentationBuffer:
         return self._rb.write(payload)
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray]]:
-        """Read the most recent segmentation mask.
-
-        Returns
-        -------
-        (header, mask) or *None*.  ``mask`` is ``(H, W) float32``.
-        """
         result = self._rb.read_latest()
         if result is None:
             return None

@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Export a trained PPO policy (rl/train.py) to ONNX for on-car inference
-(``control_mode: policy``, see control/policy.py).
+Export a PPO policy from rl/train.py to ONNX for running on the car
+(control_mode: policy, see control/policy.py).
 
-The exported graph contains the whole deterministic inference path:
-
-    raw obs → VecNormalize ((obs - mean) / sqrt(var + eps), clipped)
-            → policy mean action → clip to the action space
-
-and a ``<out>.json`` sidecar records the observation settings (n_ahead,
-boundary spacing / smoothing) the policy was trained with.
+The graph bakes in the VecNormalize step, so it's the full deterministic path:
+raw obs -> (obs - mean) / sqrt(var + eps), clipped -> mean action -> clip to
+the action space. A <out>.json sidecar next to it records the obs settings
+(n_ahead, boundary spacing/smoothing) the policy was trained with.
 
 Usage:
-    python rl/export_onnx.py --run PPO_3                     # latest checkpoint of a run
+    python rl/export_onnx.py --run PPO_3   # latest checkpoint of that run
     python rl/export_onnx.py --model path/model.zip --vecnormalize path/vec.pkl \\
         --config path/config.json --out policy.onnx
 """
@@ -52,7 +49,7 @@ class DeterministicPolicy(torch.nn.Module):
 
 
 def export(model, vec_normalize, env_kwargs: dict, out_path: str) -> str:
-    """Export an SB3 PPO ``model`` with its ``VecNormalize`` statistics."""
+    """SB3 PPO model + its VecNormalize stats -> ONNX at out_path."""
     obs_dim = int(model.observation_space.shape[0])
     rms = vec_normalize.obs_rms if vec_normalize is not None and vec_normalize.norm_obs else None
     mean = rms.mean if rms is not None else np.zeros(obs_dim)
@@ -92,15 +89,16 @@ def main() -> int:
     ap.add_argument("--out", default="policy.onnx", help="output ONNX path (default: policy.onnx)")
     args = ap.parse_args()
 
-    # train.py is written to run from rl/ (``from track_env import ...``);
-    # importing it registers TrackCNNExtractor for unpickling.
+    # train.py expects to be run from rl/ (it does `from track_env import ...`).
+    # We import it anyway because that registers TrackCNNExtractor, which the
+    # unpickler needs
     sys.path.insert(0, os.path.join(REPO_ROOT, "rl"))
     import importlib
     train = importlib.import_module("train")
 
     if args.run:
         run_dir = os.path.join(REPO_ROOT, "rl", "checkpoints", args.run)
-        # Model and VecNormalize stats from the same checkpoint step
+        # model + vecnormalize must come from the same step
         model_path, vec_path = train._find_checkpoint(run_dir, args.step)
         args.model = args.model or model_path
         args.vecnormalize = args.vecnormalize or vec_path

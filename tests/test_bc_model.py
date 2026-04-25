@@ -1,10 +1,7 @@
-"""
-test_bc_model.py — Behaviour-cloning control model (control/bc.py) and the
-shared imitation infrastructure (control/imitation.py).
+"""BC model (control/bc.py) and the imitation helpers in control/imitation.py.
 
-Full training (scripts/train_bc_policy.py) is too slow for the unit suite;
-its closed-loop results are reported by the script.
-Skipped unless torch, onnx and onnxruntime are installed.
+Full training (scripts/train_bc_policy.py) is too slow to run here, the script
+reports its own closed-loop results. Needs torch, onnx and onnxruntime.
 """
 
 from __future__ import annotations
@@ -52,8 +49,8 @@ def test_demonstrations_shapes_and_mirroring():
                                speed=0.8, max_range=4.0, verbose=False)
     n = len(x) // 2
     assert x.shape[1:] == (1, INPUT_H, INPUT_W) and y.shape == (2 * n, 1)
-    np.testing.assert_array_equal(x[n:], x[:n][..., ::-1])   # mirrored frames …
-    np.testing.assert_array_equal(y[n:], -y[:n])             # … with negated steering
+    np.testing.assert_array_equal(x[n:], x[:n][..., ::-1])   # mirrored frames...
+    np.testing.assert_array_equal(y[n:], -y[:n])             # ...with negated steering
     assert 0.0 <= x.min() and x.max() <= 1.0
 
 

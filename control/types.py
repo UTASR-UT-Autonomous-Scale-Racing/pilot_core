@@ -1,14 +1,11 @@
 """
-Core control types shared by controllers, the state estimator, the safety
-supervisor and the closed-loop simulator.
+Types shared by the controllers, estimator, safety supervisor and sim.
 
-Conventions (see README "Buffer contracts"):
-
-* BEV plane: 2-D ``(x, y)`` = the two world ground-plane axes selected by
-  ``bev_axes``.  Headings are measured counter-clockwise from +x.
-* Signed commands: steering **+1 = full left** (counter-clockwise, ROS /
-  REP-103), throttle +1 = full forward, -1 = full backward, 0 = neutral
-  (the car coasts and slows down; there is no separate brake).
+Conventions, same as README "Buffer contracts":
+BEV plane (x, y) is whichever two world ground-plane axes bev_axes picks, and
+headings are CCW from +x. Commands are signed. Steering +1 is full left (CCW,
+matches ROS REP-103). Throttle +1 full forward, -1 full backward, 0 neutral.
+Neutral means the car coasts and slows down; there's no separate brake.
 """
 
 from __future__ import annotations
@@ -24,7 +21,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 @dataclass(frozen=True)
 class VehicleParams:
-    """Physical vehicle parameters (``vehicle_params.yaml``)."""
+    """Physical params, loaded from vehicle_params.yaml."""
 
     wheelbase: float = 0.3302
     width: float = 0.2032
@@ -37,7 +34,7 @@ class VehicleParams:
 
     @classmethod
     def load(cls, path: str = "vehicle_params.yaml") -> "VehicleParams":
-        """Load from YAML; unknown keys are ignored, missing keys use defaults."""
+        # unknown keys are ignored, missing ones fall back to defaults
         if not os.path.isabs(path):
             path = os.path.join(_REPO_ROOT, path)
         with open(path) as f:
@@ -48,9 +45,7 @@ class VehicleParams:
 
 @dataclass
 class VehicleState:
-    """Estimated vehicle state in the BEV plane."""
-
-    t: float                 # seconds (time.time() clock)
+    t: float                 # s, time.time() clock
     x: float
     y: float
     yaw: float               # rad, CCW from +x
@@ -64,7 +59,7 @@ class VehicleState:
 
 @dataclass
 class Command:
-    """Signed actuation command (see module docstring for conventions)."""
+    """Signed command. Conventions are in the module docstring."""
 
     steering: float = 0.0
     throttle: float = 0.0
@@ -77,5 +72,5 @@ class Command:
 
 
 def wrap_angle(a: float) -> float:
-    """Wrap an angle to ``[-pi, pi)``."""
+    """-> [-pi, pi)"""
     return (a + np.pi) % (2.0 * np.pi) - np.pi

@@ -1,12 +1,7 @@
 """
-test_control_contract.py — Tests for the ControlBuffer [0, 1]
-contract between controllers, ControlWorker and ActuatorWorker.
-
-Covers:
-    - signed_to_unit(): PID/FTG [-1, 1] output → [0, 1], 0.5 = neutral
-    - pose_to_bev(): heading convention matches controller bearings
-    - ControlWorker PID mode never writes out-of-range values
-    - ActuatorWorker clamps out-of-range / NaN commands instead of crashing
+The ControlBuffer [0, 1] contract between the controllers, ControlWorker and
+ActuatorWorker. 0.5 is neutral; PID/FTG output is [-1, 1] and gets mapped by
+signed_to_unit(). The actuator has to clamp bad values (NaN included), not crash.
 """
 
 from __future__ import annotations
@@ -30,7 +25,7 @@ class TestSignedToUnit:
 
     @pytest.mark.parametrize(
         "signed, expected",
-        # signed +1 = full left → buffer 0.0 (car PWM: below neutral = left)
+        # signed +1 = full left -> buffer 0.0 (on the car, PWM below neutral steers left)
         [(1.0, 0.0), (0.0, 0.5), (-1.0, 1.0), (0.5, 0.25), (3.0, 0.0), (-3.0, 1.0)],
     )
     def test_steering_mapping(self, signed, expected):
@@ -62,7 +57,6 @@ class TestPoseToBev:
         assert np.isclose(np.sin(heading), np.sin(expected), atol=1e-6)
 
     def test_straight_at_target_gives_zero_steer(self):
-        """Driving along +X at a target dead ahead must not command a turn."""
         from workers.track_pid_controller import TrackPIDController
 
         pid = TrackPIDController(kp_steer=1.0, ki_steer=0.0, kd_steer=0.0, noise_std=0.0)
@@ -76,20 +70,20 @@ class TestPoseToBev:
 
 
 class TestSteeringDirection:
-    """Geometry → buffer: a track that bends left must produce a *left*
-    command (buffer < 0.5), because on the car PWM above neutral steers right."""
+    """A track bending left has to give a left command (buffer < 0.5), since
+    PWM above neutral steers right on the car."""
 
     @pytest.mark.parametrize("bend, left", [(+0.4, True), (-0.4, False)])
     def test_pid_turns_towards_track(self, bend, left):
         from workers.track_pid_controller import TrackPIDController
 
         pid = TrackPIDController(kp_steer=1.0, ki_steer=0.0, kd_steer=0.0, noise_std=0.0)
-        # Car at origin heading +X (camera frame: forward axis Z along world X)
+        # car at origin heading +X (camera forward axis Z lined up with world X)
         T = np.eye(4, dtype=np.float32)
         T[:3, 2] = (1, 0, 0)
         pos, heading = pose_to_bev(T)
-        # Walls either side of a track whose tangent is rotated by `bend` rad
-        # (positive = counter-clockwise from above = to the car's left)
+        # walls either side of a track whose tangent is rotated by `bend` rad,
+        # positive is CCW seen from above, i.e. to the car's left
         tangent = np.array([np.cos(bend), np.sin(bend)])
         normal = np.array([-tangent[1], tangent[0]])
         outer = (pos + normal * -1.0)[None].astype(np.float32)
@@ -102,7 +96,6 @@ class TestSteeringDirection:
 class TestControlWorkerPIDContract:
 
     def test_pid_output_in_unit_range(self, track_boundaries):
-        """Drive PID with poses around the track; every write must be in [0, 1]."""
         outer, inner = track_boundaries
         ctrl = ControlBuffer(slots=4, name=f"cc_ctrl_{_uid()}", create=True)
         pose = PoseBuffer(slots=4, name=f"cc_pose_{_uid()}", create=True)
@@ -120,7 +113,7 @@ class TestControlWorkerPIDContract:
             for theta in np.linspace(0, 2 * np.pi, 24, endpoint=False):
                 T = np.eye(4, dtype=np.float32)
                 T[0, 3], T[2, 3] = 6.5 * np.cos(theta), 4.0 * np.sin(theta)
-                # Heading pointing *away* from the track forces large errors
+                # heading points away from the track on purpose, to force big errors
                 T[0, 2], T[2, 2] = np.cos(theta), np.sin(theta)
                 pose.write(T)
                 w.step()
@@ -160,7 +153,7 @@ class TestActuatorClamp:
 
 
 class TestPWMMapping:
-    """ControlBuffer [0, 1] → PWM via control.pwm.PWMMapper."""
+    # ControlBuffer [0, 1] -> PWM (control.pwm.PWMMapper)
 
     def test_throttle_neutral_backward_forward(self):
         from control.pwm import PWMConfig, PWMMapper

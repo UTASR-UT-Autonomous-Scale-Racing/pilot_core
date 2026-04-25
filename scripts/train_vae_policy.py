@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Train the VAE control model (control/vae.py) on the closed-loop bench and
-export it to ONNX for ``control_mode: vae``.
+Train the VAE control model (control/vae.py) on the closed-loop bench, export
+to ONNX for control_mode: vae.
 
-    1. Collect expert demonstrations with DART noise (control/imitation.py),
-       or load a cached dataset (--data; shared with train_bc_policy.py).
-    2. Train the VAE (unsupervised) on the frames.
-    3. Train the controller head on the frozen latent means (behaviour cloning).
-    4. Export encoder-mean → head to ONNX (+ JSON sidecar).
-    5. Evaluate closed loop, map-free, on the held-out oval and twisty tracks.
+Steps:
+  - demos with DART noise from control/imitation.py, or a cached --data file
+    (shared format with train_bc_policy.py)
+  - VAE trained unsupervised on the frames
+  - controller head trained by behaviour cloning on the frozen latent means
+  - export encoder mean -> head as one ONNX graph, plus JSON sidecar
+  - closed-loop eval, map-free, on the held-out oval + twisty tracks
 
-Usage (needs torch and onnxruntime):
-    python scripts/train_vae_policy.py                    # → vae_policy.onnx
+Needs torch and onnxruntime:
+    python scripts/train_vae_policy.py                    # -> vae_policy.onnx
     python scripts/train_vae_policy.py --tracks 24 --epochs 40 --out models/vae.onnx
 
-Bench-trained models learn the *rendered* depth; for the car, retrain the
-same pipeline on recorded real depth frames with expert labels.
+This only ever sees rendered depth. To use it on the car, run the same
+pipeline on recorded real depth frames with expert labels.
 """
 
 from __future__ import annotations
@@ -81,7 +82,7 @@ def train(x, y, latent_dim, epochs, head_epochs, beta, seed):
             rmse = float(torch.sqrt(torch.mean((recon - X[val]) ** 2)))
             print(f"  VAE epoch {ep + 1:3d}: val recon RMSE={rmse:.4f} (normalised depth), KL={float(kl):.1f}")
 
-    # Controller head on frozen latent means
+    # now the head, on frozen latent means
     vae.eval()
     with torch.no_grad():
         MU = torch.cat([vae.encode(X[b:b + 1024])[0] for b in range(0, n, 1024)])

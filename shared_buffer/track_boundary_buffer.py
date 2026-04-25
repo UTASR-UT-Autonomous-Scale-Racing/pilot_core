@@ -1,5 +1,5 @@
 """
-TrackBoundaryBuffer — typed wrapper for extracted track boundary lines.
+Track boundary polylines (outer + inner wall).
 
 Payload layout:
     [4 bytes]       uint32          outer_count (N_outer)
@@ -7,8 +7,8 @@ Payload layout:
     [4 bytes]       uint32          inner_count (N_inner)
     [N_inner*8]     float32[N][2]   inner boundary points (BEV plane)
 
-BEV points use the two world ground-plane axes selected by ``bev_axes``.
-At most 10 000 vertices per side (extra points are dropped).
+BEV here means the two ground-plane world axes picked by bev_axes. Max 10k
+vertices per side, anything past that is dropped.
 """
 
 from __future__ import annotations
@@ -28,17 +28,6 @@ _MAX_PAYLOAD = 2 * _COUNT_SIZE + 2 * _MAX_BOUNDARY_PTS * 2 * 4  # ~160 KB
 
 
 class TrackBoundaryBuffer:
-    """High-level buffer for extracted track boundary lines (BEV 2D).
-
-    Parameters
-    ----------
-    slots : int
-        Number of ring-buffer slots (default 2).
-    name : str
-        Shared-memory block name.
-    create : bool
-        Pass *True* from orchestrator, *False* from workers.
-    """
 
     def __init__(
         self,
@@ -57,15 +46,7 @@ class TrackBoundaryBuffer:
     def write(
         self, outer_line: np.ndarray, inner_line: np.ndarray
     ) -> SlotHeader:
-        """Write outer and inner track boundary lines.
-
-        Parameters
-        ----------
-        outer_line : np.ndarray
-            Shape ``(N, 2)`` float32 — outer wall BEV coordinates.
-        inner_line : np.ndarray
-            Shape ``(M, 2)`` float32 — inner wall BEV coordinates.
-        """
+        """outer_line (N, 2) and inner_line (M, 2), both in BEV coords."""
         outer = outer_line.astype(np.float32)
         inner = inner_line.astype(np.float32)
 
@@ -83,13 +64,7 @@ class TrackBoundaryBuffer:
     def read_latest(
         self,
     ) -> Optional[Tuple[SlotHeader, np.ndarray, np.ndarray]]:
-        """Read the most recent track boundaries.
-
-        Returns
-        -------
-        (header, outer_line, inner_line) or *None*.
-        Each line is ``(N, 2) float32``.
-        """
+        """(header, outer, inner) with each line (N, 2) float32; None if empty"""
         result = self._rb.read_latest()
         if result is None:
             return None

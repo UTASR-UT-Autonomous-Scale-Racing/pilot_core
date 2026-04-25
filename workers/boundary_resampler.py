@@ -1,9 +1,6 @@
 """
-boundary_resampler — resample ordered boundary polylines to uniform arc-length spacing.
-
-Usage
------
-    from workers.boundary_resampler import boundary_obs, resample_uniform
+Resample ordered boundary polylines to uniform arc-length spacing, and build
+the boundary observation vector from them. Typical use:
 
     outer = resample_uniform(outer_line, spacing=0.1)
     inner = resample_uniform(inner_line, spacing=0.1)
@@ -16,14 +13,9 @@ import numpy as np
 
 
 def smooth_boundary(points: np.ndarray, window: int = 15) -> np.ndarray:
-    """Moving-average smooth to remove zigzag from clustered LIDAR wall points.
+    """Moving average over (N, 2) ordered points, `window` points wide.
 
-    Parameters
-    ----------
-    points : np.ndarray
-        ``(N, 2)`` ordered boundary points.
-    window : int
-        Moving-average kernel size (number of points).
+    Takes out the zigzag you get from clustered LIDAR wall points.
     """
     if len(points) < window or window <= 1:
         return points.astype(np.float32)
@@ -34,20 +26,11 @@ def smooth_boundary(points: np.ndarray, window: int = 15) -> np.ndarray:
 
 
 def resample_uniform(points: np.ndarray, spacing: float) -> np.ndarray:
-    """Resample an ordered polyline to uniformly spaced points by arc length.
+    """Resample an (N, 2) polyline so points are `spacing` metres apart
+    along the arc. Returns (M, 2) float32.
 
-    Parameters
-    ----------
-    points : np.ndarray
-        ``(N, 2)`` ordered polyline vertices.
-    spacing : float
-        Desired arc-length distance between consecutive output points (metres).
-
-    Returns
-    -------
-    ``(M, 2) float32`` array with consecutive points spaced ``spacing`` apart.
-    The last point may be slightly less than ``spacing`` from the second-to-last
-    because sampling stops before the end of the polyline.
+    Sampling stops before the end of the polyline, so the final gap can
+    come out a bit shorter than `spacing`.
     """
     if len(points) < 2:
         return points.astype(np.float32)
@@ -73,25 +56,20 @@ def boundary_obs(
     inner: np.ndarray,
     n_ahead: int = 10,
 ) -> np.ndarray:
-    """Build a vehicle-local RL observation from resampled boundary lines.
+    """Vehicle-local RL observation from resampled boundary lines.
 
-    Returns a ``((n_ahead+1)*4,)`` float32 vector:
-    ``[outer_0..outer_n, inner_0..inner_n]`` — each point as (x, y) in the
-    vehicle's local frame (forward = +x, left = +y).
+    Output is a ((n_ahead+1)*4,) float32 vector laid out as
+    [outer_0..outer_n, inner_0..inner_n], each point (x, y) in the vehicle
+    frame (forward = +x, left = +y).
 
     Parameters
     ----------
-    pos : np.ndarray
-        ``(2,)`` current vehicle position in world frame.
-    heading_rad : float
-        Vehicle heading in the world frame (radians).
-    outer : np.ndarray
-        ``(N, 2)`` uniformly resampled outer boundary.
-    inner : np.ndarray
-        ``(M, 2)`` uniformly resampled inner boundary.
-    n_ahead : int
-        Number of boundary points ahead of the closest point to include.
-        Total points per boundary = n_ahead + 1 (closest + n_ahead forward).
+    pos : (2,) vehicle position, world frame
+    heading_rad : world-frame heading, radians
+    outer, inner : uniformly resampled boundaries, (N, 2) and (M, 2)
+    n_ahead : how many points past the closest one to take, so each
+        boundary contributes n_ahead + 1 points. Indexing wraps, i.e. the
+        lines are assumed closed.
     """
     idx_o = int(np.linalg.norm(outer - pos, axis=1).argmin())
     idx_i = int(np.linalg.norm(inner - pos, axis=1).argmin())
@@ -100,7 +78,7 @@ def boundary_obs(
     o_pts = outer[np.arange(idx_o, idx_o + n_ahead + 1) % n]   # (n_ahead+1, 2)
     i_pts = inner[np.arange(idx_i, idx_i + n_ahead + 1) % m]   # (n_ahead+1, 2)
 
-    # Rotate world-frame points into vehicle-local frame
+    # world -> vehicle frame
     cos_h, sin_h = np.cos(heading_rad), np.sin(heading_rad)
     R_inv = np.array([[cos_h, sin_h], [-sin_h, cos_h]], dtype=np.float32)
 

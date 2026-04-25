@@ -1,9 +1,6 @@
 """
-test_vae_model.py — VAE control model (control/vae.py): preprocessing, model
-shapes and loss, ONNX export equivalence, follower and ControlWorker mode.
-
-The full training pipeline (scripts/train_vae_policy.py) is too slow for
-the unit suite; its closed-loop results are reported by the script.
+VAE control model (control/vae.py). Training itself (scripts/train_vae_policy.py)
+is too slow for unit tests; the script reports closed-loop results.
 Skipped unless torch, onnx and onnxruntime are installed.
 """
 

@@ -1,7 +1,4 @@
-"""
-test_slam_pose_contract.py — SLAMWorker publishes camera-to-world poses
-(Twc) and withholds poses while ORB-SLAM3 tracking is not OK.
-"""
+"""SLAMWorker must publish Twc (camera-to-world), and nothing while ORB-SLAM3 tracking isn't OK."""
 
 from __future__ import annotations
 
@@ -46,7 +43,7 @@ def _worker_with_fake_slam(Tcw: np.ndarray, state: int):
 
 
 def test_publishes_camera_position_in_world():
-    # Camera at world (2, 0, 5), yawed 90° — Tcw translation is NOT the position
+    # camera at world (2, 0, 5), yawed 90 deg. Tcw's translation is not the position
     Twc = _rigid(90.0, [2.0, 0.0, 5.0])
     w, fb, pb = _worker_with_fake_slam(np.linalg.inv(Twc).astype(np.float32), state=2)
     try:

@@ -1,18 +1,8 @@
 """
-test_workers.py — Unit tests for the pipeline workers, stepped in-process
-over real shared-memory buffers: construction, setup(), step() input/output
-and stepping with no input.
+Per-worker unit tests, stepped in-process over real shm buffers.
 
-Workers covered:
-    - BaseWorker (abstract interface, stop event)
-    - CameraWorker (capture tests need OAKD_AVAILABLE=1)
-    - IMUWorker (construction and config only)
-    - VisionWorker (mock segmentation model)
-    - SLAMWorker (stub mode without orbslam3_python; the real-SLAM test needs
-      OAKD_AVAILABLE=1 plus the ORB-SLAM3 binding and vocabulary)
-    - MappingWorker (synthetic oval track)
-    - ControlWorker (PID mode)
-    - ActuatorWorker (construction only)
+Camera capture tests need OAKD_AVAILABLE=1. The real-SLAM test also needs the
+ORB-SLAM3 binding and vocabulary; everything else runs SLAM in stub mode.
 """
 
 from __future__ import annotations
@@ -42,8 +32,6 @@ def _uid():
     return uuid.uuid4().hex[:8]
 
 
-# --- BaseWorker ---
-
 class TestBaseWorker:
 
     def test_smoke_init(self):
@@ -70,10 +58,10 @@ class TestBaseWorker:
 
     def test_teardown_is_noop(self):
         w = BaseWorker(name="test_worker")
-        w.teardown()  # should not raise
+        w.teardown()
 
 
-# --- CameraWorker — requires OAK-D hardware ---
+# CameraWorker (capture needs the OAK-D)
 
 class TestCameraWorker:
 
@@ -93,7 +81,6 @@ class TestCameraWorker:
         reason="OAK-D camera not flagged as available (set OAKD_AVAILABLE=1)"
     )
     def test_setup_and_capture(self):
-        """Smoke test: setup OAK-D pipeline, capture one frame, teardown."""
         from workers import CameraWorker
         name = f"cam_{_uid()}"
         fb = FrameBuffer(slots=4, name=name, create=True)
@@ -103,7 +90,7 @@ class TestCameraWorker:
             w._logger.info = print
             w.setup()
 
-            # Wait for at least one frame
+            # up to ~5 s for the first frame
             result = None
             for _ in range(100):
                 w.step()
@@ -128,7 +115,6 @@ class TestCameraWorker:
         reason="OAK-D camera not flagged as available"
     )
     def test_multiple_frames_sequential(self):
-        """Capture 10 frames and verify monotonic seq_no."""
         from workers import CameraWorker
         name = f"cam_{_uid()}"
         fb = FrameBuffer(slots=8, name=name, create=True)
@@ -155,8 +141,6 @@ class TestCameraWorker:
         finally:
             fb.unlink()
 
-
-# --- IMUWorker ---
 
 class TestIMUWorker:
 
@@ -189,7 +173,7 @@ class TestIMUWorker:
             ib.unlink()
 
 
-# --- VisionWorker — mock model ---
+# VisionWorker, with a mocked model
 
 class TestVisionWorker:
 
@@ -214,7 +198,6 @@ class TestVisionWorker:
             sb.unlink()
 
     def test_step_with_mock_model(self, rgb_frame, depth_frame):
-        """Write a frame, mock the model, run step, check seg output."""
         from workers import VisionWorker
         fn = f"vis_{_uid()}"
         sn = f"seg_{_uid()}"
@@ -234,17 +217,16 @@ class TestVisionWorker:
 
             fb.write(rgb_frame, depth_frame)
 
-            # Mock segmentation model returning a 3-class int32 mask
             mock_mask = np.random.randint(0, 3, (400, 640), dtype=np.int32)
             mock_model = MagicMock()
             mock_model.get_mask.return_value = mock_mask
 
-            # Inject the mock model and buffers instead of calling setup()
+            # inject mock + buffers instead of calling setup()
             w._model = mock_model
             w._frame_buf = fb
             w._seg_buf = sb
 
-            # Replays step()'s read frame → get_mask → write mask path by hand
+            # replays step()'s read -> get_mask -> write path by hand
             result = fb.read_latest()
             assert result is not None
             header, rgb, depth = result
@@ -260,7 +242,6 @@ class TestVisionWorker:
             sb.unlink()
 
     def test_step_no_frame_available(self):
-        """Step with empty input buffer should not crash."""
         from workers import VisionWorker
         fn = f"vis_{_uid()}"
         sn = f"seg_{_uid()}"
@@ -280,15 +261,16 @@ class TestVisionWorker:
             w._model = MagicMock()
             w._last_seq = 0
 
-            # Checks only the precondition of step()'s empty-buffer guard
+            # NB: only checks the precondition for step()'s empty-buffer guard,
+            # step() itself isn't called
             result = fb.read_latest()
-            assert result is None  # no frame yet
+            assert result is None
         finally:
             fb.unlink()
             sb.unlink()
 
 
-# --- SLAMWorker — stub mode (no orbslam3_python needed) ---
+# SLAMWorker in stub mode (no orbslam3_python needed)
 
 class TestSLAMWorker:
 
@@ -312,7 +294,6 @@ class TestSLAMWorker:
             pb.unlink()
 
     def test_setup_stub_mode(self):
-        """Setup should fall back to stub when orbslam3_python is unavailable."""
         from workers import SLAMWorker
         fn = f"slam_f_{_uid()}"
         pn = f"slam_p_{_uid()}"
@@ -327,16 +308,15 @@ class TestSLAMWorker:
                 settings_path="nonexistent.yaml",
             )
             w._logger = MagicMock()
-            # Make `import orbslam3_python` fail so setup() falls back to the stub
+            # make `import orbslam3_python` fail
             with patch.dict("sys.modules", {"orbslam3_python": None}):
                 w.setup()
-            assert w._slam is None  # stub mode
+            assert w._slam is None
         finally:
             fb.unlink()
             pb.unlink()
 
     def test_step_stub_writes_identity(self, rgb_frame, depth_frame):
-        """In stub mode, step should write an identity pose."""
         from workers import SLAMWorker
         fn = f"slam_f_{_uid()}"
         pn = f"slam_p_{_uid()}"
@@ -351,7 +331,7 @@ class TestSLAMWorker:
             w._logger = MagicMock()
             w._frame_buf = fb
             w._pose_buf = pb
-            w._slam = None  # stub mode
+            w._slam = None
             w._last_seq = 0
 
             fb.write(rgb_frame, depth_frame)
@@ -367,7 +347,6 @@ class TestSLAMWorker:
             pb.unlink()
 
     def test_step_no_frame_doesnt_crash(self):
-        """Step with empty frame buffer should sleep and return."""
         from workers import SLAMWorker
         fn = f"slam_f_{_uid()}"
         pn = f"slam_p_{_uid()}"
@@ -381,7 +360,6 @@ class TestSLAMWorker:
             w._slam = None
             w._last_seq = 0
 
-            # Step with no data — should not raise
             w.step()
             assert pb.read_latest() is None
         finally:
@@ -389,7 +367,7 @@ class TestSLAMWorker:
             pb.unlink()
 
     def test_slam_with_events(self, rgb_frame, depth_frame):
-        """Verify loop_event and localize_event kwargs are accepted."""
+        """loop_event / localize_event kwargs are accepted, and localize sets the flag."""
         from workers import SLAMWorker
         fn = f"slam_f_{_uid()}"
         pn = f"slam_p_{_uid()}"
@@ -423,7 +401,7 @@ class TestSLAMWorker:
             fb.write(rgb_frame, depth_frame)
             w.step()
 
-            # The stub has nothing to switch, but the flag must still be set
+            # stub has nothing to switch but the flag still has to flip
             assert w._localization_activated
         finally:
             fb.unlink()
@@ -435,7 +413,7 @@ class TestSLAMWorker:
         reason="OAK-D + ORB_SLAM3 not available"
     )
     def test_real_slam_single_frame(self):
-        """Integration: real ORB_SLAM3 tracking on a single real frame."""
+        """Real ORB_SLAM3 tracking on one real frame."""
         pytest.importorskip("orbslam3_python")
         from workers import CameraWorker, SLAMWorker
 
@@ -444,13 +422,12 @@ class TestSLAMWorker:
         fb = FrameBuffer(slots=4, name=fn, create=True)
         pb = PoseBuffer(slots=4, name=pn, create=True)
         try:
-            # Capture one real frame via OAK-D
             cam = CameraWorker(name="cam", output_buffer=fb, fps=30, resolution=[640, 400])
             cam._logger = MagicMock()
             cam._logger.info = print
             cam.setup()
 
-            # Skip ~1 s of camera warm-up (sparse stereo depth in the first frames)
+            # skip ~1 s of warm-up, stereo depth is sparse in the first frames
             deadline = time.time() + 10.0
             while time.time() < deadline:
                 cam.step()
@@ -459,14 +436,13 @@ class TestSLAMWorker:
                     break
             cam.teardown()
 
-            # Run SLAM on captured frame
             w = SLAMWorker(
                 name="slam",
                 input_buffer=fb,
                 output_buffer=pb,
                 vocab_path="ORB_SLAM3/Vocabulary/ORBvoc.txt",
                 settings_path="orbslam_oakd_rgbd.yaml",
-                warmup_frames=0,  # single-frame test
+                warmup_frames=0,
             )
             w._logger = MagicMock()
             w._logger.info = print
@@ -486,8 +462,6 @@ class TestSLAMWorker:
             fb.unlink()
             pb.unlink()
 
-
-# --- MappingWorker ---
 
 class TestMappingWorker:
 
@@ -543,7 +517,7 @@ class TestMappingWorker:
             w._logger = MagicMock()
             w.setup()
             assert w._min_points == 30
-            # Defaults: SLAM camera frame (X/Z ground plane, Z forward)
+            # defaults to the SLAM camera frame: X/Z ground plane, Z forward
             assert w._bev_axes == (0, 2)
             assert w._forward_axis == 2
         finally:
@@ -553,7 +527,6 @@ class TestMappingWorker:
             bb.unlink()
 
     def test_step_accumulates_data(self, pose_4x4, segmentation_mask, point_cloud):
-        """Step reads buffers and accumulates BEV data."""
         from workers import MappingWorker
         pn = f"map_p_{_uid()}"
         sn = f"map_s_{_uid()}"
@@ -594,7 +567,6 @@ class TestMappingWorker:
             bb.unlink()
 
     def test_boundary_extraction_on_loop_event(self):
-        """Trigger loop event → verify boundary extraction + mapping_done."""
         from workers import MappingWorker
         pn = f"map_p_{_uid()}"
         sn = f"map_s_{_uid()}"
@@ -621,7 +593,7 @@ class TestMappingWorker:
             w._logger = MagicMock()
             w.setup()
 
-            # Pre-fill data: 200 wall points (oval track) + trajectory
+            # 200 wall points on two ovals
             theta = np.linspace(0, 2 * np.pi, 100, endpoint=False)
             outer_3d = np.column_stack([
                 8 * np.cos(theta),
@@ -636,9 +608,9 @@ class TestMappingWorker:
             all_pts = np.vstack([outer_3d, inner_3d])
             pcb.write(all_pts)
 
-            # Drive one lap of the centre line (counter-clockwise in X-Z) with
-            # the camera's forward (Z) axis along the track tangent.  The
-            # worker reads only the newest pose, so step after every write.
+            # One CCW lap of the centre line (X-Z) with camera forward (Z) along
+            # the tangent. The worker only reads the newest pose, so we have to
+            # step after every write.
             for phi in np.linspace(0, 2 * np.pi, 40, endpoint=False):
                 T = np.eye(4, dtype=np.float32)
                 T[0, 3], T[2, 3] = 6.5 * np.cos(phi), 4.0 * np.sin(phi)
@@ -647,20 +619,18 @@ class TestMappingWorker:
                 pb.write(T)
                 w.step()
 
-            # Set loop closure → should extract boundaries
             loop_ev.set()
             w.step()
 
             assert w._boundaries_extracted
             assert done_ev.is_set()
 
-            # Verify boundary was written to buffer
             result = bb.read_latest()
             assert result is not None
             _, outer_out, inner_out = result
             assert len(outer_out) > 0
             assert len(inner_out) > 0
-            # Counter-clockwise lap: the inner wall is on the left
+            # CCW lap, so the inner wall is on the left
             r_outer = np.linalg.norm(outer_out / [8.0, 5.0], axis=1)
             r_inner = np.linalg.norm(inner_out / [8.0, 5.0], axis=1)
             assert np.median(r_outer) > np.median(r_inner)
@@ -671,7 +641,6 @@ class TestMappingWorker:
             bb.unlink()
 
     def test_step_empty_buffers_no_crash(self):
-        """Step with no data in any buffer should not crash."""
         from workers import MappingWorker
         pn = f"map_p_{_uid()}"
         sn = f"map_s_{_uid()}"
@@ -691,7 +660,7 @@ class TestMappingWorker:
             )
             w._logger = MagicMock()
             w.setup()
-            w.step()  # should not raise
+            w.step()
         finally:
             pb.unlink()
             sb.unlink()
@@ -699,7 +668,7 @@ class TestMappingWorker:
             bb.unlink()
 
 
-# --- ControlWorker (PID mode) ---
+# ControlWorker, PID mode
 
 class TestControlWorkerPID:
 
@@ -761,7 +730,7 @@ class TestControlWorkerPID:
             bb.unlink()
 
     def test_step_pid_waits_for_mapping(self):
-        """PID step should wait (sleep) when mapping_done_event is not set."""
+        """No output until mapping_done_event is set."""
         from workers import ControlWorker
         cn = f"ctrl_{_uid()}"
         pn = f"ctrl_p_{_uid()}"
@@ -785,14 +754,14 @@ class TestControlWorkerPID:
             w.setup()
 
             w.step()
-            assert cb.read_latest() is None  # nothing written
+            assert cb.read_latest() is None
         finally:
             cb.unlink()
             pb.unlink()
             bb.unlink()
 
     def test_step_pid_full_cycle(self, track_boundaries):
-        """Full PID cycle: mapping done, boundaries loaded, pose → control output."""
+        """mapping done + boundaries + pose -> a control output in range"""
         from workers import ControlWorker
         cn = f"ctrl_{_uid()}"
         pn = f"ctrl_p_{_uid()}"
@@ -816,13 +785,12 @@ class TestControlWorkerPID:
                     "ki_steer": 0.0,
                     "kd_steer": 0.1,
                     "target_throttle": 0.3,
-                    "noise_std": 0.0,  # deterministic for testing
+                    "noise_std": 0.0,
                 },
             )
             w._logger = MagicMock()
             w.setup()
 
-            # Set mapping done + write boundaries
             done_ev.set()
             bb.write(outer, inner)
 
@@ -830,7 +798,7 @@ class TestControlWorkerPID:
             T[0, 3] = 6.5  # centre line of the fixture track at theta = 0
             pb.write(T)
 
-            # Step multiple times to load boundaries then compute control
+            # first step(s) load the boundaries, then it computes control
             for _ in range(3):
                 w.step()
 
@@ -844,8 +812,6 @@ class TestControlWorkerPID:
             pb.unlink()
             bb.unlink()
 
-
-# --- ActuatorWorker ---
 
 class TestActuatorWorker:
 

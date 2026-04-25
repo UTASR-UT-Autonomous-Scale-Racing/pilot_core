@@ -1,13 +1,11 @@
 """
-IMUBuffer — typed wrapper for IMU sensor vectors.
+IMU vectors, 9 x float32 (36 bytes):
 
-Payload layout:
-    [9 × float32]  qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw
-    Total = 36 bytes
+    qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw
 
-Orientation quaternion, accelerometer in m/s², then the Arduino's raw
-throttle / steering feedback.  The OAK-D IMU path has no such feedback and
-fills the last two slots with gyro x / y (rad/s) instead.
+Orientation quaternion, accel in m/s^2, then the raw throttle/steering
+feedback from the Arduino. NB: the OAK-D IMU path has no such feedback, so it
+puts gyro x / y (rad/s) in the last two slots instead.
 """
 
 from __future__ import annotations
@@ -24,17 +22,6 @@ _PAYLOAD_SIZE = _IMU_FLOATS * 4  # 36 bytes
 
 
 class IMUBuffer:
-    """High-level buffer for 9-DOF IMU vectors.
-
-    Parameters
-    ----------
-    slots : int
-        Number of ring-buffer slots (default 32).
-    name : str
-        Shared-memory block name.
-    create : bool
-        Pass *True* from orchestrator, *False* from workers.
-    """
 
     def __init__(
         self,
@@ -51,23 +38,12 @@ class IMUBuffer:
         )
 
     def write(self, imu_vector: np.ndarray) -> SlotHeader:
-        """Write a 9-float IMU vector (layout in the module docstring).
-
-        Parameters
-        ----------
-        imu_vector : np.ndarray
-            Shape ``(9,)``, dtype ``float32``.
-        """
+        """imu_vector is (9,), laid out as in the module docstring."""
         payload = imu_vector.astype(np.float32).tobytes()
         return self._rb.write(payload)
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray]]:
-        """Read the most recent IMU vector.
-
-        Returns
-        -------
-        (header, vector) or *None*.  ``vector`` is ``(9,) float32``.
-        """
+        """(header, (9,) float32 vector) or None"""
         result = self._rb.read_latest()
         if result is None:
             return None

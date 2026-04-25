@@ -1,7 +1,7 @@
 """
-test_control_bench.py — Closed-loop acceptance benchmarks: each track
-controller drives the kinematic-bicycle bench (control/sim.py) through the
-full estimator → controller → safety chain, with 15 Hz noisy, delayed poses.
+Closed-loop acceptance runs. Each track controller drives the kinematic bicycle
+bench (control/sim.py) through estimator -> controller -> safety, fed 15 Hz
+noisy, delayed poses.
 """
 
 from __future__ import annotations
@@ -27,16 +27,16 @@ def test_controller_laps_cleanly(mode, track):
 
 
 def test_speed_cap_holds_with_aggressive_planner():
-    """Even if the planner asks for more, the safety cap bounds the speed."""
+    # planner asks for 4 m/s, safety cap should still win
     outer, inner, _ = oval_track()
     fast = make_follower_factory("pure_pursuit", P, speed_cfg={"v_max": 4.0})
     r = run_closed_loop(fast, outer, inner, P, duration=20.0)
-    # The steady-state throttle bound holds the cap despite pose-derived speed lag
+    # the steady-state throttle bound is what holds the cap here, pose-derived speed lags
     assert r.max_speed <= SafetyConfig().speed_cap, r.summary()
 
 
 def test_watchdog_stops_car_when_controller_stops():
-    """No commands after 5 s → watchdog neutral → the car coasts to a stop."""
+    """No commands after 5 s: watchdog goes neutral and the car coasts to a stop."""
     base = make_follower_factory("pure_pursuit", P)
 
     def factory(outer, inner):
@@ -49,5 +49,5 @@ def test_watchdog_stops_car_when_controller_stops():
     r = run_closed_loop(factory, outer, inner, P, duration=10.0)
     t, v, throttle = r.log[:, 0], r.log[:, 3], r.log[:, 5]
     assert v[t < 5.0].max() > 0.8                        # it was driving
-    assert (throttle[t > 5.0 + 0.2] == 0.0).all()        # watchdog → neutral
+    assert (throttle[t > 5.0 + 0.2] == 0.0).all()        # watchdog -> neutral
     assert abs(v[-1]) < 0.05                             # coasted to a stop

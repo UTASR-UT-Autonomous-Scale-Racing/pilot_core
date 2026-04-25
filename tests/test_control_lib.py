@@ -1,7 +1,4 @@
-"""
-test_control_lib.py — Unit tests for the pure-Python control library
-(control/): track model, speed profile, controllers, estimator, safety.
-"""
+"""Unit tests for the pure-Python control/ package."""
 
 from __future__ import annotations
 
@@ -24,20 +21,16 @@ def oval():
     return TrackModel(outer, inner), centre
 
 
-# --- Params ---
-
 def test_vehicle_params_loaded_from_yaml():
     assert P.wheelbase == pytest.approx(0.3302)
     assert P.max_steering_angle == pytest.approx(0.4189)
 
 
-# --- Track ---
-
 class TestTrackModel:
 
     def test_centre_line_and_width(self, oval):
         track, centre = oval
-        # Ellipse perimeter (Ramanujan) for the 6.5 × 4.0 centre-line
+        # Ramanujan approx of the ellipse perimeter, 6.5 x 4.0 centre line
         a, b = 6.5, 4.0
         h = ((a - b) / (a + b)) ** 2
         perimeter = np.pi * (a + b) * (1 + 3 * h / (10 + np.sqrt(4 - 3 * h)))
@@ -46,7 +39,7 @@ class TestTrackModel:
 
     def test_curvature_matches_ellipse(self, oval):
         track, _ = oval
-        # Max curvature of an ellipse at the ends of the major axis: a / b²
+        # ellipse curvature peaks at the ends of the major axis (a/b^2), min is b/a^2
         assert np.abs(track.curvature).max() == pytest.approx(6.5 / 4.0 ** 2, rel=0.1)
         assert np.abs(track.curvature).min() == pytest.approx(4.0 / 6.5 ** 2, rel=0.1)
 
@@ -79,8 +72,6 @@ class TestTrackModel:
         np.testing.assert_allclose(track.point_at(track.length + 0.2), track.point_at(0.2), atol=1e-9)
 
 
-# --- Speed ---
-
 class TestSpeed:
 
     def test_profile_respects_lateral_and_accel_limits(self):
@@ -105,7 +96,7 @@ class TestSpeed:
         assert -0.3 <= u < 0.0
 
 
-# --- Controllers ---
+# lateral controllers
 
 @pytest.mark.parametrize("lateral_cls", [PurePursuit, Stanley])
 class TestLateral:
@@ -121,7 +112,7 @@ class TestLateral:
         track, _ = oval
         st = self._state_offset(track, 0.0)
         delta = lateral_cls(P).steer(st, track, track.project(st.x, st.y))
-        # Only the path curvature: Ackermann angle atan(L*kappa)
+        # only path curvature left, so expect the Ackermann angle atan(L*kappa)
         kappa = track.curvature[50]
         assert delta == pytest.approx(np.arctan(P.wheelbase * kappa), abs=0.05)
 
@@ -138,8 +129,6 @@ def test_build_track_follower_rejects_unknown(oval):
     with pytest.raises(ValueError):
         build_track_follower("nope", oval[0], P)
 
-
-# --- Estimator ---
 
 class TestEstimator:
 
@@ -170,8 +159,6 @@ class TestEstimator:
         assert ekf.predict_to(0.3).yaw_rate > 0
 
 
-# --- Safety ---
-
 class TestSafety:
 
     def test_disarmed_is_neutral(self):
@@ -200,7 +187,7 @@ class TestSafety:
         sup.step(0.0, Command(0.0, 0.5), 0.0, armed=True, speed=1.0)
         out = sup.step(0.02, Command(0.0, 0.5), 0.02, armed=True, speed=1.6)
         assert out.throttle == 0.0 and sup.status.speed_limited
-        # Backward input (slowing down) is still allowed above the cap
+        # backward input (braking) still allowed above the cap
         out = sup.step(0.04, Command(0.0, -0.2), 0.04, armed=True, speed=1.6)
         assert out.throttle < 0.0
 

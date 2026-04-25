@@ -1,25 +1,17 @@
 """
-LidarProjectionWorker — builds a world-frame point cloud from 2D LIDAR scans
-combined with the simulator's ground-truth pose (PoseBuffer).  Simulator
-only: the world frame is Z-up (ROS / AutoDRIVE), vehicle frame x-forward,
-y-left.
+Accumulates a world-frame point cloud from 2D LIDAR scans plus the sim's
+ground-truth pose (PoseBuffer). Simulator only. World frame is Z-up
+(ROS / AutoDRIVE); vehicle frame is x-forward, y-left.
 
-The AutoDRIVE simulator publishes a Hokuyo UST-10LX-equivalent scan:
-  - 1080 rays, 270° sweep (angle_min=-2.35619449 rad, increment=0.00436332 rad)
-  - range_min=0.06 m, range_max=10.0 m
-  - LIDAR mount in vehicle frame: [x=0.2733, y=0.0, z=0.096], no rotation
+AutoDRIVE's scan is Hokuyo UST-10LX-like: 1080 rays over 270 deg
+(angle_min=-2.35619449 rad, increment=0.00436332 rad), range 0.06-10.0 m,
+mounted at [0.2733, 0.0, 0.096] in the vehicle frame with no rotation.
 
-Pipeline
---------
-1. Read latest LidarBuffer scan (1080 float32 ranges).
-2. Read latest PoseBuffer pose (4×4 Twv, world-from-vehicle).
-3. Convert each valid ray to a 2D point in vehicle frame using polar→Cartesian.
-4. Apply LIDAR-to-vehicle offset, then transform to world frame via pose.
-5. Voxel-grid deduplication (``voxel_size`` cells) into an accumulated map.
-6. Write the whole accumulated (N, 3) float32 cloud to PointCloudBuffer.
-
-Scans are only projected after the vehicle has moved ``move_threshold``
-metres in the ground plane since the last projection.
+Each new scan gets turned into vehicle-frame points, shifted by the mount
+offset, transformed by the pose (4x4 Twv, world-from-vehicle), and dropped
+into a voxel_size grid. The whole accumulated (N, 3) float32 cloud is then
+rewritten to the PointCloudBuffer. We only project once the car has moved
+move_threshold metres in the ground plane since the last one.
 """
 
 from __future__ import annotations
@@ -37,34 +29,27 @@ try:
 except ImportError:
     PointCloudBuffer = None  # type: ignore[misc]
 
-# Hokuyo UST-10LX specs (AutoDRIVE simulator)
+# Hokuyo UST-10LX, as simulated by AutoDRIVE
 _N_RAYS = 1080
-_ANGLE_MIN = -2.35619449  # rad  (-135°)
-_ANGLE_INCREMENT = 0.00436332  # rad per ray  (0.25°)
+_ANGLE_MIN = -2.35619449  # rad, -135°
+_ANGLE_INCREMENT = 0.00436332  # rad/ray (0.25 deg)
 
-# LIDAR mount offset in vehicle frame (metres)
+# mount offset, vehicle frame, metres
 _LIDAR_OFFSET = np.array([0.2733, 0.0, 0.096], dtype=np.float32)
 
 
 class LidarProjectionWorker(BaseWorker):
-    """Converts 2D LIDAR scans + GT pose into a world-frame 3D point cloud.
+    """2D LIDAR scans + GT pose -> world-frame 3D point cloud.
 
     Config kwargs
     -------------
-    lidar_buffer : LidarBuffer
-        Source of 1080-ray range scans.
-    pose_buffer : PoseBuffer
-        Ground-truth vehicle pose (4×4 Twv, world-from-vehicle).
-    output_buffer : PointCloudBuffer
-        Destination for accumulated (N, 3) float32 world-frame points.
-    range_min : float
-        Drop rays shorter than this (default: 0.1 m).
-    range_max : float
-        Drop rays longer than this (default: 9.5 m).
-    voxel_size : float
-        Deduplication cell size in metres (default: 0.10).
-    move_threshold : float
-        Minimum vehicle movement (metres) between projections (default: 0.05).
+    lidar_buffer : LidarBuffer, 1080-ray range scans
+    pose_buffer : PoseBuffer, GT pose (4x4 Twv, world-from-vehicle)
+    output_buffer : PointCloudBuffer, gets the accumulated (N, 3) float32 cloud
+    range_min, range_max : rays outside this are dropped (0.1 / 9.5 m).
+        (a bit inside the sensor spec of 0.06-10 m)
+    voxel_size : dedup cell size, m (0.10)
+    move_threshold : min ground-plane movement between projections, m (0.05)
     """
 
     def __init__(self, name: str = "lidar_proj", **kwargs: Any) -> None:
@@ -81,7 +66,7 @@ class LidarProjectionWorker(BaseWorker):
         self._last_proj_pos: np.ndarray | None = None
         self._frame_count: int = 0
 
-        # Precompute ray angles (constant for all scans)
+        # ray angles are fixed, precompute
         angles = _ANGLE_MIN + np.arange(_N_RAYS) * _ANGLE_INCREMENT
         self._ray_cos = np.cos(angles).astype(np.float32)
         self._ray_sin = np.sin(angles).astype(np.float32)
@@ -115,9 +100,9 @@ class LidarProjectionWorker(BaseWorker):
         pose_result = self._pose_buf.read_latest()
         if pose_result is None:
             return
-        pose = pose_result[1]  # 4×4 float32 Twv (world-from-vehicle)
+        pose = pose_result[1]  # 4x4 float32 Twv (world-from-vehicle)
 
-        # Move gate: only project after moving move_threshold in the ground (x, y) plane
+        # skip until we've moved move_threshold in x/y
         current_pos = pose[:2, 3]
         if self._last_proj_pos is not None:
             if float(np.linalg.norm(current_pos - self._last_proj_pos)) < self._move_threshold:
@@ -128,7 +113,7 @@ class LidarProjectionWorker(BaseWorker):
         if len(pts_world) == 0:
             return
 
-        # Voxel-grid deduplication
+        # voxel dedup; first point in a cell wins
         keys = np.floor(pts_world / self._voxel_size).astype(np.int64)
         new_count = 0
         for k, pt in zip(map(tuple, keys), pts_world):
@@ -152,17 +137,7 @@ class LidarProjectionWorker(BaseWorker):
             )
 
     def _project_scan(self, ranges: np.ndarray, pose: np.ndarray) -> np.ndarray:
-        """Convert a 1080-ray scan to world-frame 3D points.
-
-        Parameters
-        ----------
-        ranges : float32 (1080,) — per-ray distances in metres
-        pose   : float32 (4, 4) — Twv world-from-vehicle transform
-
-        Returns
-        -------
-        float32 (N, 3) world-frame XYZ points for valid rays only.
-        """
+        """(1080,) ranges in metres + Twv pose -> (N, 3) world XYZ, valid rays only."""
         valid = (ranges >= self._range_min) & (ranges <= self._range_max)
         if not np.any(valid):
             return np.empty((0, 3), dtype=np.float32)
@@ -171,19 +146,18 @@ class LidarProjectionWorker(BaseWorker):
         cos_a = self._ray_cos[valid]
         sin_a = self._ray_sin[valid]
 
-        # 2D polar → Cartesian in LIDAR frame (x=forward, y=left, z=up)
+        # polar -> cartesian, LIDAR frame (x fwd, y left, z up)
         x_lidar = r * cos_a
         y_lidar = r * sin_a
         z_lidar = np.zeros(len(r), dtype=np.float32)
 
-        # Apply LIDAR mount offset → vehicle frame
+        # mount offset only, the LIDAR isn't rotated relative to the car
         x_veh = x_lidar + _LIDAR_OFFSET[0]
         y_veh = y_lidar + _LIDAR_OFFSET[1]
         z_veh = z_lidar + _LIDAR_OFFSET[2]
 
         pts_veh = np.stack([x_veh, y_veh, z_veh], axis=1)  # (N, 3)
 
-        # Transform to world frame via pose
         R = pose[:3, :3]
         t = pose[:3, 3]
         pts_world = pts_veh @ R.T + t

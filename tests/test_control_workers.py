@@ -1,12 +1,5 @@
-"""
-test_control_workers.py — Integration of the control library into the
-pipeline workers over real shared-memory buffers:
-
-    - ActuatorWorker: arming, watchdog, speed cap, fixed-rate output
-    - StateWorker: poses → state estimate, stale detection
-    - ControlWorker: pure_pursuit / stanley modes, registry
-    - start.KeyboardControl: piped-stdin fallback
-"""
+"""Control library wired into the actual workers, using real shm buffers.
+Also covers the piped-stdin fallback in start.KeyboardControl."""
 
 from __future__ import annotations
 
@@ -38,8 +31,6 @@ def test_unit_signed_round_trip():
     for s, t in [(0.3, -0.6), (-1.0, 1.0), (0.0, 0.0)]:
         assert unit_to_signed(*signed_to_unit(s, t)) == pytest.approx((s, t))
 
-
-# --- Actuator ---
 
 class TestActuatorSafety:
 
@@ -94,10 +85,10 @@ class TestActuatorSafety:
         state.write(VehicleState(t=time.time(), x=0, y=0, yaw=0, v=1.6))
         ctrl.write(*signed_to_unit(0.0, 0.6))
         _pump(w, 0.03)
-        assert self._last_output(w)[1] == pytest.approx(0.5)   # over the cap → coast
+        assert self._last_output(w)[1] == pytest.approx(0.5)   # over the cap, coast
 
 
-# --- State ---
+# state worker
 
 class TestStateWorker:
 
@@ -110,7 +101,7 @@ class TestStateWorker:
             w = StateWorker(name="state", pose_buffer=pb, output_buffer=sb)
             w._logger = MagicMock()
             w.setup()
-            # Camera frame: ground plane X/Z, forward = Z.  Drive along +Z at 1 m/s.
+            # camera frame: ground plane is X/Z, forward = Z. Drive along +Z at 1 m/s
             t0 = time.time()
             while time.time() - t0 < 1.0:
                 T = np.eye(4, dtype=np.float32)
@@ -119,7 +110,7 @@ class TestStateWorker:
                 _pump(w, 1 / 15)
             _, st = sb.read_latest()
             assert st.v == pytest.approx(1.0, abs=0.15)
-            assert st.yaw == pytest.approx(np.pi / 2, abs=0.05)   # +Z is 90° from +X
+            assert st.yaw == pytest.approx(np.pi / 2, abs=0.05)   # +Z is 90 deg from +X
             _pump(w, 1.0)                     # no poses: publishes for stale_after (0.5 s), then stops
             _, st2 = sb.read_latest()
             assert time.time() - st2.t > 0.4  # nothing published for the last ~0.5 s
@@ -127,8 +118,6 @@ class TestStateWorker:
             pb.unlink()
             sb.unlink()
 
-
-# --- Control ---
 
 @pytest.mark.parametrize("mode", ["pure_pursuit", "stanley"])
 def test_control_worker_track_mode(mode):
@@ -143,9 +132,9 @@ def test_control_worker_track_mode(mode):
         w = ControlWorker(name="control", mode=mode, output_buffer=ctrl, state_buffer=sb, boundary_buffer=bb)
         w._logger = MagicMock()
         w.setup()
-        # At (6.5, 0) heading clockwise (-y), the reverse of the boundary order,
-        # so the worker must flip the track.  +x is the car's LEFT here: offset
-        # 0.3 m left on a right-hand bend → must steer right, and drive forward.
+        # At (6.5, 0) heading clockwise (-y), opposite to the boundary order, so
+        # the worker has to flip the track. +x is the car's left here, so 0.3 m
+        # left on a right-hand bend means steer right (and keep driving forward).
         x, y = centre[0]
         sb.write(VehicleState(t=time.time(), x=x + 0.3, y=y, yaw=-np.pi / 2, v=0.5))
         w.step()
@@ -167,8 +156,6 @@ def test_control_worker_rejects_unknown_mode():
     with pytest.raises(ValueError):
         w.setup()
 
-
-# --- Keyboard ---
 
 def test_keyboard_control_piped_stdin(monkeypatch):
     import io

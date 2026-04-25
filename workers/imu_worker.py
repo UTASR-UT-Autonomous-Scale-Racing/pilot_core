@@ -1,15 +1,14 @@
 """
-IMUWorker — reads IMU data from the Arduino over I2C (or a synthetic
-generator) and writes 9-float vectors into an IMUBuffer.
+Reads the Arduino IMU over I2C (or a synthetic generator) and writes 9-float
+vectors into an IMUBuffer:
 
-The OAK-D on-board IMU is *not* handled here: a DepthAI device can only be
-opened by one process, so it is streamed by :class:`CameraWorker` instead
-(``use_oakd_imu: true`` in the config wires this up in ``start.py``).
+    [qw, qx, qy, qz, ax, ay, az, throttle, steering]
 
-IMUBuffer vector layout (9 x float32):
-``[qw, qx, qy, qz, ax, ay, az, throttle, steering]`` — orientation
-quaternion, accelerometer in m/s², then the Arduino's raw throttle /
-steering feedback values.
+i.e. orientation quaternion, accel in m/s², then the Arduino's raw
+throttle/steering feedback.
+
+The OAK-D's own IMU isn't read here. Only one process can open a DepthAI
+device, so CameraWorker streams it (use_oakd_imu: true, wired up in start.py).
 """
 
 from __future__ import annotations
@@ -30,22 +29,11 @@ except ImportError:
 
 
 class IMUWorker(BaseWorker):
-    """Worker process for IMU sensor data.
+    """IMU worker. kwargs: output_buffer, i2c_address, i2c_bus, synthetic.
 
-    Config kwargs
-    -------------
-    output_buffer : IMUBuffer
-        Shared IMUBuffer to write into.
-    i2c_address : int | None
-        I2C slave address of the Arduino.
-    i2c_bus : int | None
-        I2C bus number.
-    synthetic : bool
-        Generate synthetic IMU data instead of reading hardware.
-
-    If neither synthetic mode nor a complete I2C address/bus is configured
-    the worker idles and publishes nothing — it never substitutes fake data
-    for a real sensor.
+    With no synthetic flag and no complete I2C address/bus it just idles and
+    publishes nothing. Deliberately does not fall back to fake data when a
+    real sensor is expected.
     """
 
     def __init__(self, name: str = "imu", **kwargs: Any) -> None:
@@ -81,8 +69,6 @@ class IMUWorker(BaseWorker):
             return
         self._setup_i2c(i2c_address, i2c_bus)
 
-    # --- I2C path ---
-
     def _setup_i2c(self, address: int, bus: int) -> None:
         if smbus2 is None:
             self._dummy = True
@@ -93,12 +79,12 @@ class IMUWorker(BaseWorker):
         self.logger.info(f"I2C IMU ready on bus {bus}, address 0x{address:02x}")
 
     def _step_i2c(self) -> None:
-        # 32-byte little-endian block: 7 x float32 (qw, qx, qy, qz, ax, ay, az;
-        # accel in milli-g) + 2 x uint16 (throttle, steering feedback)
+        # 32 bytes, little-endian: 7 x float32 (qw qx qy qz ax ay az, accel in
+        # milli-g) then 2 x uint16 throttle/steering feedback
         raw = bytes(self._bus.read_i2c_block_data(self._i2c_address, 0, 32))
         values = struct.unpack("<fffffffHH", raw)
         w, x, y, z, ax, ay, az, throttle, steering = values
-        # milli-g → m/s²
+        # milli-g -> m/s^2
         ax *= 0.00980665
         ay *= 0.00980665
         az *= 0.00980665
@@ -107,8 +93,6 @@ class IMUWorker(BaseWorker):
             dtype=np.float32,
         )
         self._imu_buf.write(vec)
-
-    # --- synthetic IMU ---
 
     def _setup_synthetic(self) -> None:
         from synthetic import SyntheticIMUGenerator
@@ -122,8 +106,6 @@ class IMUWorker(BaseWorker):
         vec = self._synth_gen.next()
         self._imu_buf.write(vec)
         time.sleep(0.005)  # ~200 Hz
-
-    # --- dispatch ---
 
     def step(self) -> None:
         if self._synthetic:

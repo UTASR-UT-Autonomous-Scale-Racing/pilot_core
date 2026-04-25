@@ -1,18 +1,6 @@
 """
-test_track_ftg.py — TrackFTGController, the reactive Follow-the-Gap
-controller that steers from a virtual scan of the BEV track boundaries.
-
-Covers:
-    - Construction / default parameters
-    - step() returns (steering, throttle) in [-1, 1]
-    - Virtual scan generation from BEV boundary points
-    - Pre-processing (smoothing + clamp)
-    - Safety bubble zeroing
-    - Max-gap detection
-    - Best-point selection (deepest & centroid strategies)
-    - Corner-throttle scaling
-    - Reset is a no-op (reactive controller)
-    - Edge cases: empty boundaries, vehicle on a boundary, single-point lines
+TrackFTGController: reactive follow-the-gap, steering off a virtual scan built
+from the BEV track boundaries. Purely reactive, so reset() is a no-op.
 """
 
 from __future__ import annotations
@@ -23,10 +11,7 @@ import pytest
 from workers.track_ftg_controller import TrackFTGController, _angle_diff
 
 
-# --- Helpers ---
-
 def _oval_track(n_outer: int = 80, n_inner: int = 80):
-    """Return (outer, inner) boundary arrays for a simple oval track."""
     t_outer = np.linspace(0, 2 * np.pi, n_outer, endpoint=False)
     t_inner = np.linspace(0, 2 * np.pi, n_inner, endpoint=False)
     outer = np.column_stack([3.0 * np.cos(t_outer), 2.0 * np.sin(t_outer)])
@@ -35,14 +20,12 @@ def _oval_track(n_outer: int = 80, n_inner: int = 80):
 
 
 def _straight_corridor(length: float = 10.0, width: float = 2.0, n: int = 50):
-    """Parallel straight boundaries along the X axis."""
+    """Two parallel walls along X"""
     xs = np.linspace(0, length, n)
     outer = np.column_stack([xs, np.full(n, width / 2)])
     inner = np.column_stack([xs, np.full(n, -width / 2)])
     return outer, inner
 
-
-# --- Construction ---
 
 class TestConstruction:
 
@@ -69,8 +52,6 @@ class TestConstruction:
         assert c.beam_angles.shape == (100,)
 
 
-# --- _angle_diff helper ---
-
 class TestAngleDiff:
 
     @pytest.mark.parametrize("a, b, expected", [
@@ -86,7 +67,7 @@ class TestAngleDiff:
             assert result == expected
 
 
-# --- step() basic contract ---
+# step() contract
 
 class TestStepContract:
 
@@ -107,16 +88,15 @@ class TestStepContract:
             assert -1.0 <= t <= 1.0, f"throttle {t} out of range"
 
     def test_straight_corridor_steers_within_bounds(self):
-        """On a straight corridor, centred vehicle heading along X → valid output."""
         c = TrackFTGController(noise_std=0.0, num_beams=360)
         outer, inner = _straight_corridor(length=10.0, width=2.0)
         pos = np.array([1.0, 0.0])
         steer, throttle = c.step(pos, 0.0, outer, inner)
         assert -1.0 <= steer <= 1.0
-        assert throttle > 0.0  # should still be moving forward
+        assert throttle > 0.0
 
 
-# --- Virtual scan ---
+# virtual scan
 
 class TestVirtualScan:
 
@@ -134,14 +114,12 @@ class TestVirtualScan:
         assert np.all(scan >= 0.0)
 
     def test_closer_boundary_gives_shorter_range(self):
-        """Inner boundary is closer → some beams should read well below max."""
+        """Inner wall is closer, so some beams should read well under max_range."""
         c = TrackFTGController(max_range=10.0, num_beams=360, noise_std=0.0)
         outer, inner = _oval_track()
         scan = c._build_virtual_scan(np.array([0.0, 0.0]), 0.0, outer, inner)
-        assert scan.min() < 3.0  # inner ellipse radius ~ 1-2 units
+        assert scan.min() < 3.0  # inner ellipse radius is 1-2
 
-
-# --- Pre-processing ---
 
 class TestPreprocess:
 
@@ -156,7 +134,7 @@ class TestPreprocess:
         raw = np.zeros(20)
         raw[10] = 50.0  # single spike
         result = c._preprocess(raw)
-        assert result[10] < 50.0  # spike should be attenuated
+        assert result[10] < 50.0
 
     def test_no_smoothing_when_window_1(self):
         c = TrackFTGController(smooth_window=1, max_range=100.0)
@@ -165,18 +143,16 @@ class TestPreprocess:
         np.testing.assert_array_equal(result, raw)
 
 
-# --- Safety bubble ---
+# safety bubble
 
 class TestBubble:
 
     def test_bubble_zeros_around_closest(self):
         c = TrackFTGController(num_beams=20, bubble_radius_deg=36, noise_std=0.0)
-        # beam_step ≈ fov/num_beams; make ranges with a clear closest point
         ranges = np.full(20, 5.0)
-        ranges[10] = 0.5  # closest hit
+        ranges[10] = 0.5
         result = c._apply_bubble(ranges)
         assert result[10] == 0.0
-        # At least a few neighbours should also be zeroed
         assert np.sum(result == 0.0) > 1
 
     def test_bubble_does_not_modify_original(self):
@@ -187,8 +163,6 @@ class TestBubble:
         _ = c._apply_bubble(ranges)
         np.testing.assert_array_equal(ranges, original)
 
-
-# --- Gap detection ---
 
 class TestMaxGap:
 
@@ -211,7 +185,7 @@ class TestMaxGap:
     def test_all_blocked(self):
         ranges = np.zeros(10)
         start, end = TrackFTGController._find_max_gap(ranges)
-        # Fallback: midpoint
+        # falls back to the midpoint
         assert start == end == 5
 
     def test_gap_at_end(self):
@@ -219,8 +193,6 @@ class TestMaxGap:
         start, end = TrackFTGController._find_max_gap(ranges)
         assert (start, end) == (3, 4)
 
-
-# --- Best point selection ---
 
 class TestBestPoint:
 
@@ -236,7 +208,7 @@ class TestBestPoint:
         assert idx == 4  # midpoint of [2..6]
 
 
-# --- Throttle scaling ---
+# corner throttle scaling
 
 class TestThrottleScaling:
 
@@ -244,12 +216,12 @@ class TestThrottleScaling:
         c = TrackFTGController(
             target_throttle=0.5, throttle_corner_scale=0.5, noise_std=0.0
         )
-        # Force steering to a large value by placing boundaries to one side
+        # both walls off to the left, forces a big steering command
         outer = np.array([[0.5, 2.0], [1.0, 2.0], [2.0, 2.0]])
         inner = np.array([[0.5, 1.5], [1.0, 1.5], [2.0, 1.5]])
         pos = np.array([0.0, 0.0])
         _, throttle = c.step(pos, 0.0, outer, inner)
-        # Hard steering must reduce throttle well below the 0.5 base
+        # hard steer should pull throttle well under the 0.5 base
         assert throttle < 0.45
 
     def test_straight_throttle_near_base(self):
@@ -262,13 +234,11 @@ class TestThrottleScaling:
         assert throttle > 0.0
 
 
-# --- Reset ---
-
 class TestReset:
 
     def test_reset_is_callable(self):
         c = TrackFTGController()
-        c.reset()  # should not raise
+        c.reset()
 
     def test_step_after_reset(self):
         c = TrackFTGController(noise_std=0.0)
@@ -279,8 +249,6 @@ class TestReset:
         assert -1.0 <= s <= 1.0
         assert -1.0 <= t <= 1.0
 
-
-# --- Edge cases ---
 
 class TestEdgeCases:
 
@@ -306,7 +274,6 @@ class TestEdgeCases:
         assert -1.0 <= s <= 1.0
 
     def test_vehicle_on_boundary(self):
-        """Vehicle sitting right on a boundary point should not crash."""
         c = TrackFTGController(noise_std=0.0)
         outer, inner = _oval_track()
         pos = outer[0].copy()

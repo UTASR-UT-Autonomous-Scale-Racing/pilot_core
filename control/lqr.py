@@ -1,20 +1,20 @@
 """
 LQR lateral controller on the kinematic path-error model.
 
-Reference: J. M. Snider, "Automatic Steering Methods for Autonomous
+J. M. Snider, "Automatic Steering Methods for Autonomous
 Automobile Path Tracking", CMU-RI-TR-09-08, 2009 (Sec. on LQR / optimal
 control); error dynamics after R. Rajamani, "Vehicle Dynamics and Control",
 Springer, 2012.
 
-Error state ``x = [e, e_psi]`` (lateral error, + = left of path; heading
-error ``yaw - path_heading``), input ``u = delta - delta_ff`` with the
-curvature feed-forward ``delta_ff = atan(L * kappa)``:
+Error state is x = [e, e_psi]: e is lateral error (+ = left of path), e_psi
+is yaw - path_heading. Input u = delta - delta_ff, where the curvature
+feed-forward is delta_ff = atan(L * kappa).
 
     e_dot     = v * e_psi
     e_psi_dot = (v / L) * u
 
-Discretised at the control period and solved with the discrete algebraic
-Riccati equation; gains are scheduled on speed (cached per 0.1 m/s).
+Discretised at the control period, solved via the discrete ARE. Gains are
+scheduled on speed and cached per 0.1 m/s.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from .types import VehicleParams, VehicleState, wrap_angle
 
 
 def error_model(v: float, wheelbase: float, dt: float) -> tuple[np.ndarray, np.ndarray]:
-    """Discrete ``(A, B)`` of the kinematic path-error model (forward Euler)."""
+    """Discrete (A, B) of the path-error model, forward Euler."""
     A = np.array([[1.0, v * dt], [0.0, 1.0]])
     B = np.array([[0.0], [v / wheelbase * dt]])
     return A, B
@@ -40,10 +40,11 @@ def error_model(v: float, wheelbase: float, dt: float) -> tuple[np.ndarray, np.n
 class LQR:
     params: VehicleParams
     q_lateral: float = 4.0        # weight on e² (m⁻²)
-    q_heading: float = 1.0        # weight on e_psi² (rad⁻²)
-    r_steer: float = 2.0          # weight on (delta - delta_ff)² (rad⁻²)
+    q_heading: float = 1.0        # on e_psi^2, rad^-2
+    r_steer: float = 2.0          # on (delta - delta_ff)^2, rad^-2
     dt: float = 1.0 / 30.0        # control period the gains are designed for
-    v_min: float = 0.3            # design speed floor (model is singular at v = 0)
+    # design speed floor; v=0 makes the model singular
+    v_min: float = 0.3
     _gains: Dict[int, np.ndarray] = field(default_factory=dict, repr=False)
 
     def reset(self) -> None:

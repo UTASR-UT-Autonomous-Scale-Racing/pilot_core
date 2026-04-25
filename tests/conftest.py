@@ -1,16 +1,4 @@
-"""
-conftest.py — Shared fixtures for pilot_core test suite.
-
-Provides:
-    - Typed shared-memory buffers with unique names, unlinked on teardown
-    - Synthetic camera frames (640×400 RGB + Depth)
-    - Synthetic IMU data (9-float vector)
-    - Synthetic segmentation masks (ResNet18-style)
-    - Synthetic poses (4×4 float32)
-    - Synthetic point clouds (N×3 float32)
-    - Synthetic track boundaries (outer/inner lines)
-    - Multiprocessing spawn context and Event factories
-"""
+"""Shared fixtures: synthetic sensor data and shm buffers that get unlinked on teardown."""
 
 from __future__ import annotations
 
@@ -20,47 +8,41 @@ import uuid
 import numpy as np
 import pytest
 
-# --- Unique shared-memory names (avoid collisions across parallel runs) ---
+# unique shm names so parallel runs don't collide
 
 def _uid() -> str:
-    """Short unique suffix for shared-memory names."""
     return uuid.uuid4().hex[:8]
 
 
-# --- Synthetic data factories ---
+# synthetic data
 
 @pytest.fixture()
 def rgb_frame() -> np.ndarray:
-    """640×400 BGR uint8 frame (like OAK-D output)."""
+    """640x400 BGR uint8, same shape as the OAK-D output."""
     return np.random.randint(0, 255, (400, 640, 3), dtype=np.uint8)
 
 
 @pytest.fixture()
 def depth_frame() -> np.ndarray:
-    """640×400 depth in metres (float32), range [0.2, 5.0]."""
+    """Depth in metres, float32, uniform in [0.2, 5.0]"""
     return np.random.uniform(0.2, 5.0, (400, 640)).astype(np.float32)
 
 
 @pytest.fixture()
 def imu_vector() -> np.ndarray:
-    """Random 9-float IMU vector in the imu_buf layout: [qw, qx, qy, qz, ax, ay, az, s7, s8]."""
+    """imu_buf layout: [qw, qx, qy, qz, ax, ay, az, s7, s8]"""
     return np.random.randn(9).astype(np.float32)
 
 
 @pytest.fixture()
 def segmentation_mask() -> np.ndarray:
-    """640×400 segmentation mask (int32) — simulates ResNet18 output.
-
-    Class IDs: 0=background, 1=road, 2=wall.
-    """
+    """Fake ResNet18 output. Classes: 0=background, 1=road, 2=wall."""
     rng = np.random.default_rng(42)
     mask = np.zeros((400, 640), dtype=np.int32)
-    # Central strip = road
+    # road in the middle, wall top and bottom
     mask[100:300, :] = 1
-    # Top & bottom strips = wall
     mask[:100, :] = 2
     mask[300:, :] = 2
-    # Sprinkle noise
     noise_idx = rng.integers(0, 400 * 640, size=5000)
     mask.flat[noise_idx] = rng.integers(0, 3, size=5000)
     return mask
@@ -68,7 +50,7 @@ def segmentation_mask() -> np.ndarray:
 
 @pytest.fixture()
 def pose_4x4() -> np.ndarray:
-    """Random valid SE(3) 4×4 pose matrix (float32)."""
+    """Random valid SE(3) pose, float32."""
     from scipy.spatial.transform import Rotation
     R = Rotation.random(random_state=42).as_matrix().astype(np.float32)
     t = np.random.randn(3).astype(np.float32) * 2.0
@@ -80,13 +62,12 @@ def pose_4x4() -> np.ndarray:
 
 @pytest.fixture()
 def point_cloud() -> np.ndarray:
-    """Synthetic 3D point cloud (500 points)."""
     return np.random.randn(500, 3).astype(np.float32) * 5.0
 
 
 @pytest.fixture()
 def track_boundaries() -> tuple[np.ndarray, np.ndarray]:
-    """Synthetic oval outer + inner track boundaries in BEV (X,Z)."""
+    """Oval outer/inner boundaries in BEV (X, Z)."""
     theta = np.linspace(0, 2 * np.pi, 200, endpoint=False)
     outer = np.column_stack([
         8.0 * np.cos(theta),
@@ -99,11 +80,10 @@ def track_boundaries() -> tuple[np.ndarray, np.ndarray]:
     return outer, inner
 
 
-# --- Buffer fixtures (unlinked on teardown) ---
+# Buffers. Each one gets unlinked on teardown
 
 @pytest.fixture()
 def frame_buffer():
-    """Fresh FrameBuffer with unique shm name — auto-unlinked."""
     from shared_buffer import FrameBuffer
     buf = FrameBuffer(slots=4, name=f"test_frame_{_uid()}", create=True)
     yield buf
@@ -179,16 +159,14 @@ def boundary_buffer():
         pass
 
 
-# --- Multiprocessing helpers ---
+# multiprocessing
 
 @pytest.fixture()
 def spawn_ctx():
-    """Return a 'spawn' multiprocessing context."""
     return mp.get_context("spawn")
 
 
 @pytest.fixture()
 def mp_event():
-    """Create a fresh multiprocessing Event (spawn context)."""
     ctx = mp.get_context("spawn")
     return ctx.Event()

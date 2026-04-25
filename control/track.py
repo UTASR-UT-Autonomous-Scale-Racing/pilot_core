@@ -1,9 +1,10 @@
 """
-TrackModel — a queryable centre-line built once from mapped boundaries.
+TrackModel: centre-line built once from the mapped boundaries, then queried
+every control step.
 
-Provides arc length ``s``, curvature ``kappa(s)``, track half-width and a
-windowed projection (``project``) that keeps index continuity between
-control steps, so each query is O(window) rather than a global search.
+Gives arc length s, curvature kappa(s), half-width, and a windowed project()
+that carries the index between steps, so a query costs O(window) instead of
+a global search.
 """
 
 from __future__ import annotations
@@ -18,17 +19,14 @@ from .types import wrap_angle
 
 @dataclass
 class Projection:
-    """Result of projecting a position onto the centre-line."""
-
     idx: int               # index of the nearest centre-line sample
     s: float               # arc length of the projected point (m)
-    lateral_error: float   # signed distance, + = vehicle is LEFT of the path (m)
+    lateral_error: float   # m, signed, + means the car is left of the path
     path_heading: float    # tangent heading at the projection (rad)
     curvature: float       # path curvature at the projection (1/m, + = left turn)
 
 
 def _resample_closed(pts: np.ndarray, spacing: float) -> np.ndarray:
-    """Uniformly resample a closed polyline at ``spacing`` metres."""
     closed = np.vstack([pts, pts[:1]])
     seg = np.linalg.norm(np.diff(closed, axis=0), axis=1)
     keep = seg > 1e-9
@@ -40,7 +38,7 @@ def _resample_closed(pts: np.ndarray, spacing: float) -> np.ndarray:
 
 
 def _smooth_closed(pts: np.ndarray, window: int) -> np.ndarray:
-    """Circular moving-average smoothing."""
+    """Moving average, wraps around."""
     if window <= 1:
         return pts
     k = np.ones(window) / window
@@ -56,12 +54,12 @@ class TrackModel:
     Parameters
     ----------
     outer, inner : np.ndarray
-        ``(N, 2)`` / ``(M, 2)`` boundary points in the BEV plane, each
-        ordered along the track (as produced by MappingWorker).
+        (N, 2) / (M, 2) boundary points in the BEV plane, each ordered along
+        the track (MappingWorker already gives them in that order).
     spacing : float
-        Centre-line sample spacing in metres.
+        Centre-line sample spacing, metres.
     smooth_window : int
-        Samples in the circular smoothing window (applied before curvature).
+        Samples in the circular smoothing window, applied before curvature.
     """
 
     def __init__(
@@ -76,7 +74,7 @@ class TrackModel:
         if len(outer) < 3 or len(inner) < 3:
             raise ValueError("TrackModel needs at least 3 points per boundary")
 
-        # Centre-line: midpoint between each outer sample and its nearest inner point
+        # centre = midpoint of each outer sample and its nearest inner point
         outer_rs = _resample_closed(outer, spacing)
         inner_tree = cKDTree(_resample_closed(inner, spacing / 2))
         _, j = inner_tree.query(outer_rs)
@@ -84,11 +82,9 @@ class TrackModel:
         centre = _resample_closed(_smooth_closed(mid, smooth_window), spacing)
 
         self._set_centre(centre)
-        # Half-width: distance from each centre sample to the nearest wall
+        # half-width is just distance to the nearest wall
         walls = np.vstack([_resample_closed(outer, spacing / 2), _resample_closed(inner, spacing / 2)])
         self.half_width, _ = cKDTree(walls).query(self.points)
-
-    # --- Build ---
 
     def _set_centre(self, centre: np.ndarray) -> None:
         self.points = centre
@@ -97,8 +93,8 @@ class TrackModel:
         seg = np.linalg.norm(nxt - centre, axis=1)
         self.length = float(seg.sum())
         self.s = np.concatenate([[0.0], np.cumsum(seg[:-1])])
-        # Central differences on the closed curve over a ±~0.25 m stencil:
-        # second differences at the raw sample spacing amplify resampling kinks.
+        # Central differences over roughly a +/-0.25 m stencil. Doing second
+        # differences at the raw sample spacing blows up the resampling kinks.
         k = max(1, int(round(0.25 / max(self.length / n, 1e-6))))
         fwd, back = np.roll(centre, -k, axis=0), np.roll(centre, k, axis=0)
         d1 = (fwd - back) / (2.0 * k)
@@ -110,30 +106,24 @@ class TrackModel:
         self._n = n
 
     def reverse(self) -> None:
-        """Flip the driving direction of the centre-line."""
         hw = self.half_width[::-1].copy()
         self._set_centre(self.points[::-1].copy())
         self.half_width = hw
 
     def align_direction(self, x: float, y: float, yaw: float) -> bool:
-        """Orient the centre-line with the vehicle's heading.
-
-        Returns True if the track was reversed.
-        """
+        """Point the centre-line the way the car is facing. True if it had to reverse."""
         p = self.project(x, y)
         if abs(wrap_angle(p.path_heading - yaw)) > np.pi / 2:
             self.reverse()
             return True
         return False
 
-    # --- Queries ---
-
     def project(self, x: float, y: float, hint: int | None = None, window: int = 40) -> Projection:
-        """Project ``(x, y)`` onto the centre-line.
+        """Project (x, y) onto the centre-line.
 
-        With ``hint`` (the previous ``idx``) only a window of samples around
-        it is searched; falls back to a global search if the result lies on
-        the window edge (e.g. after a pose jump).
+        Pass the previous idx as hint and only a window around it gets
+        searched. If the best match lands on the window edge (pose jump,
+        usually) we fall back to the global KD-tree query.
         """
         pos = np.array([x, y])
         if hint is None:
@@ -147,7 +137,7 @@ class TrackModel:
                 _, idx = self._tree.query(pos)
         idx = int(idx)
 
-        # Refine: project onto the tangent at the nearest sample
+        # refine using the tangent at the nearest sample
         p0 = self.points[idx]
         h = self.heading[idx]
         t = np.array([np.cos(h), np.sin(h)])
@@ -157,11 +147,11 @@ class TrackModel:
         return Projection(idx, s, lateral, float(h), float(self.curvature[idx]))
 
     def index_at(self, s: float) -> int:
-        """Index of the sample at or before arc length ``s`` (wraps around)."""
+        """Sample index at or just before arc length s. Wraps."""
         return int(np.searchsorted(self.s, s % self.length, side="right") - 1) % self._n
 
     def point_at(self, s: float) -> np.ndarray:
-        """Interpolated centre-line point at arc length ``s`` (wraps around)."""
+        """Interpolated centre-line point at s (wraps)."""
         s = s % self.length
         i = int(np.searchsorted(self.s, s, side="right") - 1) % self._n
         j = (i + 1) % self._n

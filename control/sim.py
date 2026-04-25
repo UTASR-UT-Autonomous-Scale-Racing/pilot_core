@@ -1,18 +1,14 @@
 """
-Closed-loop evaluation bench: kinematic bicycle plant + simulated SLAM pose
-sensor, driving the *same* estimator → controller → safety chain used on
-the car.  Used by the pytest benchmarks and ``scripts/sim_bench.py``.
+Closed-loop bench. Kinematic bicycle plant and a fake SLAM pose sensor,
+driving the same estimator -> controller -> safety chain we run on the car.
+The pytest benchmarks and scripts/sim_bench.py both use it.
 
-Reference (plant): R. Rajamani, "Vehicle Dynamics and Control", Springer,
-2012; J. Kong et al., IEEE IV 2015.
-
-Plant model:
-
-* Kinematic bicycle referenced at the rear axle (``vehicle_params.yaml``).
-* Steering: rate-limited servo (``max_steering_vel``) behind a transport delay.
-* Drivetrain with no brake: throttle ``u != 0`` drives the speed towards
-  ``u * speed_per_throttle`` with time constant ``tau`` (negative = backward);
-  neutral (``u == 0``) coasts, decelerating at ``coast_decel``.
+Plant is from R. Rajamani, "Vehicle Dynamics and Control", Springer, 2012,
+and J. Kong et al., IEEE IV 2015. Kinematic bicycle referenced at the rear
+axle, params from vehicle_params.yaml. Steering is a rate-limited servo
+(max_steering_vel) behind a transport delay. No brake: throttle u != 0 pulls
+speed toward u * speed_per_throttle with time constant tau (negative u =
+backward), and u == 0 coasts down at coast_decel.
 """
 
 from __future__ import annotations
@@ -29,7 +25,7 @@ from .safety import SafetyConfig, SafetySupervisor
 from .types import Command, VehicleParams, VehicleState
 
 
-# --- Tracks ---
+# test tracks
 
 def _offset_closed(centre: np.ndarray, offset: float) -> np.ndarray:
     d = np.roll(centre, -1, axis=0) - np.roll(centre, 1, axis=0)
@@ -39,14 +35,14 @@ def _offset_closed(centre: np.ndarray, offset: float) -> np.ndarray:
 
 
 def oval_track(a: float = 6.5, b: float = 4.0, width: float = 1.6, n: int = 400):
-    """Ellipse centre-line ``a × b`` → (outer, inner, centre)."""
+    """a x b ellipse. Returns (outer, inner, centre)."""
     th = np.linspace(0, 2 * np.pi, n, endpoint=False)
     centre = np.column_stack([a * np.cos(th), b * np.sin(th)])
     return _offset_closed(centre, -width / 2), _offset_closed(centre, width / 2), centre
 
 
 def twisty_track(radius: float = 6.0, width: float = 1.4, n: int = 800):
-    """Closed track with varying curvature (tight and fast sections)."""
+    """Loop with a mix of tight and fast sections."""
     th = np.linspace(0, 2 * np.pi, n, endpoint=False)
     r = radius + 1.6 * np.sin(3 * th) + 0.9 * np.cos(2 * th)
     centre = np.column_stack([r * np.cos(th), r * np.sin(th)])
@@ -54,7 +50,7 @@ def twisty_track(radius: float = 6.0, width: float = 1.4, n: int = 800):
 
 
 def random_track(rng: np.random.Generator, n: int = 800):
-    """Random closed track (varying size, width and curvature) for data collection."""
+    # random size / width / curvature, used for demo collection
     th = np.linspace(0, 2 * np.pi, n, endpoint=False)
     radius = rng.uniform(5.0, 7.5)
     r = radius * np.ones(n)
@@ -65,13 +61,11 @@ def random_track(rng: np.random.Generator, n: int = 800):
     return _offset_closed(centre, -width / 2), _offset_closed(centre, width / 2), centre
 
 
-# --- Plant ---
-
 @dataclass
 class PlantConfig:
     speed_per_throttle: float = 3.0    # m/s steady-state speed per unit throttle
     tau: float = 0.4                   # s, drivetrain time constant
-    coast_decel: float = 0.8           # m/s², deceleration at neutral throttle
+    coast_decel: float = 0.8           # m/s^2 at neutral throttle
     steer_delay: float = 0.05          # s transport delay on steering
     pose_rate: float = 15.0            # Hz
     pose_latency: float = 0.06         # s
@@ -87,7 +81,7 @@ class BicyclePlant:
         self._steer_queue: deque = deque()
 
     def step(self, cmd: Command, t: float, dt: float) -> None:
-        # Steering: transport delay, then rate-limited servo
+        # steering: transport delay, then rate-limited servo
         self._steer_queue.append((t + self.c.steer_delay, cmd.steering * self.p.max_steering_angle))
         target = self.delta
         while self._steer_queue and self._steer_queue[0][0] <= t:
@@ -95,7 +89,7 @@ class BicyclePlant:
         max_d = self.p.max_steering_vel * dt
         self.delta += float(np.clip(target - self.delta, -max_d, max_d))
 
-        # Drivetrain: no brake
+        # no brake. neutral just coasts
         if cmd.throttle != 0.0:
             self.v += (cmd.throttle * self.c.speed_per_throttle - self.v) / self.c.tau * dt
         else:
@@ -105,8 +99,6 @@ class BicyclePlant:
         self.y += self.v * np.sin(self.yaw) * dt
         self.yaw += self.v / self.p.wheelbase * np.tan(self.delta) * dt
 
-
-# --- Metrics ---
 
 @dataclass
 class RunResult:
@@ -142,7 +134,7 @@ def run_closed_loop(
     dt: float = 0.005,
     seed: int = 0,
 ) -> RunResult:
-    """Drive a lap-loop scenario and score it against the true track."""
+    """Drive laps and score against the true track."""
     rng = np.random.default_rng(seed)
     plant_cfg = plant or PlantConfig()
     follower = make_follower(outer, inner)
@@ -168,7 +160,7 @@ def run_closed_loop(
 
     t = 0.0
     while t < duration:
-        # Pose sensor: sample the truth, deliver after latency
+        # pose sensor: sample truth now, deliver after pose_latency
         if t >= next_pose:
             pose_queue.append((t + plant_cfg.pose_latency, t,
                                car.x + rng.normal(0, plant_cfg.pos_noise),
@@ -179,19 +171,17 @@ def run_closed_loop(
             _, ts, px, py, pyaw = pose_queue.popleft()
             ekf.update_pose(ts, px, py, pyaw)
 
-        # Controller
         if t >= next_ctrl:
             state = ekf.predict_to(t)
             if state is not None:
                 cmd, cmd_t = follower.step(state), t
             next_ctrl += 1.0 / control_rate
 
-        # Safety + plant
         est = ekf.predict_to(t)
         out = sup.step(t, cmd, cmd_t, armed=True, speed=est.v if est else None)
         car.step(out, t, dt)
 
-        # Score against the truth
+        # scoring uses the true position, not the estimate
         pr = track.project(car.x, car.y, hint=hint)
         hint = pr.idx
         if s_prev is not None:
@@ -221,23 +211,21 @@ def run_closed_loop(
     )
 
 
-# --- Depth camera ---
-
 def render_depth(x, y, yaw, walls, K, width, height, cam_height=0.12, wall_height=0.3, max_range=6.0):
-    """Ray-cast a depth image (metres, z-depth) of vertical track walls.
+    """Ray-cast a z-depth image (metres) of vertical track walls.
 
-    ``walls`` is a list of closed ``(N, 2)`` polylines.  The camera sits at
-    ``(x, y)`` looking along ``yaw``, level, ``cam_height`` above a flat floor.
+    walls: list of closed (N, 2) polylines. Camera is at (x, y) looking along
+    yaw, level, cam_height above a flat floor.
     """
     u = np.arange(width)
     bearing = np.arctan2(-(u - K.cx), K.fx)                 # + = left, per column
     ang = yaw + bearing
-    d = np.column_stack([np.cos(ang), np.sin(ang)])          # (W, 2) ray directions
+    d = np.column_stack([np.cos(ang), np.sin(ang)])          # (W, 2) ray dirs
     p0 = np.vstack([np.vstack([w, w[:1]])[:-1] for w in walls])
     p1 = np.vstack([np.vstack([w, w[:1]])[1:] for w in walls])
     e = p1 - p0                                              # (S, 2)
     o = np.array([x, y])
-    # Solve o + t d = p0 + s e for every (ray, segment) pair
+    # solve o + t d = p0 + s e for every (ray, segment) pair
     denom = d[:, None, 0] * e[None, :, 1] - d[:, None, 1] * e[None, :, 0]
     w_ = p0[None] - o
     t = (w_[..., 0] * e[None, :, 1] - w_[..., 1] * e[None, :, 0]) / np.where(denom == 0, np.nan, denom)
@@ -249,11 +237,11 @@ def render_depth(x, y, yaw, walls, K, width, height, cam_height=0.12, wall_heigh
     v = np.arange(height)[:, None]
     ray_y = (v - K.cy) / K.fy                                # y per unit z (down)
     depth = np.zeros((height, width))
-    # Wall pixels: those whose ray hits the wall between floor and wall top
+    # wall pixels = rays that hit between the floor and the top of the wall
     y_at_wall = ray_y * z_wall[None, :]
     on_wall = (y_at_wall <= cam_height) & (y_at_wall >= cam_height - wall_height) & (dist[None, :] < max_range)
     depth[on_wall] = np.broadcast_to(z_wall[None, :], depth.shape)[on_wall]
-    # Floor pixels in front of the wall
+    # floor in front of the wall
     with np.errstate(divide="ignore"):
         z_floor = np.where(ray_y > 1e-6, cam_height / ray_y, np.inf)
     floor = ~on_wall & (np.broadcast_to(z_floor, depth.shape) < np.minimum(z_wall[None, :], max_range))
@@ -264,11 +252,15 @@ def render_depth(x, y, yaw, walls, K, width, height, cam_height=0.12, wall_heigh
 def run_depth_closed_loop(follower, outer, inner, params, duration=40.0, plant=None,
                           safety=None, width=160, height=100, camera_rate=15.0, dt=0.005,
                           K=None, camera_height=None):
-    """Drive a depth-image controller (``follower.step(depth) -> Command``, e.g.
-    DepthGapFollower or VAEPolicyFollower) from rendered depth only (no pose,
-    no map) and score it against the true track.  ``K`` / ``camera_height``
-    default to the follower's own ``K`` / ``cfg.camera_height`` when it has them
-    (DepthGapFollower); learned followers need them passed explicitly."""
+    """Like run_closed_loop but for depth-image controllers
+    (follower.step(depth) -> Command, e.g. DepthGapFollower or
+    VAEPolicyFollower). Only rendered depth goes in, no pose and no map; the
+    true track is used just for scoring.
+
+    K and camera_height default to follower.K / follower.cfg.camera_height if
+    it has them (DepthGapFollower does). Learned followers don't, so pass
+    them in.
+    """
     K = K if K is not None else getattr(follower, "K", None)
     if camera_height is None:
         camera_height = getattr(getattr(follower, "cfg", None), "camera_height", None)
@@ -313,7 +305,7 @@ def run_depth_closed_loop(follower, outer, inner, params, duration=40.0, plant=N
 
 
 def make_follower_factory(mode: str, params: VehicleParams, lateral_cfg=None, speed_cfg=None):
-    """Convenience factory: boundaries → TrackFollower for ``mode``."""
+    """Returns f(outer, inner) -> TrackFollower for mode."""
     from .controllers import build_track_follower
     from .track import TrackModel
 

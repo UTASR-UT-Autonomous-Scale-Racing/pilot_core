@@ -1,17 +1,15 @@
 """
-Standalone ROS2 node that loads saved boundary .npy files (outer_line.npy /
-inner_line.npy, as written by the mapping worker), smooths and resamples them
-to uniform arc-length spacing, and publishes them as a MarkerArray for RViz.
+Small ROS2 node to eyeball saved boundaries in RViz. Loads the outer_line.npy /
+inner_line.npy the mapping worker writes, smooths + resamples them to even
+spacing, and publishes a MarkerArray.
 
-Usage (in any ROS2 environment, e.g. the autodrive bridge container, with the
-boundary files copied in):
+Run it anywhere with ROS2 (the autodrive bridge container works, just copy
+the .npy files in):
     python3 publish_boundaries_ros2.py \
         --outer outer_line.npy --inner inner_line.npy \
         --spacing 0.1 --rate 1.0
 
-Topic: /pilot/saved_boundary  (visualization_msgs/MarkerArray, frame "world")
-    red  points = outer wall
-    blue points = inner wall
+Publishes /pilot/saved_boundary in frame "world": red = outer, blue = inner.
 """
 
 import argparse
@@ -24,7 +22,7 @@ from geometry_msgs.msg import Point
 
 
 def resample_uniform(points: np.ndarray, spacing: float) -> np.ndarray:
-    """Resample an (N, 2) polyline to points ``spacing`` metres apart along its arc length."""
+    """(N, 2) polyline -> points every `spacing` metres of arc length"""
     if len(points) < 2:
         return points.astype(np.float32)
     diffs = np.diff(points, axis=0)
@@ -40,18 +38,17 @@ def resample_uniform(points: np.ndarray, spacing: float) -> np.ndarray:
 
 
 def smooth_boundary(points: np.ndarray, window: int = 15) -> np.ndarray:
-    """Moving-average smooth to remove zigzag from clustered LIDAR wall points."""
+    """Moving average; the lidar wall clusters come out zigzaggy otherwise."""
     if len(points) < window:
         return points.astype(np.float32)
     kernel = np.ones(window) / window
-    # mode='same' keeps the array length (the ends are zero-padded)
+    # mode='same' keeps the length, but NB the ends get zero-padded
     px = np.convolve(points[:, 0], kernel, mode='same')
     py = np.convolve(points[:, 1], kernel, mode='same')
     return np.stack([px, py], axis=1).astype(np.float32)
 
 
 class BoundaryPublisher(Node):
-    """Periodically publishes the outer/inner boundaries as POINTS markers."""
 
     def __init__(self, outer: np.ndarray, inner: np.ndarray, rate_hz: float = 1.0):
         super().__init__('boundary_publisher')
@@ -72,8 +69,8 @@ class BoundaryPublisher(Node):
         ma = MarkerArray()
 
         for pts, mid, (r, g, b) in [
-            (self._outer, 0, (1.0, 0.0, 0.0)),  # red = outer
-            (self._inner, 1, (0.0, 0.0, 1.0)),  # blue = inner
+            (self._outer, 0, (1.0, 0.0, 0.0)),  # red
+            (self._inner, 1, (0.0, 0.0, 1.0)),  # blue
         ]:
             m = Marker()
             m.header.stamp = now

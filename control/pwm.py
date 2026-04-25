@@ -1,12 +1,11 @@
 """
-PWM mapping for the car's servo (steering) and ESC (throttle).
+PWM mapping for the steering servo and the ESC.
 
-ControlBuffer values in ``[0, 1]`` map linearly onto each channel's
-``[min, max]`` pulse width (µs): below neutral = left / backward, above
-neutral = right / forward.  The pulse widths are set in the ``pwm`` section
-of the config; the defaults are calibrated for the car.  For throttle, 0.5
-lands exactly on neutral; the steering neutral sits slightly off the
-midpoint by design.
+ControlBuffer values in [0, 1] map linearly onto each channel's [min, max]
+pulse width in us. Below neutral is left / backward, above is right /
+forward. Widths come from the `pwm` config section; defaults are calibrated
+for our car. Throttle 0.5 lands exactly on neutral. Steering neutral is a bit
+off the midpoint, and that's intentional.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ class PWMMapper:
         self.cfg = cfg or PWMConfig()
 
     def to_pwm(self, steering: float, throttle: float) -> tuple[int, int]:
-        """ControlBuffer ``[0, 1]`` values → ``(steering_us, throttle_us)``."""
+        """ControlBuffer [0, 1] values -> (steering_us, throttle_us)."""
         if not (0.0 <= steering <= 1.0 and 0.0 <= throttle <= 1.0):
             raise ValueError(f"PWM inputs must be in [0, 1], got ({steering}, {throttle})")
         c = self.cfg

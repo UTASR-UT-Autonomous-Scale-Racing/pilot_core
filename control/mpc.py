@@ -1,23 +1,23 @@
 """
-Linear time-varying MPC for lateral control (kinematic model, OSQP).
+LTV MPC for lateral control. Kinematic model, solved with OSQP.
 
-References: J. Kong, M. Pfeiffer, G. Schildbach, F. Borrelli, "Kinematic and
+J. Kong, M. Pfeiffer, G. Schildbach, F. Borrelli, "Kinematic and
 Dynamic Vehicle Models for Autonomous Driving Control Design", IEEE IV 2015;
 P. Falcone et al., "Predictive Active Steering Control for Autonomous
-Vehicle Systems", IEEE TCST 15(3), 2007.  Solver: B. Stellato et al.,
+Vehicle Systems", IEEE TCST 15(3), 2007. Solver is from B. Stellato et al.,
 "OSQP: an operator splitting solver for quadratic programs", Math. Prog.
 Comp., 2020.
 
-Over a horizon of ``N`` steps the path-error model (see :mod:`control.lqr`)
-is driven by the previewed track curvature:
+Over N steps the path-error model (same one as control.lqr) gets driven by
+the previewed track curvature:
 
     x_{k+1} = A x_k + B delta_k + c_k,   c_k = [0, -v kappa_k dt]
 
 cost  sum_k  x_k' Q x_k + r (delta_k - delta_ff,k)^2 + r_d (delta_k - delta_{k-1})^2
 s.t.  |delta_k| <= delta_max,   |delta_k - delta_{k-1}| <= steer_rate * dt
 
-The initial state is propagated over the actuation ``delay`` with the last
-command before solving.  The QP is condensed onto the ``N`` steering inputs.
+Before solving, the initial state is pushed forward over the actuation delay
+using the last command. QP is condensed onto the N steering inputs.
 """
 
 from __future__ import annotations
@@ -41,9 +41,9 @@ class MPC:
     q_lateral: float = 10.0
     q_heading: float = 2.0
     q_terminal: float = 5.0           # terminal cost multiplier
-    r_steer: float = 1.0              # on (delta - delta_ff)²
+    r_steer: float = 1.0              # on (delta - delta_ff)^2
     r_rate: float = 20.0              # on (delta_k - delta_{k-1})²
-    delay: float = 0.05               # s, actuation delay compensated before solving
+    delay: float = 0.05               # s of actuation delay, compensated before solving
     v_min: float = 0.3
 
     def __post_init__(self) -> None:
@@ -54,7 +54,7 @@ class MPC:
         self._prev_delta = 0.0
 
     def _predictions(self, A: np.ndarray, B: np.ndarray, c: np.ndarray, x0: np.ndarray):
-        """Condensed dynamics: X = Phi x0 + Gamma u + Psi (stacked x_1..x_N)."""
+        # condensed: X = Phi x0 + Gamma u + Psi, X stacks x_1..x_N
         N = self.horizon
         Phi = np.zeros((2 * N, 2))
         Gamma = np.zeros((2 * N, N))
@@ -79,13 +79,13 @@ class MPC:
         v = max(abs(state.v), self.v_min)
         A, B = error_model(v, p.wheelbase, dt)
 
-        # Curvature preview along the horizon, offset by the actuation delay
+        # curvature preview, shifted by the delay
         s_k = proj.s + v * (self.delay + dt * np.arange(N))
         kappa = np.array([track.curvature[track.index_at(s)] for s in s_k])
         delta_ff = np.arctan(p.wheelbase * kappa)
         c = np.column_stack([np.zeros(N), -v * kappa * dt])
 
-        # Initial error, propagated over the actuation delay with the last command
+        # initial error pushed through the delay using the last command
         x0 = np.array([proj.lateral_error, wrap_angle(state.yaw - proj.path_heading)])
         if self.delay > 0:
             Ad, Bd = error_model(v, p.wheelbase, self.delay)
@@ -116,7 +116,7 @@ class MPC:
         self.last_solve_ok = res.info.status in ("solved", "solved inaccurate")
         if self.last_solve_ok and res.x is not None:
             delta = float(res.x[0])
-        else:   # keep the previous command rather than jumping
+        else:   # solver failed: hold the previous command instead of jumping
             delta = self._prev_delta
         self._prev_delta = float(np.clip(delta, -p.max_steering_angle, p.max_steering_angle))
         return self._prev_delta

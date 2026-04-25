@@ -1,13 +1,9 @@
 """
-BaseWorker — abstract base class for all pipeline worker processes.
+Base class for the pipeline workers.
 
-Every worker follows the same lifecycle:
-    1. ``setup()``   — called once *inside* the child process
-    2. ``step()``    — called in a tight loop until stopped
-    3. ``teardown()``— cleanup before the process exits
-
-The orchestrator (start.py) spawns each worker as a
-``multiprocessing.Process(target=worker.run)``.
+start.py spawns each one as multiprocessing.Process(target=worker.run).
+Inside the child, setup() runs once, then step() in a tight loop until
+stop() is called, then teardown().
 """
 
 from __future__ import annotations
@@ -21,15 +17,8 @@ from typing import Any, Dict
 
 
 class BaseWorker:
-    """Abstract worker that all pipeline workers inherit from.
-
-    Parameters
-    ----------
-    name : str
-        Human-readable name (also used as the process name).
-    **kwargs
-        Arbitrary configuration forwarded to the subclass.
-    """
+    """name is used for logging and the process name; any kwargs end up in
+    self.config for the subclass to pick apart."""
 
     def __init__(self, name: str, **kwargs: Any) -> None:
         self.name = name
@@ -37,35 +26,25 @@ class BaseWorker:
         self._stop_event = mp.Event()
         self._logger: logging.Logger | None = None
 
-    # --- abstract interface ---
-
     def setup(self) -> None:
-        """Initialise resources *inside the child process*.
+        """Open devices, load models, attach to shm buffers etc.
 
-        Override in subclasses to open devices, load models, attach to
-        shared-memory buffers, etc.
+        Runs in the child process, not in __init__, so nothing unpicklable
+        has to be pickled over to the child.
         """
         raise NotImplementedError
 
     def step(self) -> None:
-        """Execute one unit of work (one frame, one sensor read, …).
-
-        Override in subclasses.  Must be non-blocking or short-lived.
-        """
+        """One unit of work (a frame, a sensor read...). Keep it short, the
+        stop event is only checked between calls."""
         raise NotImplementedError
 
     def teardown(self) -> None:
-        """Release resources before exit.  Override as needed."""
-
-    # --- lifecycle ---
+        """Optional cleanup hook."""
 
     def run(self) -> None:
-        """Entry point executed inside the child process.
-
-        Do **not** override this unless you need a fundamentally different
-        loop structure.
-        """
-        # Configure per-process logging
+        """Process entry point. Subclasses shouldn't normally override this."""
+        # per-process logger
         self._logger = logging.getLogger(f"worker.{self.name}")
         self._logger.setLevel(logging.DEBUG)
         handler = logging.StreamHandler()
@@ -77,10 +56,10 @@ class BaseWorker:
         )
         self._logger.addHandler(handler)
 
-        # Ignore SIGINT in workers — the orchestrator handles shutdown via _stop_event
+        # Ignore SIGINT here; the orchestrator does shutdown through _stop_event
         signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-        # OpenCV keeps its own thread pool; match the orchestrator's cap.
+        # OpenCV has its own thread pool, match the orchestrator's cap
         try:
             import cv2
             cv2.setNumThreads(int(os.environ.get("OMP_NUM_THREADS", "0")))
@@ -96,7 +75,7 @@ class BaseWorker:
                     self.step()
                 except Exception:
                     self._logger.exception("Exception in step()")
-                    time.sleep(0.01)  # back off briefly on error
+                    time.sleep(0.01)  # brief backoff so a persistent error doesn't spin
         except Exception:
             self._logger.exception("Fatal error during setup()")
         finally:
@@ -114,6 +93,6 @@ class BaseWorker:
     @property
     def logger(self) -> logging.Logger:
         if self._logger is None:
-            # Fallback for use before run() — e.g. in orchestrator process
+            # before run(), i.e. still in the orchestrator process
             return logging.getLogger(f"worker.{self.name}")
         return self._logger

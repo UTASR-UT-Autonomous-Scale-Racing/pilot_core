@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-scripts/collect_frames.py — Save RGB frames from the simulator ZMQ stream to disk.
+Dump RGB frames from the simulator's ZMQ stream to disk.
 
-Connects to the same ZMQ sensor port as ZMQSensorWorker (default: 5555) and
-writes each sampled ``front_camera`` frame as frame_NNNNNN.jpg (the JPEG bytes
-are written as received, no re-encoding).  Run this alongside the AutoDRIVE
-simulator bridge; the pilot_core pipeline does NOT need to be running.
+Subscribes to the same sensor port ZMQSensorWorker uses (5555) and saves
+front_camera frames as frame_NNNNNN.jpg. The bytes are already JPEG so they're
+written straight out, no re-encode. Only the AutoDRIVE bridge needs to be up,
+not the pipeline.
 
-Usage (from the repo root; --output is relative to the current directory):
-    python scripts/collect_frames.py                         # defaults → ./dataset/rgb
+--output is relative to wherever you run it from:
+    python scripts/collect_frames.py                         # -> ./dataset/rgb
     python scripts/collect_frames.py --output ./dataset/rgb  # custom output dir
     python scripts/collect_frames.py --every 5 --max 2000    # every 5th frame, stop at 2000
     python scripts/collect_frames.py --host localhost --port 5555
@@ -44,9 +44,9 @@ def main() -> None:
 
     context = zmq.Context()
     sock = context.socket(zmq.SUB)
-    sock.setsockopt(zmq.RCVTIMEO, 1000)   # 1s timeout so Ctrl+C is responsive
+    sock.setsockopt(zmq.RCVTIMEO, 1000)   # so Ctrl+C isn't stuck in recv
     sock.setsockopt(zmq.RCVHWM, 10)
-    sock.setsockopt(zmq.CONFLATE, 1)       # keep only the latest message
+    sock.setsockopt(zmq.CONFLATE, 1)       # latest message only
     sock.connect(f"tcp://{args.host}:{args.port}")
     sock.setsockopt_string(zmq.SUBSCRIBE, "")
 
@@ -56,13 +56,12 @@ def main() -> None:
         print(f"Will stop after {args.max} saved frames")
     print("Press Ctrl+C to stop.\n")
 
-    frames_seen  = 0   # total frames received from ZMQ
-    frames_saved = 0   # frames written to disk
+    frames_seen  = 0
+    frames_saved = 0
     start_time   = time.time()
 
     try:
         while True:
-            # Stop when we've hit the user-specified cap
             if args.max and frames_saved >= args.max:
                 print(f"\nReached {args.max} saved frames — done.")
                 break
@@ -70,7 +69,7 @@ def main() -> None:
             try:
                 raw = sock.recv_string()
             except zmq.Again:
-                # No message within timeout — simulator may not be running yet
+                # sim probably not up yet
                 print("Waiting for simulator...", end="\r")
                 continue
 
@@ -85,11 +84,10 @@ def main() -> None:
 
             frames_seen += 1
 
-            # Decimation: only save every N-th frame
             if frames_seen % args.every != 0:
                 continue
 
-            # The payload is already JPEG: decode base64 and write the bytes as-is
+            # base64 of a JPEG, write as-is
             try:
                 jpeg_bytes = base64.b64decode(fc["data"])
             except Exception as e:
@@ -103,7 +101,6 @@ def main() -> None:
 
             frames_saved += 1
 
-            # Progress report every 50 saved frames
             if frames_saved % 50 == 0:
                 elapsed  = time.time() - start_time
                 fps_recv = frames_seen  / elapsed

@@ -1,16 +1,17 @@
 """
-ZMQSensorWorker — subscribes to the JSON sensor feed from autodrive_bridge
-and fills the frame, IMU, pose and LIDAR buffers.  Used instead of
-CameraWorker + IMUWorker in simulator mode.
+ZMQSensorWorker subscribes to autodrive_bridge's JSON sensor feed and fills
+the frame, IMU, pose and LIDAR buffers. In simulator mode it stands in for
+CameraWorker + IMUWorker.
 
-Conventions:
-    * frame_buf: RGB uint8 + depth float32 in metres (8-bit depth images are
-      scaled linearly, 0 = near, 255 = ``depth_max_meters``).
-    * Simulator commands are signed [-1, 1] with steering +1 = LEFT; they are
-      mapped to [0, 1] (0.5 = neutral, steering 0 = full left) in the IMU
-      vector's last two slots.
-    * The simulator's ground-truth vehicle-to-world pose (ROS / Z-up frame,
-      quaternion sent as [x, y, z, w]) goes to PoseBuffer with its speed.
+frame_buf gets RGB uint8 and depth as float32 metres. 8-bit depth images are
+scaled linearly, 0 = near and 255 = depth_max_meters.
+
+The sim reports commands as signed [-1, 1] with +1 steer = left. They're
+remapped to [0, 1] (0.5 neutral, steering 0 = full left) and stored in the
+last two slots of the IMU vector.
+
+Ground-truth vehicle-to-world pose (ROS, Z-up; quaternion arrives as
+[x, y, z, w]) goes to PoseBuffer along with the speed.
 """
 
 from __future__ import annotations
@@ -38,26 +39,22 @@ except ImportError:
 
 
 class ZMQSensorWorker(BaseWorker):
-    """Worker that subscribes to ZMQ sensor feed and fills multiple buffers.
+    """Sim sensor feed -> shared buffers.
 
     Config kwargs
     -------------
-    host : str
-        Hostname of autodrive_bridge (default: localhost)
-    port : int
-        Port number for sensor data (default: 5555)
+    host, port : str, int
+        Where autodrive_bridge publishes (localhost:5555 by default).
     frame_buffer : FrameBuffer
-        Shared FrameBuffer to write RGB+Depth frames
     imu_buffer : IMUBuffer
-        Shared IMUBuffer to write IMU data
     pose_buffer : PoseBuffer, optional
-        Shared PoseBuffer to write ground truth poses from simulator
+        Simulator ground-truth poses.
     lidar_buffer : LidarBuffer, optional
-        Shared LidarBuffer for the 1080-ray 2D scan
+        1080-ray 2D scan.
     depth_max_meters : float
-        Depth mapped to pixel value 255 for 8-bit depth images (default 10.0)
+        What pixel value 255 means for 8-bit depth images. Default 10.0
     collision_counter, lap_counter, checkpoint_counter : mp.Value, optional
-        Shared integers mirrored from simulator telemetry (for the gym env)
+        Mirrors of the sim's counters, read by the gym env.
     """
 
     def __init__(self, name: str = "zmq_sensor", **kwargs: Any) -> None:
@@ -73,9 +70,10 @@ class ZMQSensorWorker(BaseWorker):
         self._depth_max_meters: float = 10.0
         self._depth_logged = False
         self._pos_logged = False
-        self._collision_counter = None   # mp.Value('i') shared with gym env
-        self._lap_counter = None         # mp.Value('i') shared with gym env
-        self._checkpoint_counter = None  # mp.Value('i') shared with gym env
+        # mp.Value('i') each, shared with the gym env
+        self._collision_counter = None
+        self._lap_counter = None
+        self._checkpoint_counter = None
 
     def setup(self) -> None:
         if zmq is None:
@@ -88,7 +86,7 @@ class ZMQSensorWorker(BaseWorker):
         self._socket = self._context.socket(zmq.SUB)
         self._socket.setsockopt(zmq.RCVHWM, 10)
         self._socket.setsockopt(zmq.RCVTIMEO, 100)  # ms
-        self._socket.setsockopt(zmq.CONFLATE, 1)  # keep only the latest message
+        self._socket.setsockopt(zmq.CONFLATE, 1)  # latest message only, drop the backlog
 
         try:
             self._socket.connect(f"tcp://{host}:{port}")
@@ -141,7 +139,6 @@ class ZMQSensorWorker(BaseWorker):
             time.sleep(0.01)
 
     def _process_frame_data(self, data: dict) -> None:
-        """Extract and write frame data to FrameBuffer."""
         if 'front_camera' not in data or not data['front_camera']:
             return
 
@@ -150,7 +147,7 @@ class ZMQSensorWorker(BaseWorker):
             front_cam = data['front_camera']
             img_bytes = base64.b64decode(front_cam['data'])
 
-            # 'jpeg' (bridge default) or raw uint8 bytes with a 'shape' field
+            # either 'jpeg' (what the bridge sends by default) or raw uint8 + a 'shape' field
             encoding = front_cam.get('encoding', 'raw')
             if encoding == 'jpeg':
                 nparr = np.frombuffer(img_bytes, dtype=np.uint8)
@@ -169,13 +166,13 @@ class ZMQSensorWorker(BaseWorker):
                     depth_encoding = depth_cam.get('encoding', 'raw')
 
                     if depth_encoding in ('jpeg', 'png'):
-                        # 8-bit grayscale → linear depth in metres: 0 = near,
-                        # 255 = far clip.  depth_max_meters must match the
-                        # simulator camera's far clip.
+                        # 8-bit grey -> metres, linear, 0 = near and 255 = far
+                        # clip. NB depth_max_meters has to match the sim
+                        # camera's far clip or all depths are scaled wrong.
                         nparr = np.frombuffer(depth_bytes, dtype=np.uint8)
                         depth = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE).astype(np.float32)
                         depth = depth / 255.0 * self._depth_max_meters
-                        # Log the pixel → metres mapping of the first frame
+                        # log the mapping once, on the first frame
                         if not self._depth_logged:
                             raw_u8 = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
                             self.logger.debug(
@@ -188,7 +185,7 @@ class ZMQSensorWorker(BaseWorker):
                             )
                             self._depth_logged = True
                     else:
-                        # Raw uint16 depth, written without unit conversion
+                        # raw uint16, passed through as-is (no unit conversion!)
                         depth_flat = np.frombuffer(depth_bytes, dtype=np.uint16)
                         try:
                             depth = depth_flat.reshape(depth_cam['shape'][:2]).astype(np.float32)
@@ -211,10 +208,9 @@ class ZMQSensorWorker(BaseWorker):
             self.logger.warning(f"Frame processing failed: {e}")
 
     def _process_imu_data(self, data: dict) -> None:
-        """Extract and write IMU data to IMUBuffer."""
         try:
             if 'orientation_quat' in data:
-                # Bridge sends [x, y, z, w] (ROS); IMU vector layout is [w, x, y, z]
+                # bridge sends [x, y, z, w] (ROS order), the IMU vector wants [w, x, y, z]
                 x, y, z, w = data['orientation_quat']
                 quat = np.array([w, x, y, z], dtype=np.float32)
             else:
@@ -225,20 +221,20 @@ class ZMQSensorWorker(BaseWorker):
             else:
                 lin_acc = np.zeros(3, dtype=np.float32)
 
-            # Simulator throttle / steering are signed [-1, 1]
+            # sim values are signed [-1, 1]
             throttle = float(data.get('throttle', 0.0))
             steering = float(data.get('steering', 0.0))
 
             throttle_norm = (throttle + 1.0) / 2.0
-            steering_norm = (1.0 - steering) / 2.0  # simulator +1 = left → buffer 0 = left
+            steering_norm = (1.0 - steering) / 2.0  # sim +1 (left) -> buffer 0 (left)
             throttle_norm = np.clip(throttle_norm, 0.0, 1.0)
             steering_norm = np.clip(steering_norm, 0.0, 1.0)
 
-            # Construct IMU vector: [w, x, y, z, ax, ay, az, throttle, steering]
+            # layout: [w, x, y, z, ax, ay, az, throttle, steering]
             imu_vector = np.concatenate([
-                quat,      # Orientation quaternion (4 floats)
-                lin_acc,   # Linear acceleration (3 floats)
-                [throttle_norm, steering_norm]  # Control inputs (2 floats)
+                quat,
+                lin_acc,
+                [throttle_norm, steering_norm]
             ]).astype(np.float32)
 
             self._imu_buf.write(imu_vector)
@@ -247,7 +243,7 @@ class ZMQSensorWorker(BaseWorker):
             self.logger.warning(f"IMU processing failed: {e}")
 
     def _process_pose_data(self, data: dict) -> None:
-        """Extract and write ground truth pose to PoseBuffer (optional)."""
+        """Ground-truth pose, only if a pose_buffer was given."""
         if 'position' not in data or 'orientation_quat' not in data:
             return
 
@@ -268,7 +264,7 @@ class ZMQSensorWorker(BaseWorker):
             pose = np.eye(4, dtype=np.float32)
             pose[0:3, 3] = pos
 
-            # Quaternion → rotation matrix; bridge sends [x, y, z, w] (ROS)
+            # quat -> R. Again [x, y, z, w] order from the bridge
             x, y, z, w = quat[0], quat[1], quat[2], quat[3]
 
             R = np.array([
@@ -286,7 +282,6 @@ class ZMQSensorWorker(BaseWorker):
             self.logger.warning(f"Pose processing failed: {e}")
 
     def _process_lidar_data(self, data: dict) -> None:
-        """Extract and write 2D LIDAR scan to LidarBuffer."""
         if self._lidar_buf is None:
             return
         if 'lidar' not in data or not data['lidar']:
@@ -294,7 +289,7 @@ class ZMQSensorWorker(BaseWorker):
 
         try:
             ranges = np.array(data['lidar'], dtype=np.float32)
-            # Accept 1080 or 1081 rays (bridge quirk); trim to 1080
+            # bridge quirk: may be 1081 rays, not 1080. Trim
             if len(ranges) < 1080:
                 self.logger.debug(f"Unexpected LIDAR ray count: {len(ranges)}, skipping")
                 return
@@ -303,7 +298,7 @@ class ZMQSensorWorker(BaseWorker):
             self.logger.warning(f"LIDAR processing failed: {e}")
 
     def _process_telemetry_data(self, data: dict) -> None:
-        """Mirror simulator telemetry into shared mp.Values for the gym env."""
+        """Copy the sim's collision/lap/checkpoint counts into the shared mp.Values."""
         sim_collisions = int(data.get('collision_count', 0))
         sim_laps = int(data.get('lap_count', 0))
         sim_checkpoint = int(data.get('checkpoint_count', 0))

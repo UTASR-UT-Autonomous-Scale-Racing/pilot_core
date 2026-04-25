@@ -1,11 +1,6 @@
 """
-test_synthetic_pipeline.py — The synthetic frame / IMU generators
-(synthetic/) and the pipeline driven by them, with no hardware (no OAK-D,
-no I2C, no GPU). Workers are stepped in-process:
-    Synthetic camera → FrameBuffer → depth-threshold mask → SegmentationBuffer
-    Synthetic IMU    → IMUBuffer
-    FrameBuffer → SLAMWorker (stub, identity poses) → PoseBuffer
-    MappingWorker → TrackBoundaryBuffer → PID ControlWorker → ControlBuffer
+synthetic/ generators and the pipeline they drive, no hardware needed (no
+OAK-D, I2C or GPU). Workers get stepped in-process rather than spawned.
 """
 
 from __future__ import annotations
@@ -30,8 +25,6 @@ from shared_buffer import (
 def _uid():
     return uuid.uuid4().hex[:8]
 
-
-# --- Synthetic frame generator tests ---
 
 class TestSyntheticFrameGenerator:
 
@@ -58,29 +51,26 @@ class TestSyntheticFrameGenerator:
         assert depth.max() <= 10.0
 
     def test_multiple_frames_vary(self):
-        """Successive frames should differ (texture scrolling)."""
         from synthetic import SyntheticFrameGenerator
         gen = SyntheticFrameGenerator(width=320, height=200)
         frames = [gen.next_fast()[0].copy() for _ in range(5)]
-        # Scrolling is time-based, so rapid calls may return identical frames;
-        # only generating several frames without error is checked.
+        # Scrolling is time based, so back-to-back calls can return the same
+        # frame. Only checks that several frames generate without error.
         assert len(frames) == 5
 
     def test_rgb_has_wall_and_floor_regions(self):
-        """Verify the frame contains distinct regions (not all uniform)."""
         from synthetic import SyntheticFrameGenerator
         gen = SyntheticFrameGenerator(width=640, height=400)
         rgb, _ = gen.next_fast()
         unique_colors = len(np.unique(rgb.reshape(-1, 3), axis=0))
-        # Should have at least 3 distinct colors (floor, wall, sky)
+        # floor, wall, sky
         assert unique_colors >= 3
 
     def test_depth_map_has_wall_structure(self):
-        """Depth should show walls closer on edges, floor in centre."""
         from synthetic import SyntheticFrameGenerator
         gen = SyntheticFrameGenerator(width=640, height=400)
         _, depth = gen.next_fast()
-        # Bottom-centre pixel (floor) should be closer than top-centre (sky/far)
+        # bottom-centre (floor) closer than top-centre (sky)
         bottom_centre = depth[350, 320]
         top_centre = depth[50, 320]
         assert bottom_centre < top_centre
@@ -99,7 +89,7 @@ class TestSyntheticIMUGenerator:
         from synthetic import SyntheticIMUGenerator
         gen = SyntheticIMUGenerator()
         vec = gen.next()
-        # Layout: [qw, qx, qy, qz, ax, ay, az, throttle, steering]
+        # [qw, qx, qy, qz, ax, ay, az, throttle, steering]
         assert abs(vec[0] - 1.0) < 0.01
         assert abs(vec[1]) < 0.1
         assert abs(vec[2]) < 0.1
@@ -109,11 +99,8 @@ class TestSyntheticIMUGenerator:
         from synthetic import SyntheticIMUGenerator
         gen = SyntheticIMUGenerator()
         vec = gen.next()
-        # az should be near 9.81
         assert abs(vec[6] - 9.81) < 1.0
 
-
-# --- CameraWorker with synthetic mode ---
 
 class TestCameraWorkerSynthetic:
 
@@ -176,8 +163,6 @@ class TestCameraWorkerSynthetic:
             fb.unlink()
 
 
-# --- IMUWorker with synthetic mode ---
-
 class TestIMUWorkerSynthetic:
 
     def test_setup_synthetic(self):
@@ -205,12 +190,12 @@ class TestIMUWorkerSynthetic:
             ib.unlink()
 
 
-# --- Full synthetic pipeline: Camera → SLAM(stub) → Vision(mock) → Control ---
+# end to end: camera -> SLAM stub -> mock vision -> control
 
 class TestFullSyntheticPipeline:
 
     def test_synthetic_frame_through_slam_stub(self):
-        """Synthetic frames → SLAMWorker (stub) → identity poses."""
+        # with _slam = None the worker publishes identity poses
         from workers import SLAMWorker
 
         fn = f"synfull_f_{_uid()}"
@@ -225,7 +210,7 @@ class TestFullSyntheticPipeline:
             w._logger = MagicMock()
             w._frame_buf = fb
             w._pose_buf = pb
-            w._slam = None  # stub
+            w._slam = None
             w._last_seq = 0
 
             for _ in range(5):
@@ -242,23 +227,22 @@ class TestFullSyntheticPipeline:
             pb.unlink()
 
     def test_synthetic_to_segmentation(self):
-        """Synthetic depth → simple threshold segmentation → 3-class mask."""
         from synthetic import SyntheticFrameGenerator
 
         gen = SyntheticFrameGenerator(width=640, height=400)
         rgb, depth = gen.next_fast()
 
-        # Depth-threshold segmentation, like the Threshold vision model
+        # same idea as the Threshold vision model
         mask = np.zeros((400, 640), dtype=np.int32)
         mask[depth < 1.0] = 1   # close = road/floor
         mask[depth >= 1.0] = 2  # far = wall
 
         assert mask.shape == (400, 640)
-        assert 1 in mask  # should have some road
-        assert 2 in mask  # should have some wall
+        assert 1 in mask
+        assert 2 in mask
 
     def test_full_pipeline_synthetic_no_hardware(self):
-        """Complete synthetic pipeline: camera → vision → SLAM → mapping → PID."""
+        """camera -> vision -> SLAM -> mapping -> PID, all synthetic."""
         from workers import CameraWorker, ControlWorker, MappingWorker, SLAMWorker
 
         fn = f"fullsyn_f_{_uid()}"
@@ -282,7 +266,6 @@ class TestFullSyntheticPipeline:
         done_ev = ctx.Event()
 
         try:
-            # 1. Synthetic camera
             cam = CameraWorker(
                 name="camera", output_buffer=fb, fps=30,
                 resolution=[640, 400], synthetic=True,
@@ -290,7 +273,7 @@ class TestFullSyntheticPipeline:
             cam._logger = MagicMock()
             cam.setup()
 
-            # 2. SLAM stub
+            # SLAM stub
             slam = SLAMWorker(
                 name="slam", input_buffer=fb, output_buffer=pb,
                 pointcloud_buffer=pcb,
@@ -302,7 +285,6 @@ class TestFullSyntheticPipeline:
             slam._slam = None
             slam._last_seq = 0
 
-            # 3. Mapping worker
             mapper = MappingWorker(
                 name="mapping",
                 pose_buffer=pb, segment_buffer=sb,
@@ -313,12 +295,11 @@ class TestFullSyntheticPipeline:
             mapper._logger = MagicMock()
             mapper.setup()
 
-            # 4. Run pipeline: generate 15 synthetic frames
             for i in range(15):
                 cam.step()
                 slam.step()
 
-                # Synthetic segmentation from depth
+                # fake segmentation from depth
                 result = fb.read_latest()
                 if result is not None:
                     _, rgb, depth = result
@@ -327,7 +308,7 @@ class TestFullSyntheticPipeline:
                     mask[depth >= 1.5] = 2  # wall
                     sb.write(mask)
 
-                # Synthetic point cloud (wall circle)
+                # fake wall points on an ellipse
                 theta = np.linspace(0, 2 * np.pi, 50) + i * 0.2
                 pts = np.column_stack([
                     8.0 * np.cos(theta),
@@ -338,21 +319,19 @@ class TestFullSyntheticPipeline:
 
                 mapper.step()
 
-            # 5. Trigger loop closure → extract boundaries
+            # loop closure -> boundary extraction
             loop_ev.set()
             mapper.step()
 
             assert mapper._boundaries_extracted
             assert done_ev.is_set()
 
-            # 6. Verify boundary data
             bnd_result = bb.read_latest()
             assert bnd_result is not None
             _, outer_line, inner_line = bnd_result
             assert len(outer_line) > 0
             assert len(inner_line) > 0
 
-            # 7. PID control
             ctrl = ControlWorker(
                 name="control", mode="pid",
                 output_buffer=cb, pose_buffer=pb,
@@ -366,7 +345,6 @@ class TestFullSyntheticPipeline:
             ctrl._logger = MagicMock()
             ctrl.setup()
 
-            # Write a pose and step control
             T = np.eye(4, dtype=np.float32)
             T[0, 3] = 6.5
             pb.write(T)
@@ -391,7 +369,6 @@ class TestFullSyntheticPipeline:
             ib.unlink()
 
     def test_synthetic_depth_generates_wall_structure(self):
-        """Verify synthetic depth has wall-like structure for segmentation."""
         from synthetic import SyntheticFrameGenerator
 
         gen = SyntheticFrameGenerator(width=640, height=400, wall_distance=1.5)
@@ -404,7 +381,6 @@ class TestFullSyntheticPipeline:
         assert far > 0, "No far-range pixels (sky/end should be far)"
 
     def test_synthetic_imu_pipeline(self):
-        """Synthetic IMU data flows through IMUBuffer correctly."""
         from workers import IMUWorker
 
         imu_name = f"syn_imu_pipe_{_uid()}"
@@ -422,7 +398,6 @@ class TestFullSyntheticPipeline:
             header, vec = result
             assert header.seq_no >= 10
             assert vec.shape == (9,)
-            # Quaternion w should be near 1.0
             assert abs(vec[0] - 1.0) < 0.1
         finally:
             ib.unlink()

@@ -1,35 +1,28 @@
 """
-rl/track_env.py — Gymnasium environment for RL training on the AutoDRIVE simulator.
+Gymnasium env for RL training against the AutoDRIVE simulator.
 
-Lifecycle
----------
-1. Instantiate TrackEnv — creates shared buffers, does NOT start workers yet.
-2. Call env.start() — spawns ZMQSensorWorker + ActuatorWorker as daemon processes.
-3. Call env.load_boundaries_from_path("rl/boundaries") — loads, smooths, and resamples
-   pre-saved .npy boundary files.  Or call load_boundaries(outer, inner) directly.
-4. env.reset() / env.step(action) as a standard Gymnasium loop.
-5. env.close() to stop workers and release shared memory.
+Usage: construct TrackEnv (this creates the shared buffers but doesn't start
+any workers), call env.start() to spawn ZMQSensorWorker + ActuatorWorker,
+then load_boundaries_from_path("rl/boundaries") or load_boundaries(outer,
+inner). After that it's a normal reset()/step() loop. close() kills the
+workers and frees the shared memory.
 
-Observation ((n_ahead+1)*4 + 1 floats, vehicle-local frame):
-    outer[0..n_ahead] × (x, y)  — (n_ahead+1)*2 floats  (closest + n_ahead forward)
-    inner[0..n_ahead] × (x, y)  — (n_ahead+1)*2 floats
-    speed_mps                    — 1 float
+Observation, (n_ahead+1)*4 + 1 floats in the vehicle-local frame:
+    outer[0..n_ahead] (x, y)   closest point + n_ahead ahead
+    inner[0..n_ahead] (x, y)
+    speed (m/s)
 
-Action (2 floats):
-    [steering, throttle]  — steering in [-1, 1], throttle in [0, 1]
+Action is [steering in -1..1, throttle in 0..1].
 
-Reward (per step):
-    +0.5 * speed (m/s)
-    +2 per checkpoint passed
-    +2 on lap completion
-    -20 on collision or when stuck
-    -0.1 / max(d_wall, 0.05)   centring penalty, d_wall = distance to the nearest boundary (m)
+Reward per step:
+    +0.5 * speed
+    +2 per checkpoint, +2 on finishing a lap
+    -20 on collision or getting stuck
+    -0.1 / max(d_wall, 0.05), d_wall = distance to the nearest boundary (m)
 
-Termination:
-    terminated=True  on wall collision (counter mirrored from the simulator over ZMQ)
-    terminated=True  on lap completion
-    terminated=True  if stuck (speed < 0.1 m/s for 10 consecutive steps)
-    truncated=True   after max_steps (scaled by policy_hz / 10, see TrackEnv)
+Episode ends (terminated) on a wall hit, a completed lap, or being stuck
+(< 0.1 m/s for 10 steps in a row). The collision counter comes from the sim
+over ZMQ. Truncation happens at max_steps, scaled by policy_hz / 10.
 """
 
 from __future__ import annotations
@@ -55,40 +48,36 @@ from workers import ActuatorWorker, ZMQSensorWorker
 from workers.control_worker import signed_to_unit
 from workers.boundary_resampler import boundary_obs, resample_uniform, smooth_boundary
 
-# BEV axes for the AutoDRIVE simulator: world frame is Z-up, X-forward, Y-left.
-# pose matrix columns: 0=X, 1=Y, 2=Z.  Horizontal plane = axes (0, 1).
+# AutoDRIVE world is Z-up, X-forward, Y-left, so the ground plane is pose
+# axes (0, 1)
 _BEV_A0, _BEV_A1 = 0, 1
 
 
 class TrackEnv(gym.Env):
-    """Gymnasium environment wrapping the AutoDRIVE simulator via ZMQ.
+    """AutoDRIVE sim over ZMQ, as a Gymnasium env.
 
     Parameters
     ----------
-    zmq_host : str
-        Hostname of the autodrive_bridge (default: localhost).
-    zmq_sensor_port : int
-        Port the bridge publishes sensor data on (default: 5555).
-    zmq_control_port : int
-        Port the bridge subscribes to control commands on (default: 5556).
+    zmq_host, zmq_sensor_port, zmq_control_port
+        Where the autodrive_bridge is. Sensor data comes in on 5555,
+        controls go out on 5556 by default.
     boundary_spacing : float
-        Arc-length spacing (metres) used when resampling boundary polylines.
-    n_ahead : int
-        Number of boundary points ahead of the closest to include in obs.
-        Total points per boundary = n_ahead + 1.
+        Resample spacing along the boundary polylines, metres.
     boundary_smooth_window : int
-        Moving-average window (points) applied to raw boundaries before resampling.
+        Moving-average window (in points) applied before resampling.
+    n_ahead : int
+        Boundary points ahead of the closest one to put in the obs, so each
+        side contributes n_ahead + 1 points.
     max_steps : int
-        Episode length before truncation, expressed in steps at 10 Hz; the
-        actual step limit is ``max_steps * policy_hz / 10`` so the episode
-        duration in seconds is independent of ``policy_hz``.
+        Episode length in 10 Hz steps. The real limit is
+        max_steps * policy_hz / 10, which keeps episode duration in seconds
+        the same whatever policy_hz is.
     policy_hz : float
-        Target frequency of the RL control loop.  The env sleeps for
-        1/policy_hz seconds after writing each action, then reads the
-        latest state accumulated by ZMQSensorWorker during that interval.
+        After each action the env sleeps 1/policy_hz and then reads whatever
+        state ZMQSensorWorker has in the meantime.
     vis_zmq_port : int or None
-        Port for a ZMQ PUSH socket that streams the observed boundary points
-        (consumed by rl/vis_obs_ros2.py).  None disables it.
+        PUSH socket streaming the observed boundary points to
+        rl/vis_obs_ros2.py. None turns it off.
     """
 
     metadata = {"render_modes": []}
@@ -113,7 +102,7 @@ class TrackEnv(gym.Env):
         self._max_steps = max_steps * policy_hz/10
         self._policy_dt = 1.0 / policy_hz
 
-        # Optional ZMQ publisher for RViz observation visualization
+        # optional: stream obs to RViz
         self._vis_sock = None
         if vis_zmq_port is not None:
             import zmq as _zmq
@@ -122,7 +111,7 @@ class TrackEnv(gym.Env):
             self._vis_sock.setsockopt(_zmq.SNDHWM, 1)
             self._vis_sock.bind(f"tcp://*:{vis_zmq_port}")
 
-        # Shared buffers — created here (parent process), opened by workers
+        # buffers are created in the parent, workers attach to them
         try:
             mp.set_start_method("spawn")
         except RuntimeError:
@@ -130,21 +119,21 @@ class TrackEnv(gym.Env):
 
         self._pose_buf = PoseBuffer(slots=32, name="rl_pose_buf", create=True)
         self._ctrl_buf = ControlBuffer(slots=32, name="rl_ctrl_buf", create=True)
-        # ZMQSensorWorker requires frame + imu buffers even if we don't use them
+        # ZMQSensorWorker wants frame + imu buffers even though we ignore them
         self._frame_buf = FrameBuffer(
             slots=4, name="rl_frame_buf", create=True,
-            max_payload=16 + 360 * 640 * 7,  # enough for 360×640 RGB+depth
+            max_payload=16 + 360 * 640 * 7,  # 360x640 RGB + float32 depth
         )
         self._imu_buf = IMUBuffer(slots=32, name="rl_imu_buf", create=True)
 
-        # Reset signal — set by env.reset(), cleared by ActuatorWorker after sending
+        # reset() sets this, ActuatorWorker clears it once the reset is sent
         self._reset_event = mp.Event()
-        # Telemetry counters — ZMQSensorWorker mirrors simulator values here
+        # ZMQSensorWorker mirrors the sim's counters into these
         self._collision_count = mp.Value('i', 0)
         self._lap_count = mp.Value('i', 0)
         self._checkpoint_count = mp.Value('i', 0)
 
-        # Workers (not started yet — call env.start())
+        # not started until env.start()
         self._sensor_worker = ZMQSensorWorker(
             name="rl_zmq_sensor",
             host=zmq_host,
@@ -164,8 +153,7 @@ class TrackEnv(gym.Env):
             reset_event=self._reset_event,
         )
 
-        # Gymnasium spaces
-        obs_size = (n_ahead + 1) * 4 + 1  # (outer + inner points) × 2 coords + speed
+        obs_size = (n_ahead + 1) * 4 + 1  # (outer + inner) * xy + speed
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
         )
@@ -175,61 +163,40 @@ class TrackEnv(gym.Env):
             dtype=np.float32,
         )
 
-        # Resampled boundaries — set by load_boundaries()
+        # set by load_boundaries()
         self._outer: Optional[np.ndarray] = None
         self._inner: Optional[np.ndarray] = None
 
-        # Episode state
         self._step_count: int = 0
         self._last_pose_seq: int = 0
         self._prev_collisions: int = 0
         self._prev_laps: int = 0
         self._prev_checkpoints: int = 0
-        self._collision_grace_steps: int = 0  # ignore collisions for N steps after reset
-        self._stuck_steps: int = 0            # consecutive steps with speed < 0.1 m/s
+        self._collision_grace_steps: int = 0  # collisions ignored for this many steps after reset
+        self._stuck_steps: int = 0  # consecutive steps under 0.1 m/s
 
         self._processes: list[mp.Process] = []
 
-    # ------------------------------------------------------------------
-    # Setup
-    # ------------------------------------------------------------------
-
     def start(self) -> None:
-        """Spawn sensor and actuator worker processes.  Call once before training."""
+        """Spawn the sensor + actuator processes. Call once, before training."""
         for worker in (self._sensor_worker, self._actuator_worker):
             p = mp.Process(target=worker.run, name=worker.name, daemon=True)
             p.start()
             self._processes.append(p)
 
     def load_boundaries(self, outer: np.ndarray, inner: np.ndarray) -> None:
-        """Smooth, resample, and store track boundaries.
-
-        Parameters
-        ----------
-        outer : np.ndarray
-            (N, 2) raw outer boundary from MappingWorker.
-        inner : np.ndarray
-            (M, 2) raw inner boundary from MappingWorker.
-        """
+        """Takes raw (N, 2) boundaries from MappingWorker, smooths and resamples them."""
         self._outer = resample_uniform(smooth_boundary(outer, self._smooth_window), self._spacing)
         self._inner = resample_uniform(smooth_boundary(inner, self._smooth_window), self._spacing)
 
     def load_boundaries_from_path(self, path: str) -> None:
-        """Load pre-saved boundaries from a directory containing outer_line.npy / inner_line.npy.
-
-        Parameters
-        ----------
-        path : str
-            Directory path, e.g. "rl/boundaries".
-        """
+        """path is a dir with outer_line.npy + inner_line.npy, e.g. rl/boundaries"""
         import os
         outer = np.load(os.path.join(path, "outer_line.npy"))[:, :2]
         inner = np.load(os.path.join(path, "inner_line.npy"))[:, :2]
         self.load_boundaries(outer, inner)
 
-    # ------------------------------------------------------------------
-    # Gymnasium interface
-    # ------------------------------------------------------------------
+    # gym API
 
     def reset(
         self,
@@ -241,22 +208,20 @@ class TrackEnv(gym.Env):
 
         assert self._outer is not None, "Call load_boundaries() before reset()"
 
-        # Signal the simulator to reset the vehicle position
+        # tell the sim to put the car back at the start
         self._reset_event.set()
-        time.sleep(0.3)  # wait for simulator to reposition and flush stale poses
+        time.sleep(0.3)  # give it time to reposition and flush stale poses
 
-        # Block until a fresh pose arrives
         pos, heading, _ = self._wait_for_pose()
 
-        # Additional settle time — lets collision counter stabilize after respawn
+        # extra settle so the collision counter stops moving after the respawn
         time.sleep(0.1)
 
         self._step_count = 0
-        # Read counters AFTER settle time to capture any stale collision events
+        # read counters only after settling, otherwise stale collisions leak in
         self._prev_collisions = self._collision_count.value
         self._prev_laps = self._lap_count.value
         self._prev_checkpoints = self._checkpoint_count.value
-        # Grace period: ignore collisions for first N steps after reset
         self._collision_grace_steps = 3
         self._stuck_steps = 0
 
@@ -268,25 +233,24 @@ class TrackEnv(gym.Env):
 
         steering, throttle = float(action[0]), float(action[1])
 
-        # Convert to the ControlBuffer [0, 1] contract (0.5 = neutral):
-        # steering [-1, 1] (+1 = left) → [0, 1] (1 = right);
-        # throttle [0, 1] → [0.5, 1.0] (forward only)
+        # ControlBuffer wants [0, 1] with 0.5 neutral.
+        # steering: [-1, 1] (+1 = left) -> [0, 1] (1 = right)
+        # throttle: [0, 1] -> [0.5, 1.0], forward only
         steer_norm, throttle_norm = signed_to_unit(steering, max(throttle, 0.0))
         self._ctrl_buf.write(steer_norm, throttle_norm)
 
-        # Sleep for policy cadence — ZMQSensorWorker accumulates frames meanwhile
+        # ZMQSensorWorker keeps receiving while we sleep
         time.sleep(self._policy_dt)
 
-        # Read latest state
         result = self._read_pose()
         if result is None:
-            # Pose lost — return zero obs, no reward, keep episode alive
+            # lost the pose: zero obs, no reward, but don't end the episode
             zero_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
             return zero_obs, 0.0, False, False, {}
 
         pos, heading, speed = result
 
-        # Stuck detection: car not moving (e.g. pinned against a wall)
+        # stuck = not moving, e.g. pinned against a wall
         if speed < 0.1:
             self._stuck_steps += 1
         else:
@@ -299,34 +263,33 @@ class TrackEnv(gym.Env):
 
         self._step_count += 1
 
-        # Checkpoint reward — dense progress signal
+        # checkpoints give a denser progress signal than laps alone
         current_checkpoints = self._checkpoint_count.value
         new_checkpoints = max(0, current_checkpoints - self._prev_checkpoints)
         reward += new_checkpoints * 2.0
         self._prev_checkpoints = current_checkpoints
 
-        # Lap completion bonus
         current_laps = self._lap_count.value
         lap_completed = current_laps > self._prev_laps
         self._prev_laps = current_laps
         if lap_completed:
             reward += 2.0
 
-        # Collision — detected from Unity's WallCollisionCounter via ZMQ
-        # Grace period: ignore collisions for first few steps after reset to avoid
-        # detecting stale collision events from the previous episode
+        # Collisions come from Unity's WallCollisionCounter over ZMQ. For the
+        # first few steps after reset we ignore them, since the previous
+        # episode's collision can still show up
         current_collisions = self._collision_count.value
         if self._collision_grace_steps > 0:
             self._collision_grace_steps -= 1
             collided = False
-            self._prev_collisions = current_collisions  # sync counter during grace
+            self._prev_collisions = current_collisions
         else:
             collided = current_collisions > self._prev_collisions
             self._prev_collisions = current_collisions
         if collided or stuck:
             reward -= 20.0
 
-        # Centring penalty — grows as the car approaches either wall
+        # centring penalty, blows up near either wall
         assert self._outer is not None and self._inner is not None
         d_outer = float(np.linalg.norm(self._outer - pos, axis=1).min())
         d_inner = float(np.linalg.norm(self._inner - pos, axis=1).min())
@@ -355,12 +318,8 @@ class TrackEnv(gym.Env):
             except Exception:
                 pass
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _read_pose(self) -> Optional[tuple[np.ndarray, float, float]]:
-        """Read latest pose from PoseBuffer.  Returns (pos, heading, speed) or None."""
+        """(pos, heading, speed) from the latest pose, or None."""
         result = self._pose_buf.read_latest()
         if result is None:
             return None
@@ -370,7 +329,6 @@ class TrackEnv(gym.Env):
         return pos, heading, float(speed)
 
     def _wait_for_pose(self, timeout: float = 5.0) -> tuple[np.ndarray, float, float]:
-        """Block until a pose is available.  Raises TimeoutError if none arrives."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             result = self._read_pose()
@@ -384,7 +342,7 @@ class TrackEnv(gym.Env):
     ) -> np.ndarray:
         assert self._outer is not None and self._inner is not None
 
-        # Extract world-frame obs points for optional visualization
+        # world-frame points, only used for the vis stream
         n_ahead = self._n_ahead
         idx_o = int(np.linalg.norm(self._outer - pos, axis=1).argmin())
         idx_i = int(np.linalg.norm(self._inner - pos, axis=1).argmin())
@@ -403,7 +361,7 @@ class TrackEnv(gym.Env):
             try:
                 self._vis_sock.send_string(msg, flags=_zmq.NOBLOCK)
             except _zmq.Again:
-                pass  # no receiver connected yet — drop frame
+                pass  # nobody listening yet, drop it
 
         bnd = boundary_obs(pos, heading, self._outer, self._inner, self._n_ahead)
         return np.append(bnd, speed).astype(np.float32)

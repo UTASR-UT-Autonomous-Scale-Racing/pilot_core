@@ -1,7 +1,6 @@
 """
-test_ring_buffer_consistency.py — Concurrency test for
-SharedRingBuffer: a reader must never observe a header whose payload
-belongs to a different (older or partially written) record.
+SharedRingBuffer concurrency: a reader should never get a header paired with a
+payload from some other record (older, or half written).
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ def _reader(name: str, ready, stop, out) -> None:
         header, payload = result
         reads += 1
         expected = header.seq_no % 256
-        # First, middle and last byte must all belong to this header's record
+        # first/middle/last byte all have to match this header's record
         if (payload[0], payload[PAYLOAD // 2], payload[-1]) != (expected,) * 3:
             torn += 1
     rb.close()

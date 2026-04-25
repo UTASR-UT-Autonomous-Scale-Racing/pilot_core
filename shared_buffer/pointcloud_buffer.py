@@ -1,11 +1,10 @@
 """
-PointCloudBuffer — typed wrapper for 3D map-point data from SLAM.
+3D map points from SLAM.
 
-Payload layout:
-    [4 bytes]   uint32          num_points  (N)
-    [N*12 bytes] float32[N][3]  point positions (x, y, z)
+    [4 bytes]    uint32         num_points (N)
+    [N*12 bytes] float32[N][3]  x, y, z
 
-Supports up to 50 000 points (~600 KB per slot).
+Default cap is 50k points, which works out to ~600 KB per slot.
 """
 
 from __future__ import annotations
@@ -25,19 +24,7 @@ _MAX_PAYLOAD = _COUNT_SIZE + _MAX_POINTS * 3 * 4  # ~600 KB
 
 
 class PointCloudBuffer:
-    """High-level buffer for 3D point cloud data.
-
-    Parameters
-    ----------
-    slots : int
-        Number of ring-buffer slots (default 4).
-    name : str
-        Shared-memory block name.
-    create : bool
-        Pass *True* from orchestrator, *False* from workers.
-    max_points : int
-        Maximum number of 3D points per write (default 50 000).
-    """
+    """Point cloud buffer. Writes beyond max_points get clipped."""
 
     def __init__(
         self,
@@ -57,13 +44,6 @@ class PointCloudBuffer:
         )
 
     def write(self, points: np.ndarray) -> SlotHeader:
-        """Write a point cloud.
-
-        Parameters
-        ----------
-        points : np.ndarray
-            Shape ``(N, 3)``, dtype float32.  Clamped to ``max_points``.
-        """
         pts = points.astype(np.float32)
         n = min(len(pts), self._max_points)
         pts = pts[:n]
@@ -72,13 +52,7 @@ class PointCloudBuffer:
         return self._rb.write(payload)
 
     def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray]]:
-        """Read the most recent point cloud.
-
-        Returns
-        -------
-        (header, points) or *None*.
-        ``points`` is ``(N, 3) float32``.
-        """
+        """(header, (N, 3) float32 points) or None."""
         result = self._rb.read_latest()
         if result is None:
             return None

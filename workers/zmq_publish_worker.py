@@ -1,11 +1,10 @@
 """
-ZMQPublishWorker — publishes telemetry from the shared buffers back to the
-simulator for visualisation and logging.
+Sends telemetry from the shared buffers back to the simulator (visualisation,
+logging) over a ZMQ PUB socket.
 
-Each message is a single string ``"<topic> <json>"`` on a PUB socket, so
-subscribers can filter by topic: ``control`` (signed [-1, 1], steering
-+1 = LEFT), ``telemetry`` (pose), ``segmentation``, ``map`` (boundaries)
-and ``pointcloud``.
+Wire format is one string per message, "<topic> <json>", so subscribers can
+filter on the topic prefix. Topics: control (signed [-1, 1], +1 steer = left),
+telemetry (pose), segmentation, map (track boundaries), pointcloud.
 """
 
 from __future__ import annotations
@@ -37,25 +36,13 @@ except ImportError:
 
 
 class ZMQPublishWorker(BaseWorker):
-    """Worker that publishes telemetry data with topic prefixes.
+    """ZMQ telemetry publisher.
 
-    Config kwargs
-    -------------
-    port : int
-        Port to bind publisher (default: 5557)
-    control_buffer : ControlBuffer, optional
-        Control commands for echo/logging
-    pose_buffer : PoseBuffer, optional
-        Vehicle poses for trajectory visualization
-    seg_buffer : SegmentationBuffer, optional
-        Segmentation masks for overlay
-    boundary_buffer : TrackBoundaryBuffer, optional
-        Track boundaries for map visualization
-    pointcloud_buffer : PointCloudBuffer, optional
-        World-frame point cloud (base64 float32 XYZ)
-    publish : dict
-        Which streams to publish (each a bool): control, pose,
-        segmentation, boundary, pointcloud.
+    Binds a PUB socket on ``port`` (5557 by default). Every buffer is
+    optional: control_buffer, pose_buffer, seg_buffer, boundary_buffer,
+    pointcloud_buffer (world-frame XYZ, sent as base64 float32). ``publish``
+    is a dict of bools picking which of control / pose / segmentation /
+    boundary / pointcloud actually get sent.
     """
 
     def __init__(self, name: str = "zmq_publish", **kwargs: Any) -> None:
@@ -108,21 +95,20 @@ class ZMQPublishWorker(BaseWorker):
             "boundary": False,
         })
 
-        # Give subscribers time to connect before the first send
+        # PUB drops anything sent before a subscriber connects, so wait a bit
         time.sleep(0.5)
         self.logger.info(f"Publishing: {list(k for k, v in self._publish_config.items() if v)}")
 
     def step(self) -> None:
         self._frame_count += 1
 
-        # Every iteration
         if self._publish_config.get("control", False) and self._ctrl_buf:
             self._publish_control()
 
         if self._publish_config.get("pose", False) and self._pose_buf:
             self._publish_pose()
 
-        # Every 2nd iteration
+        # heavier streams only every other iteration
         if self._frame_count % 2 == 0:
             if self._publish_config.get("segmentation", False) and self._seg_buf:
                 self._publish_segmentation()
@@ -136,7 +122,7 @@ class ZMQPublishWorker(BaseWorker):
         time.sleep(0.01)
 
     def _publish_control(self) -> None:
-        """Publish control commands (for logging/echo)."""
+        """Echo the latest control command back to the sim."""
         try:
             result = self._ctrl_buf.read_latest()
             if result is None:
@@ -147,8 +133,9 @@ class ZMQPublishWorker(BaseWorker):
                 return
             self._last_seq['control'] = header.seq_no
 
-            # Convert normalized [0, 1] to simulator range [-1, 1]
-            steering = 1.0 - (steering_norm * 2.0)  # simulator: +1 = left
+            # buffer holds [0, 1], sim wants [-1, 1]. Steering is flipped
+            # since the sim uses +1 = left
+            steering = 1.0 - (steering_norm * 2.0)
             throttle = (throttle_norm * 2.0) - 1.0
 
             message = json.dumps({
@@ -164,7 +151,6 @@ class ZMQPublishWorker(BaseWorker):
             self.logger.debug(f"Control publish failed: {e}")
 
     def _publish_pose(self) -> None:
-        """Publish vehicle pose and trajectory."""
         try:
             result = self._pose_buf.read_latest()
             if result is None:
@@ -190,7 +176,6 @@ class ZMQPublishWorker(BaseWorker):
             self.logger.debug(f"Pose publish failed: {e}")
 
     def _publish_segmentation(self) -> None:
-        """Publish segmentation masks."""
         try:
             result = self._seg_buf.read_latest()
             if result is None:
@@ -201,7 +186,7 @@ class ZMQPublishWorker(BaseWorker):
                 return
             self._last_seq['segmentation'] = header.seq_no
 
-            # Raw uint8 bytes, base64-encoded (not compressed)
+            # raw uint8, base64'd. No compression
             mask_bytes = mask.astype(np.uint8).tobytes()
             mask_b64 = base64.b64encode(mask_bytes).decode('utf-8')
 
@@ -221,7 +206,7 @@ class ZMQPublishWorker(BaseWorker):
             traceback.print_exc()
 
     def _publish_boundary(self) -> None:
-        """Publish track boundaries."""
+        """Boundaries go out on the "map" topic."""
         try:
             result = self._boundary_buf.read_latest()
             if result is None:
@@ -248,7 +233,7 @@ class ZMQPublishWorker(BaseWorker):
             self.logger.debug(f"Boundary publish failed: {e}")
 
     def _publish_pointcloud(self) -> None:
-        """Publish SLAM point cloud as base64-encoded float32 XYZ array."""
+        """Point cloud as base64 of the float32 (N, 3) XYZ buffer."""
         try:
             result = self._pc_buf.read_latest()
             if result is None:

@@ -1,5 +1,5 @@
 """
-StateBuffer — estimated vehicle state in the BEV plane (from StateWorker).
+Estimated vehicle state in the BEV plane, written by StateWorker.
 
 Payload layout:
     [8 bytes]  float64  t         (state time, time.time() clock)
@@ -24,7 +24,7 @@ _PAYLOAD_SIZE = struct.calcsize(_STATE_FMT)
 
 
 class StateBuffer:
-    """High-level buffer for :class:`control.types.VehicleState`."""
+    """Ring buffer of control.types.VehicleState."""
 
     def __init__(self, slots: int = 8, name: str = "state_buf", create: bool = True) -> None:
         self._rb = SharedRingBuffer(

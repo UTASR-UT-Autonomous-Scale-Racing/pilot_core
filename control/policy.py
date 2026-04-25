@@ -1,19 +1,18 @@
 """
-Learned-policy controller: runs a PPO policy exported to ONNX
-(``rl/export_onnx.py``) on the CPU with onnxruntime.
+Runs a PPO policy exported to ONNX (by rl/export_onnx.py) on the CPU through
+onnxruntime.
 
-Reference: J. Schulman et al., "Proximal Policy Optimization Algorithms",
+PPO: J. Schulman et al., "Proximal Policy Optimization Algorithms",
 arXiv:1707.06347, 2017.
 
-The observation is built exactly as in training (``rl/track_env.py``):
-boundaries smoothed and resampled with the training settings, then the
-closest + ``n_ahead`` points of each boundary in the vehicle frame
-(forward = +x, left = +y), followed by the speed.  Observation
-normalisation (VecNormalize) and action clipping are baked into the ONNX
-graph by the exporter, so this module feeds raw observations.
+Observation has to match training (rl/track_env.py) exactly. Boundaries are
+smoothed and resampled with the training settings, then we take the closest
+point plus n_ahead more from each boundary, in the vehicle frame (+x
+forward, +y left), and append the speed. VecNormalize and action clipping
+are baked into the graph by the exporter, so raw observations go in here.
 
-Action: ``[steering, throttle]`` with steering +1 = left and throttle in
-``[0, 1]`` (forward only, as trained).
+Action is [steering, throttle]. Steering +1 = left, throttle in [0, 1]
+(forward only, that's how it was trained).
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ import numpy as np
 from .types import Command, VehicleState, wrap_angle
 
 
-# --- Observation helpers (must stay identical to workers/boundary_resampler.py) ---
+# NB: these must stay identical to workers/boundary_resampler.py
 
 def smooth_boundary(points: np.ndarray, window: int) -> np.ndarray:
     if len(points) < window or window <= 1:
@@ -59,8 +58,6 @@ def boundary_obs(pos, heading, outer, inner, n_ahead) -> np.ndarray:
     return np.concatenate([((o_pts - pos) @ R_inv.T).ravel(), ((i_pts - pos) @ R_inv.T).ravel()]).astype(np.float32)
 
 
-# --- Policy ---
-
 @dataclass
 class PolicyMeta:
     n_ahead: int
@@ -70,7 +67,7 @@ class PolicyMeta:
 
     @classmethod
     def load(cls, onnx_path: str) -> "PolicyMeta":
-        """Read the ``<model>.json`` sidecar written by rl/export_onnx.py."""
+        """Loads the <model>.json sidecar that rl/export_onnx.py writes."""
         with open(os.path.splitext(onnx_path)[0] + ".json") as f:
             return cls(**json.load(f)["observation"])
 
@@ -83,7 +80,8 @@ class PolicyFollower:
 
         self.meta = PolicyMeta.load(onnx_path)
         opts = ort.SessionOptions()
-        opts.intra_op_num_threads = 1            # tiny network; don't compete with other workers
+        # tiny network, no point competing with the other workers for cores
+        opts.intra_op_num_threads = 1
         self.session = ort.InferenceSession(onnx_path, opts, providers=["CPUExecutionProvider"])
         self._input = self.session.get_inputs()[0].name
         m = self.meta
@@ -95,7 +93,7 @@ class PolicyFollower:
         self._aligned = False
 
     def _align(self, state: VehicleState) -> None:
-        """Boundaries must be ordered along the driving direction (as in training)."""
+        # boundaries have to run along the driving direction, like in training
         pos = state.position.astype(np.float32)
         i = int(np.linalg.norm(self.outer - pos, axis=1).argmin())
         d = self.outer[(i + 1) % len(self.outer)] - self.outer[i]

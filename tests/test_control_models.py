@@ -1,8 +1,7 @@
 """
-test_control_models.py — LQR, MPC, depth Follow-the-Gap and ONNX policy
-controllers: unit behaviour, closed-loop benchmarks and worker integration.
+LQR, MPC, depth FTG and the ONNX policy controller.
 
-The policy tests are skipped without onnxruntime; the export test also needs
+Policy tests skip without onnxruntime. The export test additionally needs
 stable_baselines3, gymnasium and onnx.
 """
 
@@ -24,7 +23,7 @@ from control.sim import (
 )
 
 P = VehicleParams.load()
-K_SIM = Intrinsics(99.0, 98.95, 81.75, 47.25)   # OAK-D RGB intrinsics scaled to 160×100
+K_SIM = Intrinsics(99.0, 98.95, 81.75, 47.25)   # OAK-D RGB intrinsics scaled to 160x100
 TRACKS = {"oval": oval_track, "twisty": twisty_track}
 
 
@@ -32,7 +31,7 @@ def _uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
-# --- LQR / MPC ---
+# LQR, MPC
 
 @pytest.mark.parametrize("mode", ["lqr", "mpc"])
 @pytest.mark.parametrize("track", sorted(TRACKS))
@@ -51,7 +50,7 @@ def test_lqr_gain_scheduling_and_sign():
     lqr = LQR(P)
     k_slow, k_fast = lqr.gain(0.5), lqr.gain(1.5)
     assert k_slow.shape == (1, 2)
-    assert np.all(k_slow > 0) and np.all(k_fast > 0)      # e>0 (left of path) → steer right
+    assert np.all(k_slow > 0) and np.all(k_fast > 0)      # e>0 (left of path) -> steer right
     assert lqr.gain(0.0) is lqr.gain(0.3)                 # design-speed floor, cached
 
 
@@ -73,19 +72,19 @@ def test_mpc_respects_steering_limits():
     assert deltas[-1] < 0                                        # steering back (right)
 
 
-# --- Depth FTG ---
+# Depth FTG
 
 class TestDepthScan:
 
     def test_floor_is_not_an_obstacle(self):
         outer, inner, _ = oval_track(width=6.0)
-        # Walls scaled far beyond max_range: only floor pixels are in view
+        # walls pushed way past max_range so only floor is visible
         floor = render_depth(0.0, 0.0, 0.0, [outer * 100, inner * 100], K_SIM, 160, 100)
         _, ranges = depth_to_scan(floor, K_SIM, DepthFTGConfig())
         assert np.all(ranges == DepthFTGConfig().max_range)
 
     def test_wall_range_and_bearing(self):
-        # A wall 2 m ahead spanning the view
+        # wall 2 m ahead, full width
         wall = [np.array([[2.0, -5.0], [2.0, 5.0], [2.1, 5.0], [2.1, -5.0]])]
         d = render_depth(0.0, 0.0, 0.0, wall, K_SIM, 160, 100)
         bearings, ranges = depth_to_scan(d, K_SIM, DepthFTGConfig())
@@ -102,7 +101,7 @@ class TestDepthGapFollower:
 
     @pytest.mark.parametrize("side", [+1, -1])
     def test_steers_into_the_open_side(self, side):
-        # A box blocking the centre and one side; the other side is open
+        # box blocks the centre and one side, other side open
         box = np.array([[1.0, -1.5], [1.0, 0.15], [1.2, 0.15], [1.2, -1.5]]) * [1, side]
         cmd = DepthGapFollower(P, K_SIM).step(render_depth(0.0, 0.0, 0.0, [box], K_SIM, 160, 100))
         assert np.sign(cmd.steering) == side               # + = left
@@ -114,7 +113,7 @@ class TestDepthGapFollower:
 
     @pytest.mark.parametrize("track", sorted(TRACKS))
     def test_map_free_closed_loop(self, track):
-        """Depth images only (no pose, no map): keeps driving and stays on track."""
+        """Depth only, no pose or map. Should keep moving and stay on track."""
         outer, inner, _ = TRACKS[track]()
         r = run_depth_closed_loop(DepthGapFollower(P, K_SIM), outer, inner, P, duration=60.0)
         assert r.off_track_fraction == 0.0, r.summary()
@@ -122,10 +121,8 @@ class TestDepthGapFollower:
         assert r.xtrack_max < 0.3, r.summary()
 
 
-# --- Policy ---
-
 def _export_test_policy(tmp_path):
-    """Tiny real SB3 PPO (with VecNormalize stats) exported via rl/export_onnx."""
+    """Tiny but real SB3 PPO + VecNormalize stats, exported through rl/export_onnx"""
     pytest.importorskip("onnxruntime")
     sb3 = pytest.importorskip("stable_baselines3")
     gym = pytest.importorskip("gymnasium")
@@ -189,7 +186,7 @@ class TestPolicy:
         assert f.observation(st).shape == (45,)
 
 
-# --- Worker wiring ---
+# worker wiring
 
 def test_control_worker_depth_ftg_mode():
     from shared_buffer import ControlBuffer, FrameBuffer
@@ -228,14 +225,14 @@ def test_track_mode_falls_back_to_depth_when_state_stale():
                           frame_buffer=fb, track_config={"fallback": "depth_ftg", "fallback_after": 0.05})
         w._logger = MagicMock()
         w.setup()
-        time.sleep(0.1)                                   # no state at all → stale
+        time.sleep(0.1)                                   # no state at all -> stale
         K = Intrinsics.from_orbslam_settings("orbslam_oakd_rgbd.yaml")
         depth = render_depth(float(centre[0, 0]), float(centre[0, 1]), np.pi / 2, [outer, inner], K, 640, 400)
         fb.write(np.zeros((400, 640, 3), np.uint8), depth.astype(np.float32))
         w.step()
         assert w._fallback_active
         assert cb.read_latest() is not None
-        # A fresh state switches back to the track controller
+        # fresh state should switch back to the track controller
         sb.write(VehicleState(t=time.time(), x=float(centre[0, 0]), y=float(centre[0, 1]), yaw=np.pi / 2, v=0.5))
         w.step()
         assert not w._fallback_active and w._follower is not None

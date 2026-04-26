@@ -195,7 +195,7 @@ class ControlWorker(BaseWorker):
         self._track_cfg = self.config.get("track_config", {})
         self._follower = None
         self._last_state_seq = 0
-        self._last_state_time = time.time()
+        self._last_state_time = time.monotonic()
         # optional map-free fallback for when the state estimate goes stale
         self._fallback = None
         if self._track_cfg.get("fallback") == "depth_ftg":
@@ -238,14 +238,14 @@ class ControlWorker(BaseWorker):
         result = self._state_buf.read_latest()
         fresh = result is not None and result[0].seq_no > self._last_state_seq
         if not fresh:
-            if self._fallback is not None and time.time() - self._last_state_time > self._fallback_after:
+            if self._fallback is not None and time.monotonic() - self._last_state_time > self._fallback_after:
                 self._step_fallback()
             else:
                 time.sleep(0.002)
             return
         header, state = result
         self._last_state_seq = header.seq_no
-        self._last_state_time = time.time()
+        self._last_state_time = time.monotonic()
         if self._fallback is not None and self._fallback_active:
             self._fallback_active = False
             self.logger.info("State estimate back — leaving depth_ftg fallback")

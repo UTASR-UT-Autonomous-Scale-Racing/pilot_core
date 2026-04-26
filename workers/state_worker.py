@@ -62,7 +62,7 @@ class StateWorker(BaseWorker):
                 if self._use_pose_speed:
                     self._ekf.update_speed(header.produced_ts, float(speed))
 
-        now = time.time()
+        now = time.monotonic()
         if now >= self._next_pub:
             self._next_pub = now + self._period
             state = self._ekf.predict_to(now)

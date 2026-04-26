@@ -45,7 +45,7 @@ class VehicleParams:
 
 @dataclass
 class VehicleState:
-    t: float                 # s, time.time() clock
+    t: float                 # s, time.monotonic() clock
     x: float
     y: float
     yaw: float               # rad, CCW from +x

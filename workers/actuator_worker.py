@@ -138,7 +138,7 @@ class ActuatorWorker(BaseWorker):
         )
 
     def step(self) -> None:
-        now = time.time()
+        now = time.monotonic()
         if now < self._next_tick:
             time.sleep(min(self._next_tick - now, 0.005))
             return

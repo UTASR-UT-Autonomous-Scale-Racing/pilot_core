@@ -734,10 +734,10 @@ def main() -> None:
                 logger.info("Track mapping complete — press [a] to arm and drive")
                 logger.info("=" * 60)
 
-            if time.time() < _next_health_check:
+            if time.monotonic() < _next_health_check:
                 time.sleep(0.05)
                 continue
-            _next_health_check = time.time() + 1.0
+            _next_health_check = time.monotonic() + 1.0
 
             for i, (w, p) in enumerate(zip(_workers, _processes)):
                 if not p.is_alive() and not _shutting_down:

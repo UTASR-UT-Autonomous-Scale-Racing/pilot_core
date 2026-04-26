@@ -211,3 +211,26 @@ class TestSafety:
         sup.cfg.throttle_rate = 0.1
         out = sup.step(0.12, Command(0.0, 0.0), 0.12, armed=True, speed=0.5)
         assert out.throttle == 0.0
+
+    def test_non_finite_speed_counts_as_no_estimate(self):
+        sup = SafetySupervisor(SafetyConfig(max_throttle_no_speed=0.4, throttle_rate=100))
+        for k in range(5):
+            out = sup.step(k * 0.02, Command(0.0, 1.0), k * 0.02, armed=True, speed=float("nan"))
+        assert out.throttle == pytest.approx(0.4)
+
+    @pytest.mark.parametrize("command", [Command(float("nan"), 0.3), Command(0.0, float("inf"))])
+    def test_non_finite_command_is_stale(self, command):
+        sup = SafetySupervisor(SafetyConfig(throttle_rate=100))
+        out = sup.step(0.0, command, 0.0, armed=True, speed=0.0)
+        assert out.throttle == 0.0 and sup.status.watchdog_tripped
+
+    def test_future_stamped_command_is_stale(self):
+        sup = SafetySupervisor(SafetyConfig(throttle_rate=100))
+        out = sup.step(0.0, Command(0.0, 0.3), 5.0, armed=True, speed=0.0)
+        assert out.throttle == 0.0 and sup.status.watchdog_tripped
+
+    def test_reverse_throttle_is_capped(self):
+        sup = SafetySupervisor(SafetyConfig(max_reverse_throttle=0.3, throttle_rate=100))
+        for k in range(5):
+            out = sup.step(k * 0.02, Command(0.0, -1.0), k * 0.02, armed=True, speed=0.0)
+        assert out.throttle == pytest.approx(-0.3) and sup.status.speed_limited

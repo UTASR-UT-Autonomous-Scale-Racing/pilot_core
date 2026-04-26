@@ -4,8 +4,9 @@ actuators. Each output tick it takes the newest command and decides what
 actually gets sent. Checks run in this order:
 
 - arming: while disarmed, neutral throttle and centred steering
-- watchdog: newest command older than command_timeout -> neutral throttle,
-  steering held, car coasts to a stop
+- watchdog: newest command older than command_timeout, stamped in the
+  future, or not finite -> neutral throttle, steering held, car coasts to a
+  stop
 - speed cap: forward throttle tapers linearly to zero over the last
   cap_margin m/s below speed_cap, zero above it (coasts). The taper is there
   to soak up lag in the pose-derived speed estimate. With no speed estimate
@@ -13,7 +14,8 @@ actually gets sent. Checks run in this order:
   Separately, forward throttle never goes above speed_cap /
   speed_per_throttle (the steady-state throttle for the cap), so estimator
   lag can't let the car settle above the cap. Only works if
-  speed_per_throttle is actually calibrated.
+  speed_per_throttle is actually calibrated. Reverse throttle is capped at
+  max_reverse_throttle. A non-finite speed counts as no speed estimate.
 - slew limits on steering and throttle
 
 Signed units throughout: steering +1 = left, throttle 0 = neutral.
@@ -38,6 +40,8 @@ class SafetyConfig:
     speed_per_throttle: Optional[float] = 3.0
     max_throttle: float = 1.0        # forward throttle cap
     max_throttle_no_speed: float = 0.4
+    max_reverse_throttle: float = 0.4
+    future_tolerance: float = 0.01   # s a command may be stamped ahead of now (clock jitter)
     steering_rate: float = 7.6       # signed units/s (~max_steering_vel / max_steering_angle)
     throttle_rate: float = 4.0       # signed units/s
 
@@ -72,7 +76,15 @@ class SafetySupervisor:
         dt = 0.0 if self._last_t is None else max(now - self._last_t, 0.0)
         self._last_t = now
 
-        stale = command is None or command_time is None or (now - command_time) > c.command_timeout
+        if speed is not None and not np.isfinite(speed):
+            speed = None
+        age = None if command_time is None else now - command_time
+        stale = (
+            command is None
+            or age is None
+            or not -c.future_tolerance <= age <= c.command_timeout
+            or not (np.isfinite(command.steering) and np.isfinite(command.throttle))
+        )
         speed_limited = False
 
         if not armed:
@@ -90,6 +102,9 @@ class SafetySupervisor:
                 fwd_cap = min(fwd_cap, c.speed_cap / c.speed_per_throttle)
             if target.throttle > fwd_cap:
                 target.throttle = fwd_cap
+                speed_limited = True
+            elif target.throttle < -c.max_reverse_throttle:
+                target.throttle = -c.max_reverse_throttle
                 speed_limited = True
 
         if not armed:

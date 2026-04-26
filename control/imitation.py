@@ -109,6 +109,8 @@ class DepthPolicyConfig:
     cruise_speed: float = 0.8          # m/s
     speed_per_throttle: float = 3.0    # m/s per unit throttle, shared calibration
     steer_slowdown: float = 0.5        # speed *= 1 - steer_slowdown * |steering|
+    min_valid_fraction: float = 0.2    # below this share of valid depth pixels -> neutral
+    stop_distance: float = 0.35        # m, obstacle this close ahead (upper-centre of the image) -> neutral
 
 
 class DepthPolicyFollower:
@@ -133,7 +135,16 @@ class DepthPolicyFollower:
         return float(self.session.run(None, {"depth": x})[0][0, 0])
 
     def step(self, depth: np.ndarray) -> Command:
-        steering = float(np.clip(self.steer(depth), -1.0, 1.0))
         c = self.cfg
+        valid = np.isfinite(depth) & (depth > 0.05)
+        if valid.mean() < c.min_valid_fraction:
+            return Command(0.0, 0.0)
+        # centre columns, above the image middle, so the floor in front doesn't count
+        h, w = depth.shape
+        win = (slice(h // 4, h // 2), slice(w // 3, 2 * w // 3))
+        centre = depth[win][valid[win]]
+        if centre.size and np.percentile(centre, 5) < c.stop_distance:
+            return Command(0.0, 0.0)
+        steering = float(np.clip(self.steer(depth), -1.0, 1.0))
         speed = c.cruise_speed * (1.0 - c.steer_slowdown * abs(steering))
         return Command(steering, speed / c.speed_per_throttle).clipped()

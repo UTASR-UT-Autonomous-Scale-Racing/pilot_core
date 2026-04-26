@@ -82,7 +82,7 @@ class TestActuatorSafety:
     def test_speed_cap_from_state(self, rig):
         w, ctrl, state, armed = rig
         armed.set()
-        state.write(VehicleState(t=time.time(), x=0, y=0, yaw=0, v=1.6))
+        state.write(VehicleState(t=time.monotonic(), x=0, y=0, yaw=0, v=1.6))
         ctrl.write(*signed_to_unit(0.0, 0.6))
         _pump(w, 0.03)
         assert self._last_output(w)[1] == pytest.approx(0.5)   # over the cap, coast
@@ -136,7 +136,7 @@ def test_control_worker_track_mode(mode):
         # the worker has to flip the track. +x is the car's left here, so 0.3 m
         # left on a right-hand bend means steer right (and keep driving forward).
         x, y = centre[0]
-        sb.write(VehicleState(t=time.time(), x=x + 0.3, y=y, yaw=-np.pi / 2, v=0.5))
+        sb.write(VehicleState(t=time.monotonic(), x=x + 0.3, y=y, yaw=-np.pi / 2, v=0.5))
         w.step()
         _, steer_u, thr_u = ctrl.read_latest()
         assert w._follower is not None

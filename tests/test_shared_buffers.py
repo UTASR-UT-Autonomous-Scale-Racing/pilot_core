@@ -125,17 +125,31 @@ class TestSharedRingBuffer:
         except FileNotFoundError:
             pass
 
-    def test_payload_truncation(self):
-        """Oversized payloads get truncated to slot_payload_size, no error."""
+    def test_oversized_payload_is_rejected(self):
+        """A payload larger than the slot raises instead of being silently truncated."""
         name = f"test_rb_{_uid()}"
         rb = SharedRingBuffer(name=name, slots=2, slot_payload_size=8, create=True)
-        rb.write(b"\xAA" * 100)
-        result = rb.read_latest()
-        assert result is not None
-        _, data = result
-        assert len(data) == 8
-        assert data == b"\xAA" * 8
-        rb.unlink()
+        try:
+            with pytest.raises(ValueError):
+                rb.write(b"\xAA" * 100)
+            assert rb.read_latest() is None
+        finally:
+            rb.unlink()
+
+    def test_latest_seq_and_explicit_timestamp(self):
+        name = f"test_rb_{_uid()}"
+        rb = SharedRingBuffer(name=name, slots=2, slot_payload_size=8, create=True)
+        try:
+            assert rb.latest_seq() == 0
+            rb.write(b"\x01", ts=123.5)
+            rb.write(b"\x02")
+            assert rb.latest_seq() == 2
+            header, _ = rb.read_latest()
+            assert header.seq_no == 2
+            import time
+            assert abs(header.produced_ts - time.monotonic()) < 1.0   # monotonic clock by default
+        finally:
+            rb.unlink()
 
 
 class TestFrameBuffer:

@@ -233,7 +233,7 @@ def test_track_mode_falls_back_to_depth_when_state_stale():
         assert w._fallback_active
         assert cb.read_latest() is not None
         # fresh state should switch back to the track controller
-        sb.write(VehicleState(t=time.time(), x=float(centre[0, 0]), y=float(centre[0, 1]), yaw=np.pi / 2, v=0.5))
+        sb.write(VehicleState(t=time.monotonic(), x=float(centre[0, 0]), y=float(centre[0, 1]), yaw=np.pi / 2, v=0.5))
         w.step()
         assert not w._fallback_active and w._follower is not None
     finally:

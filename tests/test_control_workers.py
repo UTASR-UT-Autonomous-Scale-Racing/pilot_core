@@ -113,7 +113,7 @@ class TestStateWorker:
             assert st.yaw == pytest.approx(np.pi / 2, abs=0.05)   # +Z is 90 deg from +X
             _pump(w, 1.0)                     # no poses: publishes for stale_after (0.5 s), then stops
             _, st2 = sb.read_latest()
-            assert time.time() - st2.t > 0.4  # nothing published for the last ~0.5 s
+            assert time.monotonic() - st2.t > 0.4  # nothing published for the last ~0.5 s
         finally:
             pb.unlink()
             sb.unlink()

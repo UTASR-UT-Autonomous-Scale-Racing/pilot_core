@@ -3,7 +3,11 @@ Base class for the pipeline workers.
 
 start.py spawns each one as multiprocessing.Process(target=worker.run).
 Inside the child, setup() runs once, then step() in a tight loop until
-stop() is called, then teardown().
+stop() is called (or SIGTERM / SIGHUP arrives, or the parent process dies),
+then teardown().
+
+Exit codes: 0 after a normal stop, 1 if setup() failed or step() kept
+failing (max_step_failures in a row), so the orchestrator can restart it.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import logging
 import multiprocessing as mp
 import os
 import signal
+import sys
 import time
 from typing import Any, Dict
 
@@ -19,6 +24,9 @@ from typing import Any, Dict
 class BaseWorker:
     """name is used for logging and the process name; any kwargs end up in
     self.config for the subclass to pick apart."""
+
+    max_step_failures = 100            # consecutive step() exceptions before exiting
+    parent_check_period = 0.2          # s between checks that the orchestrator is alive
 
     def __init__(self, name: str, **kwargs: Any) -> None:
         self.name = name
@@ -56,8 +64,12 @@ class BaseWorker:
         )
         self._logger.addHandler(handler)
 
-        # Ignore SIGINT here; the orchestrator does shutdown through _stop_event
+        # Ignore SIGINT here; the orchestrator does shutdown through _stop_event.
+        # SIGTERM / SIGHUP (kill, closed terminal) still end with teardown().
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, lambda *_: self._stop_event.set())
+        parent = os.getppid()
 
         # OpenCV has its own thread pool, match the orchestrator's cap
         try:
@@ -67,17 +79,33 @@ class BaseWorker:
             pass
 
         self._logger.info("Starting up …")
+        exit_code = 0
         try:
             self.setup()
             self._logger.info("Setup complete — entering run loop")
+            failures = 0
+            next_parent_check = 0.0
             while not self._stop_event.is_set():
+                now = time.monotonic()
+                if now >= next_parent_check:
+                    next_parent_check = now + self.parent_check_period
+                    if os.getppid() != parent:
+                        self._logger.error("Orchestrator process died — stopping")
+                        break
                 try:
                     self.step()
+                    failures = 0
                 except Exception:
-                    self._logger.exception("Exception in step()")
+                    failures += 1
+                    self._logger.exception(f"Exception in step() ({failures}/{self.max_step_failures})")
+                    if failures >= self.max_step_failures:
+                        self._logger.error("step() keeps failing — exiting")
+                        exit_code = 1
+                        break
                     time.sleep(0.01)  # brief backoff so a persistent error doesn't spin
         except Exception:
             self._logger.exception("Fatal error during setup()")
+            exit_code = 1
         finally:
             self._logger.info("Tearing down …")
             try:
@@ -85,6 +113,8 @@ class BaseWorker:
             except Exception:
                 self._logger.exception("Exception in teardown()")
             self._logger.info("Exited.")
+        if exit_code:
+            sys.exit(exit_code)
 
     def stop(self) -> None:
         """Signal the worker to finish its current iteration and exit."""

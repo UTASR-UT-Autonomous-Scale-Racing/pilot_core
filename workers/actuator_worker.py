@@ -7,6 +7,11 @@ ControlBuffer values are [0, 1] with 0.5 = neutral: steering 0 is full
 left, 1 full right; throttle below 0.5 is reverse, above is forward.
 Internally and on the ZMQ wire we use signed [-1, 1] with steering +1 =
 left (AutoDRIVE convention), so watch the flip.
+
+I2C is silent while disarmed: the Arduino then passes the RC receiver
+through, so the car can be hand-driven (mapping lap). Once armed, commands
+are written at least every 100 ms; the Arduino falls back to RC / neutral if
+they stop for longer than its timeout (firmware/README.md).
 """
 
 from __future__ import annotations
@@ -42,9 +47,9 @@ class ActuatorWorker(BaseWorker):
       i2c_bus        I2C bus number
       zmq_enabled    publish to the simulator (default False)
       zmq_port       PUB bind port (default 5556)
-      armed_event    output stays neutral unless set. None means always armed,
-                     which is only for tests / RL training; start.py always
-                     passes one.
+      armed_event    output stays neutral (and I2C silent) unless set. None
+                     means always armed, which is only for tests / RL
+                     training; start.py always passes one.
       state_buffer   vehicle state for the speed cap. Without it the
                      supervisor falls back to a plain throttle cap.
       safety         SafetyConfig overrides
@@ -77,6 +82,7 @@ class ActuatorWorker(BaseWorker):
         self._next_tick = 0.0
         self._last_pwm = None
         self._last_i2c_write = 0.0
+        self._i2c_active = False       # written since the last arm
         self._last_status = None
 
     def setup(self) -> None:
@@ -138,6 +144,19 @@ class ActuatorWorker(BaseWorker):
         )
 
     def step(self) -> None:
+        try:
+            self._tick()
+        except Exception:
+            self._write_neutral()
+            raise
+
+    def _write_neutral(self) -> None:
+        if self._zmq_enabled and self._zmq_pub is not None:
+            self._publish_zmq(0.0, 0.0)
+        if not self._dummy and self._pwm is not None:
+            self._write_i2c(*self._pwm.neutral)
+
+    def _tick(self) -> None:
         now = time.monotonic()
         if now < self._next_tick:
             time.sleep(min(self._next_tick - now, 0.005))
@@ -167,11 +186,17 @@ class ActuatorWorker(BaseWorker):
                 self._reset_event.clear()
             self._publish_zmq(out.steering, out.throttle, reset)
 
-        # Hardware. Only write on change, plus a 100 ms keep-alive
+        # Hardware. Only write on change, plus a 100 ms keep-alive. On disarm,
+        # one last neutral write, then silence so the RC receiver takes over.
         pwm = self._pwm.to_pwm(steering_norm, throttle_norm)
-        if not self._dummy and (pwm != self._last_pwm or now - self._last_i2c_write > 0.1):
-            self._write_i2c(*pwm)
-            self._last_i2c_write = now
+        if not self._dummy:
+            if armed and (pwm != self._last_pwm or now - self._last_i2c_write > 0.1):
+                self._write_i2c(*pwm)
+                self._last_i2c_write = now
+                self._i2c_active = True
+            elif not armed and self._i2c_active:
+                self._write_i2c(*self._pwm.neutral)
+                self._i2c_active = False
         self._last_pwm = pwm
 
     def _sanitize(self, steering_norm: float, throttle_norm: float) -> tuple[float, float]:

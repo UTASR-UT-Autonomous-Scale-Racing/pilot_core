@@ -1,6 +1,6 @@
 # Workstation config: real OAK-D, CPU-only inference, nothing sent to an actuator.
 #
-#   python start.py --config config_cpu.yaml                # vision + control
+#   python start.py --config config_cpu.yaml                # map-free control
 #   python start.py --config config_cpu.yaml --enable-slam  # + ORB-SLAM3 mapping
 #   scripts/dev_run.sh                                      # same, with --debug
 #
@@ -17,22 +17,16 @@ use_oakd_imu: true            # IMU comes through the camera worker
 i2c_address: null             # dummy actuator, no writes
 i2c_bus: null
 
-segmentation_config_path: pilot_vision/models/default/config.yaml
+# vision: drivable-track segmentation (docs/vision.md). Nothing drives off
+# seg_buf yet, so it is off to save CPU.
 vision:
-  model: pilot_vision           # pilot_vision | onnx | ground_plane (docs/vision.md)
+  enabled: false
+  model: ground_plane           # ground_plane | onnx
   onnx_model: track_seg.onnx    # model: onnx — network from scripts/train_vision.py (+ .json sidecar)
 
 # depth_ftg, vae and bc are map-free. pure_pursuit / stanley / lqr / mpc /
 # policy need --enable-slam and a mapped track
 control_mode: "depth_ftg"
-
-# pid mode
-pid:
-  kp_steer: 1.0
-  ki_steer: 0.0
-  kd_steer: 0.1
-  target_throttle: 0.3        # signed, [-1, 1]
-  noise_std: 0.0              # steering noise std
 
 # PWM pulse widths (µs), same as the car. Below neutral = left/backward,
 # above = right/forward
@@ -43,7 +37,6 @@ pwm:
   throttle_min: 1199          # full backward
   throttle_max: 1595          # full forward
   throttle_neutral: 1397      # coast
-
 
 # track following
 vehicle_params: vehicle_params.yaml   # relative to repo root
@@ -84,10 +77,10 @@ track_control:
       max_backward: 0.3         # reverse input allowed for braking
       min_speed_for_backward: 0.3   # m/s
 
-
 # depth_ftg (also used as the track fallback)
 depth_ftg:
   camera_height: 0.12           # m, measure it on the car
+  camera_pitch: 0.0             # rad, positive = pitched down
   min_obstacle_height: 0.04     # m, below this = floor
   max_obstacle_height: 0.50     # m, above = ignored
   max_range: 4.0                # m
@@ -95,26 +88,23 @@ depth_ftg:
   aim_distance: 0.7             # m
   cruise_speed: 0.6             # m/s
   stop_distance: 0.35           # m, obstacle closer than this -> neutral
-
+  min_valid_fraction: 0.2       # less valid depth than this -> neutral
 
 vae:
   model: vae_policy.onnx        # scripts/train_vae_policy.py
   cruise_speed: 0.8             # m/s
   steer_slowdown: 0.5           # speed *= 1 - steer_slowdown * |steering|
 
-
 bc:
   model: bc_policy.onnx         # scripts/train_bc_policy.py
   cruise_speed: 0.8             # m/s
   steer_slowdown: 0.5           # speed *= 1 - steer_slowdown * |steering|
-
 
 # pose EKF
 estimator:
   pos_std: 0.03                 # m
   yaw_std: 0.03                 # rad
   stale_after: 0.5              # s with no pose -> stop
-
 
 # safety (ActuatorWorker)
 safety:
@@ -123,9 +113,9 @@ safety:
   cap_margin: 0.2               # m/s
   # forward throttle is also limited to speed_cap / speed_per_throttle
   max_throttle_no_speed: 0.4    # used when there's no speed estimate
+  max_reverse_throttle: 0.4     # reverse cap
   steering_rate: 7.6            # units/s over [-1, 1]
   throttle_rate: 4.0            # units/s
-
 
 enable_slam: false              # or pass --enable-slam
 slam:
@@ -137,9 +127,6 @@ mapping:
 
 recording: false                # or --recording
 recording_path: /tmp/pilot_recordings
-
-web_publish:
-  enabled: false
 
 # ring buffer slots
 buffers:

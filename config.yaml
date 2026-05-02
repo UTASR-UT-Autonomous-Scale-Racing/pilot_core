@@ -1,8 +1,10 @@
-# On-car config (Jetson): OAK-D, CUDA inference, Arduino actuator over I2C,
-# ORB-SLAM3 mapping.
+# On-car config (Jetson): OAK-D, Arduino actuator over I2C, ORB-SLAM3 mapping.
 #
-#   python start.py                      # uses this file by default
+#   python start.py --config config.yaml
 #   scripts/run.sh / scripts/start.sh    # native / Docker launch on the Jetson
+#
+# The actuator stays silent on I2C until the car is armed from the terminal,
+# so the RC transmitter drives (e.g. the mapping lap) while disarmed.
 
 fps: 30                       # camera, Hz
 resolution: [640, 400]        # [width, height] px
@@ -12,21 +14,14 @@ use_oakd_imu: false           # true = OAK-D IMU through the camera worker, fals
 i2c_address: 0x08             # Arduino address. null -> actuator/IMU run as dummies
 i2c_bus: 1                    # /dev/i2c-<bus>
 
-# vision
-segmentation_config_path: pilot_vision/models/default/config.yaml
+# vision: drivable-track segmentation (docs/vision.md). Nothing drives off
+# seg_buf yet, so it is off to save CPU.
 vision:
-  model: pilot_vision           # pilot_vision | onnx | ground_plane (docs/vision.md)
+  enabled: false
+  model: ground_plane           # ground_plane | onnx
   onnx_model: track_seg.onnx    # model: onnx — network from scripts/train_vision.py (+ .json sidecar)
 
-control_mode: "pure_pursuit"  # pure_pursuit | stanley | lqr | mpc | policy | depth_ftg | vae | bc | pid | ftg
-
-# control_mode: pid
-pid:
-  kp_steer: 1.0
-  ki_steer: 0.0
-  kd_steer: 0.1
-  target_throttle: 0.3        # base throttle, signed [-1, 1]
-  noise_std: 0.05             # gaussian noise on steering (std)
+control_mode: "pure_pursuit"  # pure_pursuit | stanley | lqr | mpc | policy | depth_ftg | vae | bc
 
 # servo / ESC pulse widths in us. Below neutral is left / backward,
 # above is right / forward
@@ -80,6 +75,7 @@ track_control:
 # depth follow-the-gap, map-free (control_mode: depth_ftg, or as the track fallback)
 depth_ftg:
   camera_height: 0.12           # m above ground, needs measuring on the car
+  camera_pitch: 0.0             # rad, positive = pitched down
   min_obstacle_height: 0.04     # m, anything lower is floor
   max_obstacle_height: 0.50     # m, anything higher is ignored
   max_range: 4.0                # m
@@ -87,6 +83,7 @@ depth_ftg:
   aim_distance: 0.7             # m
   cruise_speed: 0.6             # m/s
   stop_distance: 0.35           # m, obstacle this close ahead -> neutral
+  min_valid_fraction: 0.2       # less valid depth than this -> neutral
 
 # control_mode: vae (map-free)
 vae:
@@ -114,6 +111,7 @@ safety:
   # NB forward throttle is also capped at speed_cap / speed_per_throttle
   # (track_control.speed.longitudinal), so calibrate that one
   max_throttle_no_speed: 0.4    # forward cap with no speed estimate
+  max_reverse_throttle: 0.4     # reverse cap
   steering_rate: 7.6            # units/s, on the signed [-1, 1] range
   throttle_rate: 4.0            # units/s
 
@@ -154,15 +152,6 @@ recording_config:
   boundary:
     sample_k: 10
     top_n: 500
-
-# web telemetry (HTTP POST), off by default
-web_publish:
-  enabled: false
-  endpoint: "http://localhost:8080/api/telemetry"
-  interval: 1.0                 # s between POSTs
-  timeout: 2.0                  # s per request
-  vehicle_id: "pilot_1"
-  max_trajectory_pts: 500       # per payload
 
 # ring buffer slot counts
 buffers:

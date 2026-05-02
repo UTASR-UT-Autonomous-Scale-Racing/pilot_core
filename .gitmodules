@@ -1,9 +1,6 @@
 [submodule "ORB_SLAM3"]
 	path = ORB_SLAM3
 	url = https://github.com/UTASR-UT-Autonomous-Scale-Racing/ORB_SLAM3.git
-[submodule "pilot_vision"]
-	path = pilot_vision
-	url = https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_vision.git
 [submodule "firmware"]
 	path = firmware
 	url = https://github.com/UTASR-UT-Autonomous-Scale-Racing/firmware.git

@@ -13,35 +13,25 @@ use_oakd_imu: false
 i2c_address: null             # dummy actuator/IMU
 i2c_bus: null
 
-segmentation_config_path: pilot_vision/models/default/config.yaml
+# vision: drivable-track segmentation (docs/vision.md)
 vision:
-  model: pilot_vision           # pilot_vision | onnx | ground_plane (docs/vision.md)
+  enabled: true                 # exercised here; the car configs leave it off
+  model: ground_plane           # ground_plane | onnx
   onnx_model: track_seg.onnx    # model: onnx — network from scripts/train_vision.py (+ .json sidecar)
 
 control_mode: "depth_ftg"     # map-free, works off the synthetic depth
-
-# only used with control_mode: pid
-pid:
-  kp_steer: 1.0
-  ki_steer: 0.0
-  kd_steer: 0.1
-  target_throttle: 0.3        # signed [-1, 1]
-  noise_std: 0.0
 
 # slam
 enable_slam: false              # or --enable-slam
 slam:
   vocabulary: ORB_SLAM3/Vocabulary/ORBvoc.txt
-  settings: synthetic_slam_settings.yaml   # synthetic camera intrinsics
+  settings: synthetic_slam_settings.yaml   # synthetic camera intrinsics (also used by ground_plane)
 
 mapping:
   boundary_min_points: 10       # wall points needed before extracting (50 on the car)
 
 recording: false
 recording_path: /tmp/pilot_recordings
-
-web_publish:
-  enabled: false
 
 # smaller buffers than the on-car config
 buffers:

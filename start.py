@@ -3,15 +3,14 @@
 Entry point for the pilot_core pipeline. Reads config.yaml plus CLI flags,
 creates the shared-memory ring buffers in this (parent) process, spawns one
 multiprocessing.Process per worker, restarts workers that crash, and cleans
-up on SIGINT / SIGTERM.
+up on SIGINT / SIGTERM / SIGHUP.
 
-Usage:
-    python start.py                            # uses config.yaml defaults
-    python start.py --config my_config.yaml    # custom config
-    python start.py --recording                # enable recording
-    python start.py --debug                    # verbose logging
-    python start.py --enable-slam              # enable SLAM + mapping pipeline
-    python start.py --config config_cpu.yaml   # workstation profile (map-free depth_ftg)
+Usage (the config is required, so the car never runs a profile by accident):
+    python start.py --config config.yaml       # Jetson on the car
+    python start.py --config config_cpu.yaml   # workstation + OAK-D (map-free depth_ftg)
+    python start.py --config config.yaml --enable-slam   # SLAM + mapping + track control
+    python start.py --config config.yaml --recording     # record the buffers
+    python start.py --config config.yaml --debug         # verbose logging
 """
 
 from __future__ import annotations
@@ -52,7 +51,6 @@ from workers import (
     SLAMWorker,
     StateWorker,
     VisionWorker,
-    WebPublishWorker,
     ZMQPublishWorker,
     ZMQSensorWorker,
 )
@@ -69,8 +67,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config",
-        default="config.yaml",
-        help="Path to YAML configuration file (default: config.yaml)",
+        required=True,
+        help="YAML configuration file (config.yaml on the car, config_cpu.yaml on a workstation)",
     )
     parser.add_argument(
         "--recording", "-r",
@@ -85,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enable-slam",
         action="store_true",
-        help="Enable SLAM + mapping + PID pipeline",
+        help="Enable SLAM + mapping (needed by the track-following modes)",
     )
     parser.add_argument(
         "--oakd-imu",
@@ -104,6 +102,8 @@ _shutting_down = False
 _armed_event = None
 _keyboard = None
 MAX_RESTARTS = 3
+# a restart of any of these disarms the car: the command chain was interrupted
+CRITICAL_WORKERS = {"actuator", "control", "state", "camera", "slam", "zmq_sensor"}
 
 
 def _release_buffers() -> None:
@@ -132,7 +132,9 @@ def _shutdown(signum=None, frame=None) -> None:
     for w in _workers:
         w.stop()
 
-    for p in _processes:
+    # actuator first, so its neutral write goes out before anything else is torn down
+    order = sorted(_processes, key=lambda p: p.name != "actuator")
+    for p in order:
         p.join(timeout=5)
         if p.is_alive():
             logging.warning(f"Worker {p.name} did not exit in time — terminating")
@@ -292,10 +294,7 @@ def main() -> None:
             create=True,
         )
         _buffers.extend([b for b in [pc_buf, boundary_buf] if b is not None])
-    needs_lidar = use_zmq and (
-        control_mode == "lidar_pid"
-        or (enable_slam and config.get("use_zmq_pose", False))
-    )
+    needs_lidar = use_zmq and enable_slam and use_zmq_pose
     if needs_lidar:
         lidar_buf = LidarBuffer(
             slots=buf_cfg.get("lidar", {}).get("slots", 16),
@@ -335,9 +334,6 @@ def main() -> None:
         else:
             logger.warning(f"use_saved_map=true but no .npy files found at {saved_map_path}")
 
-    seg_config_path = config.get(
-        "segmentation_config_path", "pilot_vision/models/default/config.yaml"
-    )
     resolution = config.get("resolution", [640, 400])
     fps = config.get("fps", 30)
     vision_cfg = config.get("vision", {})
@@ -346,8 +342,6 @@ def main() -> None:
     i2c_bus = config.get("i2c_bus")
     slam_cfg = config.get("slam", {})
     mapping_cfg = config.get("mapping", {})
-    pid_cfg = config.get("pid", {})
-    ftg_cfg = config.get("ftg", {})
 
     if isinstance(i2c_address, str):
         i2c_address = int(i2c_address, 0)
@@ -418,16 +412,15 @@ def main() -> None:
                 )
             )
 
-    # no segmentation needed for LIDAR mapping, so skip vision there
-    lidar_mapping_mode = use_zmq and use_zmq_pose and enable_slam
-    if not lidar_mapping_mode:
+    # Drivable-track segmentation. Nothing consumes seg_buf yet (it is recorded
+    # and published as telemetry), so it is off unless vision.enabled is set.
+    if vision_cfg.get("enabled", False):
         _workers.append(
             VisionWorker(
                 name="vision",
                 input_buffer=frame_buf,
                 output_buffer=seg_buf,
-                model_config=seg_config_path,
-                mode=vision_cfg.get("model", "pilot_vision"),
+                mode=vision_cfg.get("model", "ground_plane"),
                 onnx_model=vision_cfg.get("onnx_model", "track_seg.onnx"),
                 threshold=vision_cfg.get("threshold"),
                 camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
@@ -435,39 +428,17 @@ def main() -> None:
             )
         )
 
-    # Control. The pose-based modes (pid, ftg, TRACK_MODES) need a pose source,
-    # i.e. SLAM or sim ground truth. depth_ftg / vae / bc only need frame_buf,
-    # and lidar_pid reads the sim LIDAR scan.
-    if control_mode == "lidar_pid":
-        _workers.append(
-            ControlWorker(
-                name="control",
-                mode="lidar_pid",
-                output_buffer=ctrl_buf,
-                lidar_buffer=lidar_buf,
-                pid_config=pid_cfg,
-            )
-        )
-    elif control_mode == "pid" and has_pose_source:
-        _workers.append(
-            ControlWorker(
-                name="control",
-                mode="pid",
-                output_buffer=ctrl_buf,
-                pose_buffer=pose_buf,
-                boundary_buffer=boundary_buf,
-                mapping_done_event=mapping_done_event,
-                pid_config=pid_cfg,
-                bev_axes=mapping_cfg.get("bev_axes", [0, 2]),
-                forward_axis=mapping_cfg.get("forward_axis", 2),
-            )
-        )
-    elif control_mode in TRACK_MODES and has_pose_source:
+    # Control. The track modes need a pose source (SLAM or sim ground truth);
+    # depth_ftg / vae / bc only need frame_buf.
+    global _armed_event
+    _armed_event = mp.Event()
+    if control_mode in TRACK_MODES and has_pose_source:
         _workers.append(
             ControlWorker(
                 name="control",
                 mode=control_mode,
                 output_buffer=ctrl_buf,
+                armed_event=_armed_event,
                 state_buffer=state_buf,
                 boundary_buffer=boundary_buf,
                 mapping_done_event=mapping_done_event,
@@ -484,6 +455,7 @@ def main() -> None:
                 name="control",
                 mode=control_mode,
                 output_buffer=ctrl_buf,
+                armed_event=_armed_event,
                 frame_buffer=frame_buf,
                 camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
                 depth_ftg_config=depth_ftg_cfg,
@@ -492,26 +464,12 @@ def main() -> None:
                 vehicle_params=config.get("vehicle_params", "vehicle_params.yaml"),
             )
         )
-    elif control_mode == "ftg" and has_pose_source:
-        _workers.append(
-            ControlWorker(
-                name="control",
-                mode="ftg",
-                output_buffer=ctrl_buf,
-                pose_buffer=pose_buf,
-                boundary_buffer=boundary_buf,
-                mapping_done_event=mapping_done_event,
-                ftg_config=ftg_cfg,
-                bev_axes=mapping_cfg.get("bev_axes", [0, 2]),
-                forward_axis=mapping_cfg.get("forward_axis", 2),
-            )
-        )
     else:
-        needs_pose = control_mode in TRACK_MODES or control_mode in ("pid", "ftg")
+        needs_pose = control_mode in TRACK_MODES
         hint = (
             " — it needs a pose source: run with --enable-slam (or use_zmq_pose in the simulator)"
             if needs_pose else
-            " — valid modes: " + ", ".join(sorted(set(TRACK_MODES) | {"depth_ftg", "vae", "bc", "pid", "ftg", "lidar_pid"}))
+            " — valid modes: " + ", ".join((*TRACK_MODES, "depth_ftg", "vae", "bc"))
         )
         _release_buffers()
         raise SystemExit(f"control_mode {control_mode!r} cannot run with this configuration{hint}")
@@ -536,8 +494,6 @@ def main() -> None:
 
     # actuator: I2C to the hardware and/or ZMQ control out to the sim.
     # Stays neutral until the operator arms from the terminal
-    global _armed_event
-    _armed_event = mp.Event()
     _workers.append(
         ActuatorWorker(
             name="actuator",
@@ -642,25 +598,6 @@ def main() -> None:
                 )
             )
 
-    # web telemetry (optional)
-    web_cfg = config.get("web_publish", {})
-    if web_cfg.get("enabled", False):
-        _workers.append(
-            WebPublishWorker(
-                name="web_publish",
-                pose_buffer=pose_buf,
-                boundary_buffer=boundary_buf,
-                control_buffer=ctrl_buf,
-                endpoint=web_cfg.get("endpoint", "http://localhost:8080/api/telemetry"),
-                publish_interval=web_cfg.get("interval", 1.0),
-                timeout=web_cfg.get("timeout", 2.0),
-                vehicle_id=web_cfg.get("vehicle_id", "pilot_1"),
-                max_trajectory_pts=web_cfg.get("max_trajectory_pts", 500),
-                bev_axes=mapping_cfg.get("bev_axes", [0, 2]),
-            )
-        )
-        logger.info("Web publish worker enabled → %s", web_cfg.get("endpoint"))
-
     # ZMQ telemetry for the sim visualiser
     zmq_publish_cfg = config.get("zmq_publish", {})
     if use_zmq and zmq_publish_cfg.get("enabled", False):
@@ -668,7 +605,6 @@ def main() -> None:
             ZMQPublishWorker(
                 name="zmq_publish",
                 port=zmq_telemetry_port,
-                control_buffer=ctrl_buf,
                 pose_buffer=pose_buf if zmq_publish_cfg.get("pose", False) else None,
                 seg_buffer=seg_buf if zmq_publish_cfg.get("segmentation", False) else None,
                 boundary_buffer=boundary_buf if zmq_publish_cfg.get("boundary", False) else None,
@@ -678,8 +614,8 @@ def main() -> None:
         )
         logger.info(f"ZMQ telemetry publisher enabled on port {zmq_telemetry_port}")
 
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _shutdown)
 
     # spawn
     _restart_counts: Dict[str, int] = {w.name: 0 for w in _workers}
@@ -740,28 +676,36 @@ def main() -> None:
             _next_health_check = time.monotonic() + 1.0
 
             for i, (w, p) in enumerate(zip(_workers, _processes)):
-                if not p.is_alive() and not _shutting_down:
-                    exit_code = p.exitcode
-                    _restart_counts[w.name] = _restart_counts.get(w.name, 0) + 1
-                    if _restart_counts[w.name] > MAX_RESTARTS:
-                        if _restart_counts[w.name] == MAX_RESTARTS + 1:
-                            logger.error(
-                                f"Worker {w.name} exceeded {MAX_RESTARTS} "
-                                f"restarts — disabling"
-                            )
-                        continue
-                    logger.warning(
-                        f"Worker {w.name} (pid={p.pid}) exited with code "
-                        f"{exit_code} — restarting "
-                        f"({_restart_counts[w.name]}/{MAX_RESTARTS}) …"
-                    )
-                    w._stop_event = mp.Event()
-                    new_p = mp.Process(target=w.run, name=w.name, daemon=False)
-                    new_p.start()
-                    _processes[i] = new_p
-                    logger.info(
-                        f"Restarted worker: {w.name} (new pid={new_p.pid})"
-                    )
+                if p.is_alive() or _shutting_down or _restart_counts.get(w.name, 0) > MAX_RESTARTS:
+                    continue
+                exit_code = p.exitcode
+                if w.name in CRITICAL_WORKERS and _armed_event.is_set():
+                    _armed_event.clear()
+                    logger.error(f"Worker {w.name} died — DISARMED. Press [a] to re-arm once it is back")
+                if w.name == "slam" and mapping_done_event is not None and mapping_done_event.is_set():
+                    # a new SLAM process starts an empty map; localization is gone
+                    _restart_counts[w.name] = MAX_RESTARTS + 1
+                    logger.error("SLAM died after mapping — the map is lost. Restart the pipeline to re-map")
+                    continue
+                if w.name == "mapping" and mapping_done_event is not None and mapping_done_event.is_set():
+                    _restart_counts[w.name] = MAX_RESTARTS + 1
+                    continue
+                _restart_counts[w.name] = _restart_counts.get(w.name, 0) + 1
+                if _restart_counts[w.name] > MAX_RESTARTS:
+                    logger.error(f"Worker {w.name} exceeded {MAX_RESTARTS} restarts — disabling")
+                    if w.name == "actuator":
+                        logger.error("No actuator output — shutting down")
+                        _shutdown()
+                    continue
+                logger.warning(
+                    f"Worker {w.name} (pid={p.pid}) exited with code {exit_code} — restarting "
+                    f"({_restart_counts[w.name]}/{MAX_RESTARTS}) …"
+                )
+                w._stop_event = mp.Event()
+                new_p = mp.Process(target=w.run, name=w.name, daemon=False)
+                new_p.start()
+                _processes[i] = new_p
+                logger.info(f"Restarted worker: {w.name} (new pid={new_p.pid})")
     except KeyboardInterrupt:
         pass
     finally:

@@ -137,21 +137,3 @@ class GroundPlaneSegmenter:
         small = cv2.morphologyEx(small, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
         return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
 
-
-def to_track_mask(output, shape) -> np.ndarray | None:
-    """Normalise a legacy pilot_vision model output to a uint8 track mask.
-
-    Those models return a boolean mask, a depth image with non-track pixels
-    zeroed, or (for ``Threshold``) a tuple whose first element is an image.
-    """
-    if output is None:
-        return None
-    if isinstance(output, tuple):
-        output = output[0]
-    out = np.asarray(output)
-    if out.ndim == 3:
-        out = out.any(axis=2)
-    mask = (out > 0).astype(np.uint8)
-    if mask.shape != tuple(shape):
-        mask = cv2.resize(mask, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
-    return mask

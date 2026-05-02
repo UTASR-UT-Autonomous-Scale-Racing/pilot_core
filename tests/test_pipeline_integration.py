@@ -189,8 +189,8 @@ class TestSyntheticPipeline:
             pcb.unlink()
             bb.unlink()
 
-    def test_full_mapping_to_pid_pipeline(self):
-        """mapping -> boundary extraction -> PID, end to end on synthetic data."""
+    def test_full_mapping_to_track_control_pipeline(self):
+        """mapping -> boundary extraction -> pure pursuit, end to end on synthetic data."""
         from workers import ControlWorker, MappingWorker
 
         pn = f"fp_p_{_uid()}"
@@ -250,39 +250,31 @@ class TestSyntheticPipeline:
             assert len(outer_line) > 0
             assert len(inner_line) > 0
 
-            ctrl = ControlWorker(
-                name="control",
-                mode="pid",
-                output_buffer=cb,
-                pose_buffer=pb,
-                boundary_buffer=bb,
-                mapping_done_event=done_ev,
-                pid_config={
-                    "kp_steer": 1.0,
-                    "ki_steer": 0.0,
-                    "kd_steer": 0.1,
-                    "target_throttle": 0.3,
-                    "noise_std": 0.0,
-                },
-            )
-            ctrl._logger = MagicMock()
-            ctrl.setup()
+            from control.types import VehicleState
+            from shared_buffer import StateBuffer
 
-            T = np.eye(4, dtype=np.float32)
-            T[0, 3] = 6.5
-            T[2, 3] = 0.0
-            pb.write(T)
-
-            for _ in range(5):
+            stb = StateBuffer(slots=4, name=f"fp_st_{_uid()}", create=True)
+            try:
+                ctrl = ControlWorker(
+                    name="control",
+                    mode="pure_pursuit",
+                    output_buffer=cb,
+                    state_buffer=stb,
+                    boundary_buffer=bb,
+                    mapping_done_event=done_ev,
+                )
+                ctrl._logger = MagicMock()
+                ctrl.setup()
+                stb.write(VehicleState(t=time.monotonic(), x=6.5, y=0.0, yaw=np.pi / 2, v=0.5))
                 ctrl.step()
+            finally:
+                stb.unlink()
 
             result = cb.read_latest()
             assert result is not None
             _, steer, throttle = result
             assert 0.0 <= steer <= 1.0
-            assert 0.0 <= throttle <= 1.0
-            # signed 0.3 maps to 0.65 in the [0, 1] buffer (0.5 = neutral)
-            assert abs(throttle - 0.65) < 0.05
+            assert 0.5 < throttle <= 1.0
         finally:
             pb.unlink()
             sb.unlink()
@@ -343,32 +335,29 @@ class TestNullPipeline:
             pcb.unlink()
             bb.unlink()
 
-    def test_control_pid_empty_no_crash(self):
+    def test_control_track_mode_waits_for_mapping(self):
+        from shared_buffer import StateBuffer
         from workers import ControlWorker
-        cn = f"null_c_{_uid()}"
-        pn = f"null_p_{_uid()}"
-        bn = f"null_b_{_uid()}"
-        cb = ControlBuffer(slots=4, name=cn, create=True)
-        pb = PoseBuffer(slots=4, name=pn, create=True)
-        bb = TrackBoundaryBuffer(slots=2, name=bn, create=True)
+        cb = ControlBuffer(slots=4, name=f"null_c_{_uid()}", create=True)
+        stb = StateBuffer(slots=4, name=f"null_st_{_uid()}", create=True)
+        bb = TrackBoundaryBuffer(slots=2, name=f"null_b_{_uid()}", create=True)
         ctx = mp.get_context("spawn")
         done_ev = ctx.Event()
         try:
             w = ControlWorker(
-                name="control", mode="pid",
-                output_buffer=cb, pose_buffer=pb,
+                name="control", mode="pure_pursuit",
+                output_buffer=cb, state_buffer=stb,
                 boundary_buffer=bb, mapping_done_event=done_ev,
-                pid_config={},
             )
             w._logger = MagicMock()
             w.setup()
-            for _ in range(5):
+            for _ in range(3):
                 w.step()
             # mapping never finished, so no control output
             assert cb.read_latest() is None
         finally:
             cb.unlink()
-            pb.unlink()
+            stb.unlink()
             bb.unlink()
 
 
@@ -649,7 +638,7 @@ class TestStartCLI:
         from start import parse_args
         import sys
         old = sys.argv
-        sys.argv = ["start.py"]
+        sys.argv = ["start.py", "--config", "config.yaml"]
         args = parse_args()
         sys.argv = old
         assert args.config == "config.yaml"
@@ -662,13 +651,24 @@ class TestStartCLI:
         from start import parse_args
         import sys
         old = sys.argv
-        sys.argv = ["start.py", "--recording", "--debug", "--enable-slam", "--oakd-imu"]
+        sys.argv = ["start.py", "--config", "config.yaml", "--recording", "--debug", "--enable-slam", "--oakd-imu"]
         args = parse_args()
         sys.argv = old
         assert args.recording is True
         assert args.debug is True
         assert args.enable_slam is True
         assert args.oakd_imu is True
+
+    def test_config_is_required(self):
+        from start import parse_args
+        import sys
+        old = sys.argv
+        sys.argv = ["start.py"]
+        try:
+            with pytest.raises(SystemExit):
+                parse_args()
+        finally:
+            sys.argv = old
 
     def test_load_config(self):
         from start import load_config
@@ -682,57 +682,3 @@ class TestStartCLI:
         from start import load_config
         with pytest.raises(FileNotFoundError):
             load_config("nonexistent_config.yaml")
-
-
-class TestFTGControllerPipelineIntegration:
-    """TrackFTGController should be a drop-in for PID in the ControlWorker path."""
-
-    def test_ftg_reads_boundaries_produces_control(self):
-        from workers.track_ftg_controller import TrackFTGController
-
-        ftg = TrackFTGController(noise_std=0.0, num_beams=180)
-
-        t = np.linspace(0, 2 * np.pi, 80, endpoint=False)
-        outer = np.column_stack([3.0 * np.cos(t), 2.0 * np.sin(t)])
-        inner = np.column_stack([2.0 * np.cos(t), 1.0 * np.sin(t)])
-
-        pos = np.array([0.0, 0.0])
-        heading = 0.0
-
-        s, th = ftg.step(pos, heading, outer, inner)
-        assert -1.0 <= s <= 1.0
-        assert -1.0 <= th <= 1.0
-
-    def test_ftg_and_pid_same_interface(self):
-        from workers.track_ftg_controller import TrackFTGController
-        from workers.track_pid_controller import TrackPIDController
-
-        t = np.linspace(0, 2 * np.pi, 60, endpoint=False)
-        outer = np.column_stack([4.0 * np.cos(t), 3.0 * np.sin(t)])
-        inner = np.column_stack([2.5 * np.cos(t), 1.5 * np.sin(t)])
-        pos = np.array([1.0, 0.0])
-
-        ftg = TrackFTGController(noise_std=0.0)
-        pid = TrackPIDController(noise_std=0.0)
-
-        s_ftg, t_ftg = ftg.step(pos, 0.0, outer, inner)
-        s_pid, t_pid = pid.step(pos, 0.0, outer, inner)
-
-        for val in (s_ftg, t_ftg, s_pid, t_pid):
-            assert isinstance(val, float)
-            assert -1.0 <= val <= 1.0
-
-    def test_ftg_multi_step_no_crash(self):
-        from workers.track_ftg_controller import TrackFTGController
-
-        ftg = TrackFTGController(noise_std=0.0)
-        t = np.linspace(0, 2 * np.pi, 80, endpoint=False)
-        outer = np.column_stack([5.0 * np.cos(t), 4.0 * np.sin(t)])
-        inner = np.column_stack([3.0 * np.cos(t), 2.0 * np.sin(t)])
-
-        for i in range(50):
-            angle = i * 0.13
-            pos = np.array([np.cos(angle) * 4.0, np.sin(angle) * 3.0])
-            s, th = ftg.step(pos, angle, outer, inner)
-            assert -1.0 <= s <= 1.0
-            assert -1.0 <= th <= 1.0

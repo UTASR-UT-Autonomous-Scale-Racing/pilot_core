@@ -1,7 +1,7 @@
 """
 The ControlBuffer [0, 1] contract between the controllers, ControlWorker and
-ActuatorWorker. 0.5 is neutral; PID/FTG output is [-1, 1] and gets mapped by
-signed_to_unit(). The actuator has to clamp bad values (NaN included), not crash.
+ActuatorWorker. 0.5 is neutral; controller output is signed [-1, 1] and gets
+mapped by signed_to_unit(). The actuator has to clamp bad values (NaN included), not crash.
 """
 
 from __future__ import annotations
@@ -13,8 +13,9 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from shared_buffer import ControlBuffer, PoseBuffer, TrackBoundaryBuffer
-from workers.control_worker import ControlWorker, pose_to_bev, signed_to_unit
+from shared_buffer import ControlBuffer
+from workers.bev import pose_to_bev
+from workers.control_worker import signed_to_unit
 
 
 def _uid() -> str:
@@ -55,74 +56,6 @@ class TestPoseToBev:
         np.testing.assert_allclose(pos, [1.5, -2.0])
         assert np.isclose(np.cos(heading), np.cos(expected), atol=1e-6)
         assert np.isclose(np.sin(heading), np.sin(expected), atol=1e-6)
-
-    def test_straight_at_target_gives_zero_steer(self):
-        from workers.track_pid_controller import TrackPIDController
-
-        pid = TrackPIDController(kp_steer=1.0, ki_steer=0.0, kd_steer=0.0, noise_std=0.0)
-        T = np.eye(4, dtype=np.float32)
-        T[:3, 2] = (1, 0, 0)
-        pos, heading = pose_to_bev(T)
-        outer = np.array([[5.0, 1.0]], dtype=np.float32)
-        inner = np.array([[5.0, -1.0]], dtype=np.float32)
-        steer, _ = pid.step(pos, heading, outer, inner)
-        assert steer == pytest.approx(0.0, abs=1e-6)
-
-
-class TestSteeringDirection:
-    """A track bending left has to give a left command (buffer < 0.5), since
-    PWM above neutral steers right on the car."""
-
-    @pytest.mark.parametrize("bend, left", [(+0.4, True), (-0.4, False)])
-    def test_pid_turns_towards_track(self, bend, left):
-        from workers.track_pid_controller import TrackPIDController
-
-        pid = TrackPIDController(kp_steer=1.0, ki_steer=0.0, kd_steer=0.0, noise_std=0.0)
-        # car at origin heading +X (camera forward axis Z lined up with world X)
-        T = np.eye(4, dtype=np.float32)
-        T[:3, 2] = (1, 0, 0)
-        pos, heading = pose_to_bev(T)
-        # walls either side of a track whose tangent is rotated by `bend` rad,
-        # positive is CCW seen from above, i.e. to the car's left
-        tangent = np.array([np.cos(bend), np.sin(bend)])
-        normal = np.array([-tangent[1], tangent[0]])
-        outer = (pos + normal * -1.0)[None].astype(np.float32)
-        inner = (pos + normal * +1.0)[None].astype(np.float32)
-        steer_signed, _ = pid.step(pos, heading, outer, inner)
-        steer_unit, _ = signed_to_unit(steer_signed, 0.0)
-        assert (steer_unit < 0.5) == left
-
-
-class TestControlWorkerPIDContract:
-
-    def test_pid_output_in_unit_range(self, track_boundaries):
-        outer, inner = track_boundaries
-        ctrl = ControlBuffer(slots=4, name=f"cc_ctrl_{_uid()}", create=True)
-        pose = PoseBuffer(slots=4, name=f"cc_pose_{_uid()}", create=True)
-        bnd = TrackBoundaryBuffer(slots=2, name=f"cc_bnd_{_uid()}", create=True)
-        try:
-            bnd.write(outer, inner)
-            w = ControlWorker(
-                name="control", mode="pid", output_buffer=ctrl,
-                pose_buffer=pose, boundary_buffer=bnd,
-                pid_config={"kp_steer": 5.0, "noise_std": 0.0},
-            )
-            w._logger = MagicMock()
-            w.setup()
-
-            for theta in np.linspace(0, 2 * np.pi, 24, endpoint=False):
-                T = np.eye(4, dtype=np.float32)
-                T[0, 3], T[2, 3] = 6.5 * np.cos(theta), 4.0 * np.sin(theta)
-                # heading points away from the track on purpose, to force big errors
-                T[0, 2], T[2, 2] = np.cos(theta), np.sin(theta)
-                pose.write(T)
-                w.step()
-                _, steer, thr = ctrl.read_latest()
-                assert 0.0 <= steer <= 1.0
-                assert 0.0 <= thr <= 1.0
-        finally:
-            for b in (ctrl, pose, bnd):
-                b.unlink()
 
 
 class TestActuatorClamp:

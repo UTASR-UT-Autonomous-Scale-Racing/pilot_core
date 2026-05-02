@@ -19,7 +19,7 @@ import pytest
 
 from control.depth_ftg import Intrinsics
 from vision.data import bce_dice_loss, find_pairs, load_pair, track_iou
-from vision.segmenters import GroundPlaneSegmenter, to_track_mask
+from vision.segmenters import GroundPlaneSegmenter
 
 K = Intrinsics(396.0, 395.8, 327.0, 189.0)      # OAK-D RGB at 640×400
 H, W = 400, 640
@@ -76,22 +76,7 @@ class TestGroundPlane:
         assert GroundPlaneSegmenter(K).get_mask(np.zeros((H, W), np.float32)).sum() == 0
 
 
-# --- legacy outputs, dataset, metrics ---
-
-@pytest.mark.parametrize("output, expected_sum", [
-    (np.array([[True, False], [False, False]]), 1),
-    (np.array([[0.0, 2.5], [1.0, 0.0]], np.float32), 2),          # depth with non-track zeroed
-    ((np.array([[[0, 0, 0], [9, 0, 0]], [[0, 0, 0], [0, 0, 0]]], np.uint8), 0.6, 0.5), 1),  # Threshold tuple
-])
-def test_to_track_mask(output, expected_sum):
-    mask = to_track_mask(output, (2, 2))
-    assert mask.dtype == np.uint8 and mask.shape == (2, 2) and mask.sum() == expected_sum
-
-
-def test_to_track_mask_resizes_and_passes_none():
-    assert to_track_mask(np.ones((4, 4)), (8, 8)).shape == (8, 8)
-    assert to_track_mask(None, (8, 8)) is None
-
+# --- dataset, metrics ---
 
 def test_track_iou():
     a = np.zeros((4, 4), np.uint8)
@@ -220,11 +205,6 @@ def _run_worker(**kwargs):
 def test_worker_ground_plane_mode():
     mask = _run_worker(mode="ground_plane", camera_settings="orbslam_oakd_rgbd.yaml")
     assert mask.shape == (H, W) and set(np.unique(mask)) <= {0, 1} and mask.sum() > 0
-
-
-def test_worker_pilot_vision_mode_outputs_mask():
-    mask = _run_worker(mode="pilot_vision", model_config="pilot_vision/models/default/config.yaml")
-    assert set(np.unique(mask)) <= {0, 1}
 
 
 def test_worker_onnx_mode(tmp_path):

@@ -87,6 +87,35 @@ class TestActuatorSafety:
         _pump(w, 0.03)
         assert self._last_output(w)[1] == pytest.approx(0.5)   # over the cap, coast
 
+    def test_i2c_silent_while_disarmed(self, rig):
+        w, ctrl, _, armed = rig
+        w._pwm = w._pwm._mock_wraps          # the real mapper, for .neutral
+        w._dummy = False
+        w._write_i2c = MagicMock()
+        ctrl.write(*signed_to_unit(0.5, 0.3))
+        _pump(w, 0.05)
+        w._write_i2c.assert_not_called()           # RC receiver keeps control
+        armed.set()
+        ctrl.write(*signed_to_unit(0.5, 0.3))
+        _pump(w, 0.05)
+        assert w._write_i2c.call_args[0] == w._pwm.to_pwm(*signed_to_unit(0.5, 0.3))
+        armed.clear()
+        w._write_i2c.reset_mock()
+        _pump(w, 0.05)
+        w._write_i2c.assert_called_once_with(*w._pwm.neutral)   # one neutral, then silence
+
+    def test_step_failure_writes_neutral(self, rig):
+        w, ctrl, _, armed = rig
+        w._pwm = w._pwm._mock_wraps          # the real mapper, for .neutral
+        w._dummy = False
+        w._write_i2c = MagicMock()
+        w._ctrl_buf = MagicMock()
+        w._ctrl_buf.read_latest.side_effect = RuntimeError("boom")
+        w._next_tick = 0.0
+        with pytest.raises(RuntimeError):
+            w.step()
+        w._write_i2c.assert_called_once_with(*w._pwm.neutral)
+
 
 # state worker
 
@@ -142,6 +171,35 @@ def test_control_worker_track_mode(mode):
         assert w._follower is not None
         assert steer_u > 0.5          # buffer: 1 = full right
         assert thr_u > 0.5            # forward
+    finally:
+        ctrl.unlink()
+        sb.unlink()
+        bb.unlink()
+
+
+def test_control_worker_resets_controller_on_arm():
+    from workers import ControlWorker
+
+    outer, inner, centre = oval_track()
+    ctrl = ControlBuffer(slots=4, name=f"cw_c_{_uid()}", create=True)
+    sb = StateBuffer(slots=4, name=f"cw_s_{_uid()}", create=True)
+    bb = TrackBoundaryBuffer(slots=2, name=f"cw_b_{_uid()}", create=True)
+    armed = mp.get_context("spawn").Event()
+    try:
+        bb.write(outer.astype(np.float32), inner.astype(np.float32))
+        w = ControlWorker(name="control", mode="pure_pursuit", output_buffer=ctrl,
+                          state_buffer=sb, boundary_buffer=bb, armed_event=armed)
+        w._logger = MagicMock()
+        w.setup()
+        x, y = centre[0]
+        sb.write(VehicleState(t=time.monotonic(), x=x, y=y, yaw=-np.pi / 2, v=0.0))
+        w.step()
+        w._follower.reset = MagicMock()
+        w.step()
+        w._follower.reset.assert_not_called()
+        armed.set()
+        w.step()
+        w._follower.reset.assert_called_once()
     finally:
         ctrl.unlink()
         sb.unlink()

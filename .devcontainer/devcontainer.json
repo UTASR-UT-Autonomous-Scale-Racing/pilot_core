@@ -12,10 +12,11 @@
     "--network=host",
     "--ipc=host"
   ],
-  // Forward OAK-D (Movidius) and Arduino/I2C devices into container
+  // --privileged already exposes /dev (incl. /dev/i2c-1 for the Arduino).
+  // /dev/bus/usb is bind-mounted so the OAK-D stays visible when it re-enumerates
+  // (bootloader -> application) after the container has started.
   "mounts": [
     "type=bind,source=/dev/bus/usb,target=/dev/bus/usb",
-    "type=bind,source=/dev/i2c-1,target=/dev/i2c-1",
     "type=bind,source=/tmp,target=/tmp"
   ],
   // Container environment
@@ -26,8 +27,10 @@
     "PYTHONUNBUFFERED": "1",
     "DISPLAY": "${localEnv:DISPLAY}"
   },
-  // Post-create: submodules + Python environment (build ORB-SLAM3 per docs/slam.md)
-  "postCreateCommand": "git submodule update --init && python3 -m venv --system-site-packages .venv && .venv/bin/pip install -r requirements.txt && echo 'source /workspaces/pilot_core/.venv/bin/activate' >> ~/.bashrc",
+  // Post-create: quick-start submodules (add --with-slam for ORB_SLAM3) + Python environment.
+  // pip is upgraded first: Ubuntu 22.04's pip 22.0 can't do PEP 660 editable installs.
+  // Build ORB-SLAM3 per docs/slam.md (build deps are in the image).
+  "postCreateCommand": "scripts/setup.sh && python3 -m venv --system-site-packages .venv && .venv/bin/python -m pip install --upgrade pip && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install --no-deps -e . && echo 'source /workspaces/pilot_core/.venv/bin/activate' >> ~/.bashrc",
   // VS Code settings
   "customizations": {
     "vscode": {

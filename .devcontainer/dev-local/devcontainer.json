@@ -5,11 +5,15 @@
     "context": "../.."
   },
   // No-hardware dev container: synthetic sensors, CPU only (Dockerfile.dev-local).
+  // No devices needed (synthetic sensors), so no --privileged. --ipc=host gives
+  // the shared-memory ring buffers a large enough /dev/shm.
   "runArgs": [
-    "--privileged",
     "--network=host",
     "--ipc=host"
   ],
+  // The image installs pilot_core editable at /app/pilot_core, which is also where
+  // VS Code mounts the workspace, so edits are picked up without a rebuild.
+  "workspaceMount": "source=${localWorkspaceFolder},target=/app/pilot_core,type=bind",
   // Container environment
   "containerEnv": {
     "PILOT_SYNTHETIC": "1",

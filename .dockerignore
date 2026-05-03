@@ -1,0 +1,41 @@
+# Keep the Docker build context small and free of host-built artefacts.
+.git
+**/.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+.idea
+.vscode
+
+# Host builds (rebuild inside the image; they link against host libraries)
+build
+**/build
+ORB_SLAM3/build*
+ORB_SLAM3/lib
+ORB_SLAM3/Thirdparty/*/build
+ORB_SLAM3/Thirdparty/*/lib
+orbslam3_wrapper/build
+orbslam3_python*.so
+ORB_SLAM3/Vocabulary/ORBvoc.txt
+
+# Data, models and outputs
+test_output
+datasets
+recordings
+temp
+rl/logs
+rl/checkpoints
+*.onnx
+*.npz
+*.pt
+*.pth
+*.mp4
+*.db
+profile.out
+.coverage

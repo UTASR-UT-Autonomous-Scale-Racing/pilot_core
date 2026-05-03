@@ -1,6 +1,7 @@
-# Runs the tests in the no-hardware dev-local container (Dockerfile.dev-local)
+# Runs the tests in the no-hardware dev-local container (Dockerfile.dev-local).
+# The test command is the image's CMD (same as CI).
 #   docker compose -f docker-compose.dev-local.yaml up --build
-version: "3.8"
+#   docker compose -f docker-compose.dev-local.yaml run --rm dev-local python start.py --config config_dev_local.yaml
 
 services:
   dev-local:
@@ -8,12 +9,10 @@ services:
       context: .
       dockerfile: Dockerfile.dev-local
     container_name: pilot_core_dev_local
-    environment:
-      - PILOT_SYNTHETIC=1
-      - PYTHONUNBUFFERED=1
+    # shared-memory ring buffers need more than Docker's 64 MB /dev/shm default
+    ipc: host
     volumes:
-      # bind mount so edits show up without a rebuild
+      # bind mount so edits show up without a rebuild (the editable install
+      # points at /app/pilot_core, so the mounted sources are what runs)
       - .:/app/pilot_core
     working_dir: /app/pilot_core
-    command: >
-      pytest tests/ -v --timeout=60 -x

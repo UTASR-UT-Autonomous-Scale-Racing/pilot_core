@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 branch="${1:-main}"
 
-for repo in pilot_vision firmware; do
+for repo in firmware; do
     # submodules have a .git file, not a dir
     if [ -e "$repo/.git" ]; then
         echo "Checking out '$branch' in $repo ..."

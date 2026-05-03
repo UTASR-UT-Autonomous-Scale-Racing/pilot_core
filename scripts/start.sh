@@ -1,33 +1,38 @@
-#!/bin/bash
-# Docker deploy on the Jetson. Pulls, sanity-checks the config, sets perf
-# mode and the OAK-D udev rule, then builds and runs the image.
-#   scripts/start.sh                    # container runs start.py --config config.yaml
-#   scripts/start.sh --config X.yaml    # args replace the image CMD (passed to start.py)
-set -e
+#!/usr/bin/env bash
+# Docker deploy on the Jetson. Pulls, checks the config exists, sets perf
+# mode and the OAK-D udev rule, then builds and runs the image (foreground).
+#   scripts/start.sh                              # start.py --config config.yaml
+#   scripts/start.sh --config X.yaml [--enable-slam ...]   # args are passed to start.py
+set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# NB: submodules go to their remote branch tips, not the pinned commits
-git pull
-git submodule update --recursive --remote
+# pilot_core fast-forward, submodules at the commits pilot_core pins
+git pull --ff-only
+git submodule sync --quiet
+git submodule update --init --recursive
 
-# make sure the config and the segmentation config it points to exist
-CONFIG_FILE="config.yaml"
+# start.py args: config.yaml unless the caller passes --config
+args=("$@")
+CONFIG_FILE=""
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+        --config) CONFIG_FILE="${args[$((i + 1))]:-}" ;;
+        --config=*) CONFIG_FILE="${args[$i]#--config=}" ;;
+    esac
+done
+if [ -z "$CONFIG_FILE" ]; then
+    CONFIG_FILE="config.yaml"
+    args=(--config "$CONFIG_FILE" "${args[@]}")
+fi
+
+# paths are relative to the repo root, which is the container's workdir
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Error: Configuration file not found: $CONFIG_FILE"
+    echo "Error: Configuration file not found: $CONFIG_FILE" >&2
     exit 1
 fi
-
-SEGMENTATION_CONFIG=$(grep '^segmentation_config_path:' "$CONFIG_FILE" | awk '{print $2}')
-
-if [ ! -f "$SEGMENTATION_CONFIG" ]; then
-    echo "Error: Segmentation config not found at $SEGMENTATION_CONFIG"
-    exit 1
-fi
-
-echo "-> Successfully verified configuration files."
+echo "-> Verified configuration: $CONFIG_FILE"
 echo ""
 
-# hardware
 # perf mode, skipped if this isn't a Jetson
 if command -v nvpmodel &> /dev/null; then
     sudo nvpmodel -m 0
@@ -35,35 +40,35 @@ if command -v nvpmodel &> /dev/null; then
     echo "Set Jetson performance mode to MAX-N."
 fi
 
-# OAK-D (Movidius, vendor 03e7) without root
-echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"' | sudo tee /etc/udev/rules.d/80-movidius.rules
-sudo udevadm control --reload-rules && sudo udevadm trigger
-
-echo "-> Successfully applied hardware settings."
+# OAK-D (Movidius, vendor 03e7) without root; only written if missing
+UDEV_RULE='SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"'
+UDEV_FILE=/etc/udev/rules.d/80-movidius.rules
+if ! grep -qxF "$UDEV_RULE" "$UDEV_FILE" 2>/dev/null; then
+    echo "$UDEV_RULE" | sudo tee "$UDEV_FILE" > /dev/null
+    sudo udevadm control --reload-rules && sudo udevadm trigger
+    echo "Installed OAK-D udev rule ($UDEV_FILE)."
+fi
+echo "-> Hardware settings applied."
 echo ""
 
 IMAGE_NAME="utasr-image"
-sudo docker build -t ${IMAGE_NAME} -f Dockerfile .
-
-echo "Successfully built Docker image."
+sudo docker build -t "$IMAGE_NAME" -f Dockerfile .
+echo "Built Docker image $IMAGE_NAME."
 echo ""
 
-# no CPU/RAM/GPU limits. --privileged is for the OAK-D over USB, the
-# --device is the I2C bus to the Arduino
-sudo docker run \
+# The container runs in the foreground until start.py exits (q / Ctrl+C).
+# No CPU/RAM/GPU limits. --privileged is for the OAK-D over USB, --device is the
+# I2C bus to the Arduino, --ipc=host gives the shared-memory ring buffers the
+# host's /dev/shm (Docker's default is 64 MB).
+echo "Started container utasr-container (logs follow; q or Ctrl+C to stop)."
+exec sudo docker run \
     --runtime nvidia \
     --rm \
     -it \
     --privileged \
     --net=host \
+    --ipc=host \
     --device /dev/i2c-1 \
-    -e DISPLAY=$DISPLAY \
     --name utasr-container \
-    ${IMAGE_NAME} \
-    "$@"
-
-echo ""
-echo "Successfully started Docker container."
-
-echo ""
-echo "start.sh completed."
+    "$IMAGE_NAME" \
+    "${args[@]}"

@@ -1,0 +1,64 @@
+# pilot_core packaging and tool configuration.
+#
+#   pip install -e .                  # runtime (camera, SLAM worker, control, actuator)
+#   pip install -e ".[test]"          # + pytest / pyflakes
+#   pip install -e ".[train]"         # + torch / torchvision / onnx (BC, VAE, vision training)
+#   pip install -e ".[rl]"            # + stable-baselines3 / gymnasium (rl/)
+#   pip install -e ".[slam]"          # + pybind11 (to build orbslam3_wrapper, docs/slam.md)
+#
+# requirements.txt mirrors the runtime dependencies below for `pip install -r`.
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pilot_core"
+version = "0.1.0"
+description = "On-vehicle software for UTASR's autonomous scale race car: camera, IMU, SLAM, mapping, control and actuation"
+readme = "README.md"
+# Developed and tested on 3.10 (Ubuntu 22.04 / JetPack 6).
+requires-python = ">=3.10"
+authors = [{ name = "UTASR - UT Autonomous Scale Racing" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "PyYAML",
+    "opencv-python-headless",
+    "depthai>=3.0",      # OAK-D camera + IMU (v3 API)
+    "smbus2",            # Arduino I2C link (Jetson)
+    "pyzmq",             # AutoDRIVE simulator bridge
+    "osqp",              # QP solver for control_mode: mpc
+    "onnxruntime",       # control_mode: policy / vae / bc, vision.model: onnx (CPU inference)
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-timeout", "pyflakes"]
+train = ["torch", "torchvision", "onnx"]
+rl = ["stable-baselines3[extra]", "gymnasium", "torch", "onnx"]
+slam = ["pybind11"]
+plot = ["matplotlib"]  # scripts/sim_bench.py --plot
+
+[project.urls]
+Homepage = "https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_core"
+
+[tool.setuptools]
+# Explicit list: the repo root also holds submodules (ORB_SLAM3, firmware)
+# that must not be picked up by package discovery.
+packages = ["control", "vision", "workers", "shared_buffer", "synthetic", "rl"]
+py-modules = ["start"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 300
+markers = [
+    "slow: long-running test (closed-loop sims, training)",
+    "oakd: needs a connected OAK-D camera",
+    "slam: needs the ORB-SLAM3 build (orbslam3_python + ORB_SLAM3/lib)",
+    "train: needs torch",
+]

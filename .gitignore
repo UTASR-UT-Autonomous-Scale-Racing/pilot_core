@@ -3,34 +3,58 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
-.pytest_cache/
 *.egg-info/
+/build/
+/dist/
 
-# Build artefacts
-build/
-lib/
-# pybind11 wrapper is built locally (see README) — never commit the binary
+# Tool caches / reports
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+profile.out
+
+# Editors / notebooks
+.vscode/
+.idea/
+*.ipynb
+
+# ORB-SLAM3 and wrapper build artefacts (built per machine, docs/slam.md).
+# The pybind11 wrapper binary is written to the repo root; never commit it.
+/ORB_SLAM3/lib/
+/orbslam3_wrapper/build/
 orbslam3_python*.so
 
-# Runtime output
-# Trained models / datasets (regenerate with scripts/train_*_policy.py, rl/export_onnx.py)
+# Trained models + their .json sidecars (regenerate with scripts/train_*.py,
+# rl/export_onnx.py). Named sidecars only, so config .json files stay tracked.
 *.onnx
+*_policy.json
+policy.json
+track_seg.json
+
+# Datasets and recordings
 *.npz
+datasets/
+/dataset/
 recordings/
 temp/
-/test_output
 *.db
 *.sqlite
 *.mp4
-*.png
-*.jpg
-*.jpeg
-*.gif
 
-# Editor / notebooks
-.vscode/
-*.ipynb
+# Runtime / test output. Images are ignored only where tools write them (repo
+# root, output dirs), so doc images and test fixtures can be committed.
+/test_output/
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
 
 # RL training outputs
 rl/checkpoints/
 rl/logs/
+rl/**/*.zip
+*.pt
+*.pth
+*.pkl

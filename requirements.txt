@@ -1,25 +1,27 @@
 # pilot_core Python dependencies:  pip install -r requirements.txt
+# Keep the runtime section in sync with [project.dependencies] in pyproject.toml.
+# Equivalent with packaging:  pip install -e ".[test,slam]"
 
 # Runtime
 numpy
 scipy
 PyYAML
 opencv-python-headless
-matplotlib
 depthai>=3.0        # OAK-D camera + IMU (v3 API)
 smbus2              # Arduino I2C link (Jetson)
 pyzmq               # AutoDRIVE simulator bridge
 osqp                # QP solver for control_mode: mpc
 onnxruntime         # control_mode: policy / vae / bc, vision.model: onnx (CPU inference)
 
-# Tests
+# Tests  (pyproject extra: [test], which also adds pyflakes)
 pytest
 pytest-timeout
 
-# ORB-SLAM3 Python wrapper build (see README)
+# ORB-SLAM3 Python wrapper build, docs/slam.md  (pyproject extra: [slam])
 pybind11
 
-# Not installed by default (dev machine only), install manually when needed:
-#   RL training / policy export (rl/):        pip install "stable-baselines3[extra]" gymnasium onnx torch
-#   BC / VAE training (scripts/train_*_policy.py):  pip install torch onnx
-#   Vision training (scripts/train_vision.py, vision_bench.py):  pip install torch torchvision onnx
+# Not installed by default (dev machine only); use the pyproject extras:
+#   RL training / policy export (rl/):                  pip install -e ".[rl]"
+#   BC / VAE / vision training (scripts/train_*.py):    pip install -e ".[train]"
+#   CPU-only torch: add --extra-index-url https://download.pytorch.org/whl/cpu
+#   Plots in scripts/sim_bench.py --plot:               pip install -e ".[plot]"

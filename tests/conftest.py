@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import uuid
 
 import numpy as np
 import pytest
+
+# Absolute path of the repository root, so tests don't depend on the cwd:
+#   from tests.conftest import REPO_ROOT   or   def test_x(repo_root): ...
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+@pytest.fixture(scope="session")
+def repo_root() -> str:
+    """Absolute path of the repository root (same as ``REPO_ROOT``)."""
+    return REPO_ROOT
+
 
 # unique shm names so parallel runs don't collide
 

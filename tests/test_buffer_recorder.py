@@ -8,6 +8,7 @@ import uuid
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 
 from shared_buffer import (
     ControlBuffer,
@@ -38,7 +39,7 @@ def _make_recorder(
     tmp_path,
     sample_k: int = 1,
     top_n: int = 0,
-    dtype_tag: int = 0,
+    **extra,
 ) -> BufferRecorderWorker:
     w = BufferRecorderWorker(
         name=f"rec_{buf_name}",
@@ -47,7 +48,7 @@ def _make_recorder(
         output_dir=str(tmp_path),
         sample_k=sample_k,
         top_n=top_n,
-        dtype_tag=dtype_tag,
+        **extra,
     )
     w._logger = MagicMock()
     w.setup()
@@ -212,22 +213,93 @@ class TestSampleK:
             buf.unlink()
 
 
+def _read_all(path):
+    with open(path, "rb") as f:
+        hdr = BufferRecorderWorker.read_file_header(f)
+        recs = []
+        while True:
+            rec = BufferRecorderWorker.read_record(f)
+            if rec is None:
+                break
+            recs.append(rec)
+        # a valid file ends exactly at the last record
+        assert f.read() == b""
+    return hdr, recs
+
+
 class TestTopN:
 
-    def test_top_n_limits_records(self, tmp_path):
-        """After top_n records the file pointer wraps, so the file size stays bounded."""
+    def test_top_n_rotates_files(self, tmp_path):
+        """top_n caps records per file; the next records go to a new file."""
         name = f"tn_{_uid()}"
         buf = IMUBuffer(slots=8, name=name, create=True)
         try:
-            w = _make_recorder(buf, "imu", tmp_path, top_n=3)
+            w = _make_recorder(buf, "imu", tmp_path, top_n=3, keep_files=0)
+            for _ in range(7):
+                buf.write(np.zeros(9, dtype=np.float32))
+                w.step()
+            w.teardown()
+            files = _bin_files(tmp_path)
+            assert len(files) == 3
+            seqs = []
+            for i, path in enumerate(files):
+                hdr, recs = _read_all(path)
+                assert hdr["part"] == i
+                seqs += [h["seq_no"] for h, _ in recs]
+            assert seqs == list(range(1, 8))
+            assert w._records_written == 7
+        finally:
+            buf.unlink()
 
+    def test_keep_files_deletes_oldest_parts(self, tmp_path):
+        name = f"tk_{_uid()}"
+        buf = IMUBuffer(slots=8, name=name, create=True)
+        try:
+            w = _make_recorder(buf, "imu", tmp_path, top_n=2, keep_files=2)
+            for _ in range(9):
+                buf.write(np.zeros(9, dtype=np.float32))
+                w.step()
+            w.teardown()
+            files = _bin_files(tmp_path)
+            assert len(files) == 2
+            seqs = [h["seq_no"] for p in files for h, _ in _read_all(p)[1]]
+            assert seqs == [7, 8, 9]    # parts 3 and 4, oldest parts deleted
+        finally:
+            buf.unlink()
+
+    def test_stop_policy(self, tmp_path):
+        name = f"ts_{_uid()}"
+        buf = IMUBuffer(slots=8, name=name, create=True)
+        try:
+            w = _make_recorder(buf, "imu", tmp_path, top_n=3, on_full="stop")
             for _ in range(6):
                 buf.write(np.zeros(9, dtype=np.float32))
                 w.step()
-
-            # 6 writes with top_n=3 wrap once, so the counter restarts
-            assert w._records_written == 3
             w.teardown()
+            files = _bin_files(tmp_path)
+            assert len(files) == 1
+            assert [h["seq_no"] for h, _ in _read_all(files[0])[1]] == [1, 2, 3]
+        finally:
+            buf.unlink()
+
+    def test_variable_size_payloads_stay_valid(self, tmp_path):
+        """Regression: in-place wrap-around corrupted files with variable-size payloads."""
+        name = f"tv_{_uid()}"
+        buf = PointCloudBuffer(slots=4, name=name, create=True, max_points=500)
+        rng = np.random.default_rng(0)
+        written = []
+        try:
+            w = _make_recorder(buf, "pointcloud", tmp_path, top_n=4, keep_files=0)
+            for _ in range(15):
+                pts = rng.normal(size=(int(rng.integers(0, 500)), 3)).astype(np.float32)
+                written.append(pts)
+                buf.write(pts)
+                w.step()
+            w.teardown()
+            decoded = [PointCloudBuffer.decode(p) for f in _bin_files(tmp_path) for _, p in _read_all(f)[1]]
+            assert len(decoded) == 15
+            for a, b in zip(decoded, written):
+                np.testing.assert_array_equal(a, b)
         finally:
             buf.unlink()
 
@@ -243,6 +315,162 @@ class TestTopN:
 
             assert w._records_written == 20
             w.teardown()
+            assert len(_bin_files(tmp_path)) == 1
+        finally:
+            buf.unlink()
+
+
+class TestNoDrops:
+
+    def test_burst_between_polls_is_recorded(self, tmp_path):
+        """Several writes between two steps: all of them land in the file."""
+        name = f"nd_{_uid()}"
+        buf = IMUBuffer(slots=16, name=name, create=True)
+        try:
+            w = _make_recorder(buf, "imu", tmp_path)
+            for i in range(10):
+                buf.write(np.full(9, float(i), dtype=np.float32))
+            w.step()
+            for i in range(10, 13):
+                buf.write(np.full(9, float(i), dtype=np.float32))
+            w.step()
+            w.teardown()
+            _, recs = _read_all(_bin_files(tmp_path)[0])
+            assert [h["seq_no"] for h, _ in recs] == list(range(1, 14))
+            assert [IMUBuffer.decode(p)[0] for _, p in recs] == [float(i) for i in range(13)]
+            assert all(h["read_ts"] >= h["produced_ts"] for h, _ in recs)
+            assert w.streams["imu"].dropped == 0
+        finally:
+            buf.unlink()
+
+    def test_sample_k_counts_received_samples(self, tmp_path):
+        name = f"nk_{_uid()}"
+        buf = IMUBuffer(slots=16, name=name, create=True)
+        try:
+            w = _make_recorder(buf, "imu", tmp_path, sample_k=4)
+            for _ in range(12):
+                buf.write(np.zeros(9, dtype=np.float32))
+            w.step()
+            w.teardown()
+            _, recs = _read_all(_bin_files(tmp_path)[0])
+            assert [h["seq_no"] for h, _ in recs] == [4, 8, 12]
+        finally:
+            buf.unlink()
+
+    def test_ring_overrun_is_counted_as_dropped(self, tmp_path):
+        name = f"no_{_uid()}"
+        buf = IMUBuffer(slots=4, name=name, create=True)
+        try:
+            w = _make_recorder(buf, "imu", tmp_path)
+            buf.write(np.zeros(9, dtype=np.float32))
+            w.step()
+            for _ in range(10):          # laps the 4-slot ring
+                buf.write(np.zeros(9, dtype=np.float32))
+            w.step()
+            w.teardown()
+            _, recs = _read_all(_bin_files(tmp_path)[0])
+            assert [h["seq_no"] for h, _ in recs] == [1, 8, 9, 10, 11]
+            assert w.streams["imu"].dropped == 6
+        finally:
+            buf.unlink()
+
+
+class TestMultiBuffer:
+
+    def test_one_recorder_many_buffers(self, tmp_path):
+        from control.types import VehicleState
+        from shared_buffer import LidarBuffer, StateBuffer
+
+        u = _uid()
+        imu = IMUBuffer(slots=8, name=f"mi_{u}", create=True)
+        state = StateBuffer(slots=8, name=f"ms_{u}", create=True)
+        lidar = LidarBuffer(slots=4, name=f"ml_{u}", create=True)
+        try:
+            w = BufferRecorderWorker(
+                name="recorder",
+                output_dir=str(tmp_path),
+                sample_k=1,
+                buffers={
+                    "imu": {"buffer": imu, "sample_k": 2},
+                    "state": state,
+                    "lidar": {"buffer": lidar, "top_n": 2, "keep_files": 0},
+                    "missing": None,             # buffers that don't exist in this config
+                },
+            )
+            w._logger = MagicMock()
+            w.setup()
+            for i in range(4):
+                imu.write(np.full(9, float(i), dtype=np.float32))
+                state.write(VehicleState(t=float(i), x=1.0, y=2.0, yaw=0.1, v=0.5, yaw_rate=0.0))
+                lidar.write(np.full(1080, float(i), dtype=np.float32))
+                w.step()
+            w.teardown()
+
+            files = _bin_files(tmp_path)
+            by_name = {}
+            for p in files:
+                hdr, recs = _read_all(p)
+                by_name.setdefault(hdr["buffer_name"], []).extend(recs)
+            assert sorted(by_name) == ["imu", "lidar", "state"]
+            assert len(by_name["imu"]) == 2
+            assert len(by_name["lidar"]) == 4
+            assert len([p for p in files if os.path.basename(p).startswith("lidar_")]) == 2
+            s = [StateBuffer.decode(p) for _, p in by_name["state"]]
+            assert [v.t for v in s] == [0.0, 1.0, 2.0, 3.0]
+        finally:
+            for b in (imu, state, lidar):
+                b.unlink()
+
+
+class TestFlushAndValidation:
+
+    def test_periodic_flush(self, tmp_path):
+        name = f"fl_{_uid()}"
+        buf = IMUBuffer(slots=8, name=name, create=True)
+        try:
+            w = _make_recorder(buf, "imu", tmp_path, flush_interval=0.0)
+            buf.write(np.zeros(9, dtype=np.float32))
+            w.step()
+            # flushed without teardown
+            assert os.path.getsize(_bin_files(tmp_path)[0]) == FILE_HEADER_SIZE + 32 + 36
+            w.teardown()
+        finally:
+            buf.unlink()
+
+    def test_bad_magic_rejected(self, tmp_path):
+        import io
+
+        import pytest
+
+        from workers.buffer_recorder_worker import RecordingFormatError
+
+        with pytest.raises(RecordingFormatError):
+            BufferRecorderWorker.read_file_header(io.BytesIO(b"NOTAREC!" + b"\x00" * 56))
+        with pytest.raises(RecordingFormatError):
+            BufferRecorderWorker.read_file_header(io.BytesIO(b"short"))
+
+    def test_unsupported_schema_rejected(self, tmp_path):
+        import io
+
+        import pytest
+
+        from workers.buffer_recorder_worker import RecordingFormatError
+
+        raw = FILE_MAGIC + struct.pack("<H", 999) + b"\x00" * 54
+        with pytest.raises(RecordingFormatError):
+            BufferRecorderWorker.read_file_header(io.BytesIO(raw))
+
+    def test_dtype_tag_from_buffer(self, tmp_path):
+        from shared_buffer.schema import DTypeTag
+
+        name = f"dt_{_uid()}"
+        buf = PointCloudBuffer(slots=2, name=name, create=True, max_points=10)
+        try:
+            w = _make_recorder(buf, "pointcloud", tmp_path)
+            w.teardown()
+            hdr, _ = _read_all(_bin_files(tmp_path)[0])
+            assert hdr["dtype_tag"] == DTypeTag.POINTCLOUD
+            assert hdr["buffer_name"] == "pointcloud"
         finally:
             buf.unlink()
 
@@ -317,8 +545,9 @@ class TestSegmentationRecorder:
                 rec = BufferRecorderWorker.read_record(f)
             assert rec is not None
             _, payload = rec
-            # 8 bytes meta + 400x640 int32 mask
-            assert len(payload) == 8 + 400 * 640 * 4
+            # 8 bytes meta + 400x640 uint8 mask
+            assert len(payload) == 8 + 400 * 640
+            np.testing.assert_array_equal(SegmentationBuffer.decode(payload), mask)
         finally:
             buf.unlink()
 
@@ -457,22 +686,21 @@ class TestEdgeCases:
 
 
 class TestStartPyRecorderConfig:
-    """start.py spawns the recorders from these config.yaml settings."""
+    """recording_config in the shipped configs only uses keys start.py knows."""
 
-    def test_recording_config_keys(self):
-        import yaml
-        with open("config.yaml", "r") as f:
-            cfg = yaml.safe_load(f)
-        rec_cfg = cfg.get("recording_config", {})
-        assert "sample_k" in rec_cfg
-        assert "top_n" in rec_cfg
-        for key in ("frame", "imu", "segmentation", "pose", "control"):
-            assert key in rec_cfg, f"Missing per-buffer config for {key}"
+    BUFFERS = {"frame", "imu", "segmentation", "pose", "control", "pointcloud", "boundary", "state", "lidar"}
+    GLOBAL_KEYS = {"sample_k", "top_n", "on_full", "keep_files", "flush_interval"}
+    PER_BUFFER_KEYS = {"sample_k", "top_n", "on_full", "keep_files"}
 
-    def test_per_buffer_overrides(self):
+    @pytest.mark.parametrize("name", ["config.yaml", "config_cpu.yaml", "config_dev_local.yaml", "config_zmq.yaml"])
+    def test_recording_config_keys(self, name, repo_root):
+        import os
         import yaml
-        with open("config.yaml", "r") as f:
-            cfg = yaml.safe_load(f)
-        rec_cfg = cfg["recording_config"]
-        # frames are big, they should be sampled no more often than IMU
-        assert rec_cfg["frame"]["sample_k"] >= rec_cfg["imu"]["sample_k"]
+        with open(os.path.join(repo_root, name)) as f:
+            rec_cfg = yaml.safe_load(f).get("recording_config") or {}
+        for key, value in rec_cfg.items():
+            if isinstance(value, dict):
+                assert key in self.BUFFERS, f"{name}: unknown buffer {key}"
+                assert set(value) <= self.PER_BUFFER_KEYS, f"{name}: {key} has {set(value)}"
+            else:
+                assert key in self.GLOBAL_KEYS, f"{name}: unknown key {key}"

@@ -1,33 +1,57 @@
 """
-Records one shared-memory buffer to disk as raw bytes plus a small binary
-header. Spawn one of these per buffer you want recorded.
+Records one or more shared-memory buffers to disk as raw bytes plus a small
+binary header, one file (or series of files) per buffer. A single recorder
+process can record every buffer of the pipeline.
 
-Everything is little-endian. Each sampled slot becomes a fixed-size record
+Everything is little-endian. Each recorded slot becomes a fixed-size record
 header followed by the payload:
 
     [8  bytes]  uint64   seq_no
-    [8  bytes]  float64  produced_ts
-    [8  bytes]  float64  read_ts  (wall-clock when this worker read the slot)
+    [8  bytes]  float64  produced_ts  (time.monotonic() of the sample)
+    [8  bytes]  float64  read_ts      (time.monotonic() when the recorder read it)
     [4  bytes]  uint32   payload_size
     [2  bytes]  uint16   schema_version
     [2  bytes]  uint16   dtype_tag
-    [payload_size bytes]  raw payload bytes  (identical to the shm slot payload)
+    [payload_size bytes]  raw payload bytes  (identical to the shm slot payload;
+                          decode with the typed buffer's decode(), see
+                          shared_buffer.buffer_class_for and scripts/read_recording.py)
 
-Files are named <buffer_name>_<session_ts>.bin and start with a 64-byte
-header:
+Files are named <buffer_name>_<session_id>_<part>.bin, session_id being the
+recorder's start time in epoch milliseconds and part 0000, 0001, ...
+and start with a 64-byte header:
 
-    [8  bytes]  magic     b"PLTREC\\x00\\x01"
-    [2  bytes]  uint16    schema_version
-    [2  bytes]  uint16    dtype_tag
-    [4  bytes]  uint32    sample_k  (configured sample interval)
-    [4  bytes]  uint32    top_n     (max distinct samples kept)
-    [8  bytes]  float64   session_start_ts
-    [36 bytes]  reserved  (zero-filled)
+    [8  bytes]  magic         b"PLTREC\\x00\\x01"
+    [2  bytes]  uint16        schema_version
+    [2  bytes]  uint16        dtype_tag
+    [4  bytes]  uint32        sample_k  (configured decimation)
+    [4  bytes]  uint32        top_n     (max records per file, 0 = unlimited)
+    [8  bytes]  float64       session_start_ts (wall clock, time.time())
+    [4  bytes]  uint32        part      (file index within the session)
+    [8  bytes]  float64       session_start_mono (time.monotonic(), same clock
+                              as produced_ts)
+    [16 bytes]  ascii         buffer name, NUL padded (first 16 bytes)
+    [8  bytes]  reserved      (zero-filled)
 
-Only slots with seq_no % sample_k == 0 get written, so sample_k just
-decimates. After top_n records we seek back to the first record and
-overwrite from there. NB: the file is not truncated, so older tail records
-can still be sitting past the current write position. top_n=0 means no cap.
+Files written before schema version 2 have zeros in part / mono / name.
+
+Sampling: the recorder reads every slot newer than the last one it saw
+(SharedRingBuffer.read_since), so it doesn't miss samples when the producer is
+faster than the poll loop. sample_k decimates by count of samples actually
+received: every k-th received sample is written. Samples overwritten in the
+ring before the recorder got to them are counted as dropped and logged.
+
+File size policy (never overwrites in place, every file is valid and
+chronological):
+  top_n = 0          one file per buffer, no limit
+  top_n > 0          at most top_n records per file, then on_full decides:
+    on_full="rotate" (default) close the file and start the next part; with
+                     keep_files = K > 0 only the newest K parts are kept (older
+                     parts are deleted), keep_files = 0 keeps every part
+    on_full="stop"   stop recording that buffer
+
+Files are flushed every flush_interval seconds (default 1.0) and on teardown,
+so a crash loses at most about a second of data; a partially written last
+record is ignored by read_record().
 """
 
 from __future__ import annotations
@@ -35,152 +59,294 @@ from __future__ import annotations
 import os
 import struct
 import time
-from typing import Any
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Deque, Dict, Optional
 
 from .base_worker import BaseWorker
 from shared_buffer.ring_buffer import SharedRingBuffer
-from shared_buffer.schema import SlotHeader, SCHEMA_VERSION
+from shared_buffer.schema import SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS, SlotHeader
 
 FILE_MAGIC = b"PLTREC\x00\x01"             # 8 bytes
-# magic(8) schema(2) dtype(2) sample_k(4) top_n(4) session_ts(8) reserved(30) = 58 bytes
-FILE_HEADER_FMT = "<8sHHIId30s"
-# on-disk size; struct is zero-padded by 6 bytes
+# magic(8) schema(2) dtype(2) sample_k(4) top_n(4) session_ts(8) part(4)
+# session_mono(8) name(16) reserved(8) = 64 bytes
+FILE_HEADER_FMT = "<8sHHIIdId16s8s"
 FILE_HEADER_SIZE = 64
+assert struct.calcsize(FILE_HEADER_FMT) == FILE_HEADER_SIZE
 
 # seq_no, produced_ts, read_ts, payload_size, schema_ver, dtype_tag
 RECORD_HEADER_FMT = "<QddIHH"
 RECORD_HEADER_SIZE = struct.calcsize(RECORD_HEADER_FMT)  # 32 bytes
 
+ON_FULL_POLICIES = ("rotate", "stop")
+DEFAULT_KEEP_FILES = 2
+
+
+class RecordingFormatError(ValueError):
+    """Not a recording file, or a schema version this code can't read."""
+
+
+@dataclass
+class _Stream:
+    """Per-buffer recording state."""
+    name: str
+    rb: SharedRingBuffer
+    sample_k: int
+    top_n: int
+    on_full: str
+    keep_files: int
+    dtype_tag: int
+    fp: Any = None
+    path: str = ""
+    part: int = -1
+    last_seq: int = 0
+    received: int = 0
+    dropped: int = 0
+    records_written: int = 0   # total, all parts
+    records_in_file: int = 0
+    stopped: bool = False
+    files: Deque[str] = field(default_factory=deque)
+
+
+def _ring_of(buf) -> SharedRingBuffer:
+    # typed wrappers keep the ring buffer in ._rb
+    return buf._rb if hasattr(buf, "_rb") else buf
+
 
 class BufferRecorderWorker(BaseWorker):
-    """Records a single shared-memory buffer to disk.
+    """Records shared-memory buffers to disk, one file series per buffer.
 
     Config kwargs:
-      buffer       a SharedRingBuffer, or a typed wrapper (FrameBuffer etc.),
-                   in which case we use its ._rb
-      buffer_name  goes in the output filename
-      output_dir   where the .bin goes (default /tmp/pilot_recordings)
-      sample_k     record every k-th seq_no (default 1, i.e. everything)
-      top_n        records before wrapping, 0 = unlimited
-      dtype_tag    DTypeTag written to the file header; defaults to the
-                   buffer's own
+      buffers         dict name -> buffer, or name -> dict with "buffer" plus
+                      optional per-buffer "sample_k", "top_n", "on_full",
+                      "keep_files". A buffer is a SharedRingBuffer or a typed
+                      wrapper (FrameBuffer, StateBuffer, LidarBuffer, ...).
+      buffer, buffer_name
+                      single-buffer form (same as buffers={buffer_name: buffer})
+      output_dir      where the .bin files go (default /tmp/pilot_recordings)
+      sample_k        default: record every k-th received sample (1 = all)
+      top_n           default: records per file, 0 = unlimited
+      on_full         default: "rotate" or "stop" (see module docstring)
+      keep_files      default: parts kept with on_full="rotate", 0 = all (default 2)
+      flush_interval  seconds between flushes (default 1.0)
+      dtype_tag       single-buffer form only: override the DTypeTag in the file header
     """
 
     def __init__(self, name: str = "buf_recorder", **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
-        self._rb: SharedRingBuffer | None = None
-        self._buffer_name: str = ""
+        self._streams: Dict[str, _Stream] = {}
         self._output_dir: str = ""
-        self._sample_k: int = 1
-        self._top_n: int = 0
-        self._dtype_tag: int = 0
-        self._fp = None
-        self._last_seq: int = 0
-        self._records_written: int = 0
-        self._data_start_offset: int = 0
         self._session_ts: float = 0.0
+        self._session_mono: float = 0.0
+        self._flush_interval: float = 1.0
+        self._next_flush: float = 0.0
+
+    # setup / config
+
+    def _stream_configs(self) -> Dict[str, Dict[str, Any]]:
+        cfg = self.config
+        buffers = cfg.get("buffers")
+        if buffers is None:
+            if "buffer" not in cfg:
+                raise ValueError("BufferRecorderWorker needs buffers={name: buffer} or buffer=...")
+            single = {"buffer": cfg["buffer"]}
+            if cfg.get("dtype_tag") is not None:
+                single["dtype_tag"] = cfg["dtype_tag"]
+            buffers = {cfg.get("buffer_name", self.name): single}
+        out = {}
+        for bname, spec in buffers.items():
+            if spec is None:
+                continue
+            if not isinstance(spec, dict):
+                spec = {"buffer": spec}
+            if spec.get("buffer") is None:
+                continue
+            out[bname] = spec
+        return out
 
     def setup(self) -> None:
-        buf = self.config["buffer"]
-        # typed wrappers keep the ring buffer in ._rb
-        if hasattr(buf, "_rb"):
-            self._rb = buf._rb
-        else:
-            self._rb = buf
-
-        self._buffer_name = self.config.get("buffer_name", self.name)
-        self._output_dir = self.config.get("output_dir", "/tmp/pilot_recordings")
-        self._sample_k = max(1, int(self.config.get("sample_k", 1)))
-        self._top_n = max(0, int(self.config.get("top_n", 0)))
-        self._dtype_tag = int(self.config.get("dtype_tag", self._rb.dtype_tag))
-
+        cfg = self.config
+        self._output_dir = cfg.get("output_dir", "/tmp/pilot_recordings")
+        self._flush_interval = float(cfg.get("flush_interval", 1.0))
         os.makedirs(self._output_dir, exist_ok=True)
-
         self._session_ts = time.time()
-        fname = f"{self._buffer_name}_{int(self._session_ts)}.bin"
-        path = os.path.join(self._output_dir, fname)
-        self._fp = open(path, "wb")
-        self._write_file_header()
-        self._data_start_offset = self._fp.tell()
+        self._session_mono = time.monotonic()
+        self._next_flush = self._session_mono + self._flush_interval
 
-        self.logger.info(
-            f"Recording {self._buffer_name} → {path}  "
-            f"(sample_k={self._sample_k}, top_n={self._top_n})"
-        )
+        for bname, spec in self._stream_configs().items():
+            rb = _ring_of(spec["buffer"])
+            on_full = spec.get("on_full", cfg.get("on_full", "rotate"))
+            if on_full not in ON_FULL_POLICIES:
+                raise ValueError(f"on_full must be one of {ON_FULL_POLICIES}, got {on_full!r}")
+            st = _Stream(
+                name=bname,
+                rb=rb,
+                sample_k=max(1, int(spec.get("sample_k", cfg.get("sample_k", 1)))),
+                top_n=max(0, int(spec.get("top_n", cfg.get("top_n", 0)))),
+                on_full=on_full,
+                keep_files=max(0, int(spec.get("keep_files", cfg.get("keep_files", DEFAULT_KEEP_FILES)))),
+                dtype_tag=int(spec.get("dtype_tag", rb.dtype_tag)),
+            )
+            self._streams[bname] = st
+            self._open_next_part(st)
+            self.logger.info(
+                f"Recording {bname} -> {st.path} (sample_k={st.sample_k}, top_n={st.top_n}, "
+                f"on_full={st.on_full}, keep_files={st.keep_files})"
+            )
+        if not self._streams:
+            self.logger.warning("BufferRecorderWorker: no buffers to record")
+
+    # main loop
 
     def step(self) -> None:
-        result = self._rb.read_latest()
-        if result is None:
-            time.sleep(0.005)
-            return
+        got = 0
+        for st in self._streams.values():
+            if st.stopped:
+                continue
+            records = st.rb.read_since(st.last_seq, stamp=True)
+            got += len(records)
+            for header, payload in records:
+                if st.last_seq and header.seq_no > st.last_seq + 1:
+                    st.dropped += header.seq_no - st.last_seq - 1
+                st.last_seq = header.seq_no
+                st.received += 1
+                if st.received % st.sample_k != 0:
+                    continue
+                self._record(st, header, payload)
+                if st.stopped:
+                    break
 
-        header, payload = result
-
-        if header.seq_no <= self._last_seq:
-            time.sleep(0.001)
-            return
-
-        self._last_seq = header.seq_no
-
-        if header.seq_no % self._sample_k != 0:
-            return
-
-        # hit top_n, rewind and overwrite from the first record
-        if self._top_n > 0 and self._records_written >= self._top_n:
-            self._fp.seek(self._data_start_offset)
-            self._records_written = 0
-
-        self._write_record(header, payload)
-        self._records_written += 1
+        now = time.monotonic()
+        if now >= self._next_flush:
+            self._flush_all()
+            self._next_flush = now + self._flush_interval
+        if not got:
+            time.sleep(0.002)
 
     def teardown(self) -> None:
-        if self._fp is not None:
-            self._fp.flush()
-            self._fp.close()
-            self.logger.info(
-                f"Recorder {self._buffer_name}: "
-                f"{self._records_written} records written"
+        for st in self._streams.values():
+            self._close_file(st)
+            msg = (
+                f"Recorder {st.name}: {st.records_written} records written "
+                f"({st.received} received, {st.dropped} dropped in the ring, "
+                f"{st.part + 1} file(s))"
             )
+            if st.dropped:
+                self.logger.warning(msg + " - increase the buffer's slots if drops matter")
+            else:
+                self.logger.info(msg)
 
-    def _write_file_header(self) -> None:
-        struct_size = struct.calcsize(FILE_HEADER_FMT)
-        header_bytes = struct.pack(
+    @property
+    def session_id(self) -> str:
+        return str(int(self._session_ts * 1000))
+
+    # stats (tests / monitoring)
+
+    @property
+    def streams(self) -> Dict[str, _Stream]:
+        return self._streams
+
+    @property
+    def _records_written(self) -> int:
+        return sum(st.records_written for st in self._streams.values())
+
+    # file handling
+
+    def _record(self, st: _Stream, header: SlotHeader, payload: bytes) -> None:
+        if st.top_n > 0 and st.records_in_file >= st.top_n:
+            if st.on_full == "stop":
+                self.logger.info(f"Recorder {st.name}: top_n={st.top_n} reached, stopping")
+                self._close_file(st)
+                st.stopped = True
+                return
+            self._open_next_part(st)
+        try:
+            st.fp.write(struct.pack(
+                RECORD_HEADER_FMT,
+                header.seq_no,
+                header.produced_ts,
+                header.read_ts,
+                len(payload),
+                header.schema_version,
+                header.dtype_tag,
+            ))
+            st.fp.write(payload)
+        except OSError:
+            self.logger.exception(f"Recorder {st.name}: write failed, no longer recording this buffer")
+            self._close_file(st)
+            st.stopped = True
+            return
+        st.records_in_file += 1
+        st.records_written += 1
+
+    def _open_next_part(self, st: _Stream) -> None:
+        self._close_file(st)
+        st.part += 1
+        st.records_in_file = 0
+        st.path = os.path.join(
+            self._output_dir, f"{st.name}_{self.session_id}_{st.part:04d}.bin"
+        )
+        st.fp = open(st.path, "xb")  # never clobber an existing recording
+        st.fp.write(struct.pack(
             FILE_HEADER_FMT,
             FILE_MAGIC,
             SCHEMA_VERSION,
-            self._dtype_tag,
-            self._sample_k,
-            self._top_n,
+            st.dtype_tag,
+            st.sample_k,
+            st.top_n,
             self._session_ts,
-            b"\x00" * 30,
-        )
-        header_bytes += b"\x00" * (FILE_HEADER_SIZE - struct_size)
-        self._fp.write(header_bytes)
+            st.part,
+            self._session_mono,
+            st.name.encode()[:16],
+            b"",
+        ))
+        st.files.append(st.path)
+        while st.keep_files and len(st.files) > st.keep_files:
+            old = st.files.popleft()
+            try:
+                os.remove(old)
+            except OSError:
+                self.logger.warning(f"Recorder {st.name}: could not delete {old}")
 
-    def _write_record(self, header: SlotHeader, payload: bytes) -> None:
-        rec_hdr = struct.pack(
-            RECORD_HEADER_FMT,
-            header.seq_no,
-            header.produced_ts,
-            header.read_ts,
-            len(payload),
-            header.schema_version,
-            header.dtype_tag,
-        )
-        self._fp.write(rec_hdr)
-        self._fp.write(payload)
+    @staticmethod
+    def _close_file(st: _Stream) -> None:
+        if st.fp is not None:
+            try:
+                st.fp.flush()
+                st.fp.close()
+            finally:
+                st.fp = None
+
+    def _flush_all(self) -> None:
+        for st in self._streams.values():
+            if st.fp is not None:
+                try:
+                    st.fp.flush()
+                except OSError:
+                    self.logger.exception(f"Recorder {st.name}: flush failed")
 
     # for reading recordings back
 
     @staticmethod
     def read_file_header(fp) -> dict:
-        """Decode the 64-byte file header into a dict (magic, schema_version,
-        dtype_tag, sample_k, top_n, session_ts)."""
+        """Decode and validate the 64-byte file header.
+
+        Returns a dict (magic, schema_version, dtype_tag, sample_k, top_n,
+        session_ts, part, session_mono, buffer_name). Raises
+        RecordingFormatError on a bad magic, an unsupported schema version or
+        a truncated header.
+        """
         raw = fp.read(FILE_HEADER_SIZE)
-        struct_size = struct.calcsize(FILE_HEADER_FMT)
-        magic, schema, dtype, sample_k, top_n, session_ts, _reserved_b = (
-            struct.unpack(FILE_HEADER_FMT, raw[:struct_size])
-        )
+        if len(raw) < FILE_HEADER_SIZE:
+            raise RecordingFormatError(f"file header truncated ({len(raw)} of {FILE_HEADER_SIZE} bytes)")
+        (magic, schema, dtype, sample_k, top_n, session_ts, part, session_mono,
+         name, _reserved) = struct.unpack(FILE_HEADER_FMT, raw)
+        if magic != FILE_MAGIC:
+            raise RecordingFormatError(f"not a pilot recording (magic {magic!r})")
+        if schema not in SUPPORTED_SCHEMA_VERSIONS:
+            raise RecordingFormatError(
+                f"unsupported recording schema version {schema} (supported: {SUPPORTED_SCHEMA_VERSIONS})"
+            )
         return {
             "magic": magic,
             "schema_version": schema,
@@ -188,10 +354,13 @@ class BufferRecorderWorker(BaseWorker):
             "sample_k": sample_k,
             "top_n": top_n,
             "session_ts": session_ts,
+            "part": part,
+            "session_mono": session_mono,
+            "buffer_name": name.rstrip(b"\x00").decode(errors="replace"),
         }
 
     @staticmethod
-    def read_record(fp) -> tuple[dict, bytes] | None:
+    def read_record(fp) -> Optional[tuple]:
         """(header_dict, payload) for the next record, or None at EOF / on a
         truncated record."""
         raw_hdr = fp.read(RECORD_HEADER_SIZE)

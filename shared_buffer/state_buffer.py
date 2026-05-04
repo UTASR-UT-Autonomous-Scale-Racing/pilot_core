@@ -7,23 +7,26 @@ Payload layout:
     [4 bytes]  float32  yaw       (rad, CCW from +x)
     [4 bytes]  float32  v         (m/s, signed)
     [4 bytes]  float32  yaw_rate  (rad/s)
+
+read_latest() -> (header, VehicleState); decode(payload) -> VehicleState.
 """
 
 from __future__ import annotations
 
 import struct
-from typing import Optional, Tuple
+from typing import Optional
 
 from control.types import VehicleState
 
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader
+from .typed import TypedRingBuffer
 
 _STATE_FMT = "<d5f"
 _PAYLOAD_SIZE = struct.calcsize(_STATE_FMT)
 
 
-class StateBuffer:
+class StateBuffer(TypedRingBuffer):
     """Ring buffer of control.types.VehicleState."""
 
     def __init__(self, slots: int = 8, name: str = "state_buf", create: bool = True) -> None:
@@ -39,20 +42,7 @@ class StateBuffer:
         payload = struct.pack(_STATE_FMT, state.t, state.x, state.y, state.yaw, state.v, state.yaw_rate)
         return self._rb.write(payload, ts)
 
-    def latest_seq(self) -> int:
-        """Highest published seq_no, without copying any data."""
-        return self._rb.latest_seq()
-
-    def read_latest(self) -> Optional[Tuple[SlotHeader, VehicleState]]:
-        result = self._rb.read_latest()
-        if result is None:
-            return None
-        header, payload = result
-        t, x, y, yaw, v, w = struct.unpack(_STATE_FMT, payload[:_PAYLOAD_SIZE])
-        return header, VehicleState(t=t, x=x, y=y, yaw=yaw, v=v, yaw_rate=w)
-
-    def close(self):
-        self._rb.close()
-
-    def unlink(self):
-        self._rb.unlink()
+    @staticmethod
+    def decode(payload: bytes) -> VehicleState:
+        t, x, y, yaw, v, w = struct.unpack_from(_STATE_FMT, payload, 0)
+        return VehicleState(t=t, x=x, y=y, yaw=yaw, v=v, yaw_rate=w)

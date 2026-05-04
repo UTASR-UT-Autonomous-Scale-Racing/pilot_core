@@ -6,6 +6,7 @@ Payload:
     [4 bytes]  float32  throttle  (0..1, 0.5 = neutral, below = reverse)
 
 Both map linearly onto PWM pulse widths, see control/pwm.py.
+read_latest() -> (header, steering, throttle); decode(payload) -> (steering, throttle).
 """
 
 from __future__ import annotations
@@ -15,14 +16,17 @@ from typing import Optional, Tuple
 
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader
+from .typed import TypedRingBuffer
 
 _CTRL_FMT = "<ff"
 _PAYLOAD_SIZE = struct.calcsize(_CTRL_FMT)  # 8 bytes
 
 
-class ControlBuffer:
+class ControlBuffer(TypedRingBuffer):
     """Normalised control outputs. create=True from the orchestrator,
     False from workers."""
+
+    _MULTI = True
 
     def __init__(
         self,
@@ -42,21 +46,7 @@ class ControlBuffer:
         payload = struct.pack(_CTRL_FMT, steering, throttle)
         return self._rb.write(payload, ts)
 
-    def latest_seq(self) -> int:
-        """Highest published seq_no, without copying any data."""
-        return self._rb.latest_seq()
-
-    def read_latest(self) -> Optional[Tuple[SlotHeader, float, float]]:
-        """-> (header, steering, throttle), or None."""
-        result = self._rb.read_latest()
-        if result is None:
-            return None
-        header, payload = result
-        steering, throttle = struct.unpack(_CTRL_FMT, payload[:_PAYLOAD_SIZE])
-        return header, steering, throttle
-
-    def close(self):
-        self._rb.close()
-
-    def unlink(self):
-        self._rb.unlink()
+    @staticmethod
+    def decode(payload: bytes) -> Tuple[float, float]:
+        """payload -> (steering, throttle)"""
+        return struct.unpack_from(_CTRL_FMT, payload, 0)

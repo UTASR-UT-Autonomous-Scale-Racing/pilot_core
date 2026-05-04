@@ -211,14 +211,12 @@ class TestIMUBuffer:
         assert vec.shape == (9,)
         assert vec.dtype == np.float32
 
-    def test_wrong_size_vector_write_succeeds(self, imu_buffer):
-        short = np.zeros(5, dtype=np.float32)
-        # the ring buffer just stores raw bytes, so the write goes through
-        header = imu_buffer.write(short)
-        assert header.seq_no == 1
-        # ...but the read expects 9 floats and only gets 5
+    def test_wrong_size_vector_write_is_rejected(self, imu_buffer):
         with pytest.raises(ValueError):
-            imu_buffer.read_latest()
+            imu_buffer.write(np.zeros(5, dtype=np.float32))
+        with pytest.raises(ValueError):
+            imu_buffer.write(np.zeros((3, 3), dtype=np.float32))
+        assert imu_buffer.read_latest() is None
 
 
 class TestSegmentationBuffer:
@@ -483,3 +481,161 @@ class TestFrameBufferRace:
         reads = q.get(timeout=5)
         assert reads > 0
         buf.unlink()
+
+
+# read_since / decode / stamping / hardening
+
+class TestReadSince:
+
+    def test_returns_all_newer_in_order(self):
+        rb = SharedRingBuffer(name=f"test_rs_{_uid()}", slots=8, slot_payload_size=8, create=True)
+        try:
+            assert rb.read_since(0) == []
+            for i in range(1, 6):
+                rb.write(struct.pack("<Q", i))
+            got = rb.read_since(2)
+            assert [h.seq_no for h, _ in got] == [3, 4, 5]
+            assert [struct.unpack("<Q", p)[0] for _, p in got] == [3, 4, 5]
+            assert rb.read_since(5) == []
+        finally:
+            rb.unlink()
+
+    def test_after_wrap_only_ring_depth_is_left(self):
+        rb = SharedRingBuffer(name=f"test_rs_{_uid()}", slots=4, slot_payload_size=8, create=True)
+        try:
+            for i in range(1, 11):
+                rb.write(struct.pack("<Q", i))
+            assert [h.seq_no for h, _ in rb.read_since(0)] == [7, 8, 9, 10]
+        finally:
+            rb.unlink()
+
+    def test_typed_read_since_decodes(self, imu_buffer):
+        for i in range(3):
+            imu_buffer.write(np.full(9, float(i), dtype=np.float32))
+        got = imu_buffer.read_since(1)
+        assert [h.seq_no for h, _ in got] == [2, 3]
+        np.testing.assert_array_equal(got[-1][1], np.full(9, 2.0, dtype=np.float32))
+
+
+class TestReadTsStamping:
+
+    def test_plain_read_does_not_write_shared_memory(self):
+        name = f"test_st_{_uid()}"
+        rb = SharedRingBuffer(name=name, slots=2, slot_payload_size=8, create=True)
+        reader = SharedRingBuffer(name=name, slots=2, slot_payload_size=8, create=False)
+        try:
+            rb.write(b"\x01" * 8)
+            before = bytes(rb._shm.buf[: rb.slot_size])
+            h, _ = reader.read_latest()
+            assert h.read_ts > 0                      # local read time is still reported
+            assert bytes(rb._shm.buf[: rb.slot_size]) == before
+            reader.read_latest(stamp=True)
+            (stored,) = struct.unpack_from("<d", rb._shm.buf, 16)
+            assert stored > 0
+        finally:
+            reader.close()
+            rb.unlink()
+
+
+class TestSeqlockLayout:
+
+    def test_trailing_seq_and_alignment(self):
+        rb = SharedRingBuffer(name=f"test_sl_{_uid()}", slots=3, slot_payload_size=13, create=True)
+        try:
+            assert rb.slot_size % 64 == 0
+            for _ in range(4):
+                rb.write(b"\x07" * 13)
+            # slot 0 now holds seq 4: header seq and trailer agree
+            (seq,) = struct.unpack_from("<Q", rb._shm.buf, 0)
+            (trailer,) = struct.unpack_from("<Q", rb._shm.buf, rb._trailer_rel)
+            assert seq == trailer == 4
+        finally:
+            rb.unlink()
+
+    def test_mismatched_trailer_is_rejected(self):
+        rb = SharedRingBuffer(name=f"test_sl_{_uid()}", slots=1, slot_payload_size=8, create=True)
+        try:
+            rb.write(b"\x01" * 8)
+            struct.pack_into("<Q", rb._shm.buf, rb._trailer_rel, 99)   # simulate a torn publish
+            assert rb.read_latest() is None
+            assert rb.read_since(0) == []
+        finally:
+            rb.unlink()
+
+
+def _spawned_writer(buf, n, start):
+    for i in range(n):
+        buf.write(float(start + i), 0.5)
+    buf.close()
+
+
+class TestCounterAcrossProcesses:
+
+    def test_restarted_producer_continues_sequence(self):
+        """start.py hands the same buffer object to a restarted producer: seq keeps increasing."""
+        ctx = mp.get_context("spawn")
+        buf = ControlBuffer(slots=8, name=f"test_ctr_{_uid()}", create=True)
+        try:
+            for start in (0, 3):
+                p = ctx.Process(target=_spawned_writer, args=(buf, 3, start))
+                p.start()
+                p.join(timeout=30)
+                assert p.exitcode == 0
+            got = buf.read_since(0)
+            assert [h.seq_no for h, *_ in got] == [1, 2, 3, 4, 5, 6]
+            assert [s for _, s, _ in got] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+        finally:
+            buf.unlink()
+
+
+class TestDecodeMatchesReadLatest:
+
+    def test_every_typed_buffer(self, tmp_path):
+        from control.types import VehicleState
+        from shared_buffer import (
+            IMUBuffer, LidarBuffer, PoseBuffer, SegmentationBuffer, StateBuffer, TrackBoundaryBuffer,
+        )
+
+        u = _uid()
+        cases = [
+            (FrameBuffer(slots=2, name=f"d_f_{u}"),
+             (np.zeros((4, 5, 3), np.uint8) + 7, np.ones((4, 5), np.float32))),
+            (IMUBuffer(slots=2, name=f"d_i_{u}"), (np.arange(9, dtype=np.float32),)),
+            (SegmentationBuffer(slots=2, name=f"d_s_{u}"), (np.eye(4, dtype=np.int32),)),
+            (PoseBuffer(slots=2, name=f"d_p_{u}"), (np.eye(4), np.ones((3, 3)), 1.5)),
+            (ControlBuffer(slots=2, name=f"d_c_{u}"), (0.25, 0.75)),
+            (PointCloudBuffer(slots=2, name=f"d_pc_{u}", max_points=10), (np.ones((5, 3)),)),
+            (TrackBoundaryBuffer(slots=2, name=f"d_b_{u}"), (np.ones((3, 2)), np.zeros((2, 2)))),
+            (StateBuffer(slots=2, name=f"d_st_{u}"), (VehicleState(t=1.0, x=2.0, y=3.0, yaw=0.5, v=1.0, yaw_rate=0.1),)),
+            (LidarBuffer(slots=2, name=f"d_l_{u}"), (np.ones(1080),)),
+        ]
+        try:
+            for buf, args in cases:
+                buf.write(*args)
+                header, payload = buf.ring.read_latest()
+                decoded = buf.decode(payload)
+                via_read = buf.read_latest()[1:]
+                if not isinstance(decoded, tuple):
+                    decoded = (decoded,)
+                assert len(decoded) == len(via_read), type(buf).__name__
+                for a, b in zip(decoded, via_read):
+                    if isinstance(a, np.ndarray):
+                        np.testing.assert_array_equal(a, b)
+                    else:
+                        assert a == b
+            seg = cases[2][0].read_latest()[1]
+            assert seg.dtype == np.uint8
+            assert cases[5][0].ring.dtype_tag == DTypeTag.POINTCLOUD
+            assert cases[6][0].ring.dtype_tag == DTypeTag.BOUNDARY
+        finally:
+            for buf, _ in cases:
+                buf.unlink()
+
+
+def test_buffer_name_helper():
+    from shared_buffer import buffer_name
+
+    assert buffer_name(None, "frame_buf") == "frame_buf"
+    assert buffer_name("", "frame_buf") == "frame_buf"
+    assert buffer_name("run42", "frame_buf") == "run42_frame_buf"
+    assert buffer_name("run42_", "frame_buf") == "run42_frame_buf"

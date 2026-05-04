@@ -4,27 +4,39 @@ Segmentation masks.
 Payload:
     [4 bytes]  uint32  height
     [4 bytes]  uint32  width
-    [H*W*4]    float32 mask data (row-major)
+    [H*W]      uint8   mask data (row-major)
+
+Masks are class ids / 0-1 track masks, so they are stored as uint8 (values
+are clipped to 0..255, fractional values truncated). Recordings made with
+schema version 1 stored float32 masks; decode() recognises those by size.
+read_latest() -> (header, (H, W) uint8); decode(payload) -> (H, W) uint8.
 """
 
 from __future__ import annotations
 
 import struct
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader
+from .typed import TypedRingBuffer
 
 _DEFAULT_SHAPE = (480, 640)
 _META_FMT = "<II"
 _META_SIZE = struct.calcsize(_META_FMT)
-_MAX_PAYLOAD = _META_SIZE + _DEFAULT_SHAPE[0] * _DEFAULT_SHAPE[1] * 4  # float32
+_MAX_PAYLOAD = _META_SIZE + _DEFAULT_SHAPE[0] * _DEFAULT_SHAPE[1]  # uint8
 
 
-class SegmentationBuffer:
-    """Masks up to 640x480 by default; bump max_payload for bigger ones."""
+def max_payload_for(height: int, width: int) -> int:
+    """Slot payload size needed for an (height, width) mask."""
+    return _META_SIZE + height * width
+
+
+class SegmentationBuffer(TypedRingBuffer):
+    """Masks up to 640x480 by default; bump max_payload for bigger ones
+    (see max_payload_for)."""
 
     def __init__(
         self,
@@ -42,30 +54,21 @@ class SegmentationBuffer:
         )
 
     def write(self, mask: np.ndarray, ts: Optional[float] = None) -> SlotHeader:
-        """Any numeric (H, W) mask; stored as float32."""
-        mask_f32 = mask.astype(np.float32)
-        h, w = mask_f32.shape[:2]
-        meta = struct.pack(_META_FMT, h, w)
-        payload = meta + mask_f32.tobytes()
+        """Any numeric (H, W) mask; stored as uint8."""
+        mask = np.asarray(mask)
+        if mask.dtype != np.uint8:
+            mask = np.clip(mask, 0, 255).astype(np.uint8)
+        h, w = mask.shape[:2]
+        payload = struct.pack(_META_FMT, h, w) + np.ascontiguousarray(mask).tobytes()
         return self._rb.write(payload, ts)
 
-    def latest_seq(self) -> int:
-        """Highest published seq_no, without copying any data."""
-        return self._rb.latest_seq()
-
-    def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray]]:
-        result = self._rb.read_latest()
-        if result is None:
-            return None
-        header, payload = result
+    @staticmethod
+    def decode(payload: bytes) -> np.ndarray:
+        """payload -> (H, W) uint8 mask"""
         h, w = struct.unpack_from(_META_FMT, payload, 0)
-        mask = np.frombuffer(payload, dtype=np.float32, count=h * w, offset=_META_SIZE).reshape(
-            (h, w)
-        ).copy()
-        return header, mask
-
-    def close(self):
-        self._rb.close()
-
-    def unlink(self):
-        self._rb.unlink()
+        n = h * w
+        if len(payload) - _META_SIZE >= n * 4 and n > 0:
+            # schema v1 recording: float32 mask
+            legacy = np.frombuffer(payload, dtype=np.float32, count=n, offset=_META_SIZE)
+            return np.clip(legacy, 0, 255).astype(np.uint8).reshape((h, w))
+        return np.frombuffer(payload, dtype=np.uint8, count=n, offset=_META_SIZE).reshape((h, w)).copy()

@@ -23,6 +23,7 @@ import numpy as np
 
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader
+from .typed import TypedRingBuffer
 
 # slots are sized for 640x480 RGB (uint8) + 640x480 float32 depth
 _DEFAULT_RGB_SHAPE = (480, 640, 3)
@@ -38,11 +39,14 @@ _MAX_PAYLOAD = (
 )
 
 
-class FrameBuffer:
+class FrameBuffer(TypedRingBuffer):
     """Camera frame pairs (RGB + depth).
 
     Pass a bigger max_payload if you run the camera above 640x480.
+    read_latest() -> (header, rgb, depth); decode(payload) -> (rgb, depth).
     """
+
+    _MULTI = True
 
     def __init__(
         self,
@@ -68,20 +72,10 @@ class FrameBuffer:
         payload = meta + rgb.tobytes() + depth.tobytes()
         return self._rb.write(payload, ts)
 
-    def latest_seq(self) -> int:
-        """Highest published seq_no, without copying any data."""
-        return self._rb.latest_seq()
-
-    def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray, np.ndarray]]:
-        """Newest (header, rgb, depth), or None if nothing's been written.
-
-        depth comes back in whatever dtype it was written as.
-        """
-        result = self._rb.read_latest()
-        if result is None:
-            return None
-
-        header, payload = result
+    @staticmethod
+    def decode(payload: bytes) -> Tuple[np.ndarray, np.ndarray]:
+        """payload -> (rgb, depth); depth comes back in whatever dtype it was
+        written as (float32 metres, or uint16)."""
         rh, rw, dh, dw = struct.unpack_from(_META_FMT, payload, 0)
 
         rgb_size = rh * rw * 3
@@ -93,19 +87,8 @@ class FrameBuffer:
         # 4 B/px left over -> float32, otherwise uint16
         remaining = len(payload) - depth_offset
         depth_pixels = dh * dw
-        if remaining == depth_pixels * 4:
-            depth = np.frombuffer(payload, dtype=np.float32, count=depth_pixels, offset=depth_offset).reshape(
-                (dh, dw)
-            )
-        else:
-            depth = np.frombuffer(payload, dtype=np.uint16, count=depth_pixels, offset=depth_offset).reshape(
-                (dh, dw)
-            )
-
-        return header, rgb.copy(), depth.copy()
-
-    def close(self):
-        self._rb.close()
-
-    def unlink(self):
-        self._rb.unlink()
+        dtype = np.float32 if remaining == depth_pixels * 4 else np.uint16
+        depth = np.frombuffer(payload, dtype=dtype, count=depth_pixels, offset=depth_offset).reshape(
+            (dh, dw)
+        )
+        return rgb.copy(), depth.copy()

@@ -9,6 +9,7 @@ Payload layout:
 
 BEV here means the two ground-plane world axes picked by bev_axes. Max 10k
 vertices per side, anything past that is dropped.
+read_latest() -> (header, outer, inner); decode(payload) -> (outer, inner).
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import numpy as np
 
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader
+from .typed import TypedRingBuffer
 
 _COUNT_FMT = "<I"
 _COUNT_SIZE = 4
@@ -27,7 +29,18 @@ _MAX_BOUNDARY_PTS = 10_000
 _MAX_PAYLOAD = 2 * _COUNT_SIZE + 2 * _MAX_BOUNDARY_PTS * 2 * 4  # ~160 KB
 
 
-class TrackBoundaryBuffer:
+def _read_line(payload: bytes, offset: int) -> Tuple[np.ndarray, int]:
+    (n,) = struct.unpack_from(_COUNT_FMT, payload, offset)
+    offset += _COUNT_SIZE
+    if n == 0:
+        return np.empty((0, 2), dtype=np.float32), offset
+    line = np.frombuffer(payload, dtype=np.float32, count=n * 2, offset=offset).reshape((n, 2)).copy()
+    return line, offset + n * 2 * 4
+
+
+class TrackBoundaryBuffer(TypedRingBuffer):
+
+    _MULTI = True
 
     def __init__(
         self,
@@ -39,7 +52,7 @@ class TrackBoundaryBuffer:
             name=name,
             slots=slots,
             slot_payload_size=_MAX_PAYLOAD,
-            dtype_tag=DTypeTag.UNKNOWN,
+            dtype_tag=DTypeTag.BOUNDARY,
             create=create,
         )
 
@@ -61,44 +74,9 @@ class TrackBoundaryBuffer:
         )
         return self._rb.write(payload, ts)
 
-    def latest_seq(self) -> int:
-        """Highest published seq_no, without copying any data."""
-        return self._rb.latest_seq()
-
-    def read_latest(
-        self,
-    ) -> Optional[Tuple[SlotHeader, np.ndarray, np.ndarray]]:
-        """(header, outer, inner) with each line (N, 2) float32; None if empty"""
-        result = self._rb.read_latest()
-        if result is None:
-            return None
-
-        header, payload = result
-        offset = 0
-
-        (n_outer,) = struct.unpack_from(_COUNT_FMT, payload, offset)
-        offset += _COUNT_SIZE
-        if n_outer > 0:
-            outer = np.frombuffer(
-                payload, dtype=np.float32, count=n_outer * 2, offset=offset
-            ).reshape((n_outer, 2)).copy()
-        else:
-            outer = np.empty((0, 2), dtype=np.float32)
-        offset += n_outer * 2 * 4
-
-        (n_inner,) = struct.unpack_from(_COUNT_FMT, payload, offset)
-        offset += _COUNT_SIZE
-        if n_inner > 0:
-            inner = np.frombuffer(
-                payload, dtype=np.float32, count=n_inner * 2, offset=offset
-            ).reshape((n_inner, 2)).copy()
-        else:
-            inner = np.empty((0, 2), dtype=np.float32)
-
-        return header, outer, inner
-
-    def close(self):
-        self._rb.close()
-
-    def unlink(self):
-        self._rb.unlink()
+    @staticmethod
+    def decode(payload: bytes) -> Tuple[np.ndarray, np.ndarray]:
+        """payload -> (outer, inner), each (N, 2) float32"""
+        outer, offset = _read_line(payload, 0)
+        inner, _ = _read_line(payload, offset)
+        return outer, inner

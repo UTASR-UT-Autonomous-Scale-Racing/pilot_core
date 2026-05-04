@@ -4,24 +4,26 @@ IMU vectors, 9 x float32 (36 bytes):
     qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw
 
 Orientation quaternion, accel in m/s^2, then the raw throttle/steering
-feedback from the Arduino. NB: the OAK-D IMU path has no such feedback, so it
-puts gyro x / y (rad/s) in the last two slots instead.
+feedback from the Arduino (pulse widths in us). NB: the OAK-D IMU path has no
+such feedback, so it puts gyro x / y (rad/s) in the last two slots instead.
+read_latest() -> (header, (9,) float32); decode(payload) -> (9,) float32.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader
+from .typed import TypedRingBuffer
 
 _IMU_FLOATS = 9
 _PAYLOAD_SIZE = _IMU_FLOATS * 4  # 36 bytes
 
 
-class IMUBuffer:
+class IMUBuffer(TypedRingBuffer):
 
     def __init__(
         self,
@@ -39,24 +41,12 @@ class IMUBuffer:
 
     def write(self, imu_vector: np.ndarray, ts: Optional[float] = None) -> SlotHeader:
         """imu_vector is (9,), laid out as in the module docstring."""
-        payload = imu_vector.astype(np.float32).tobytes()
-        return self._rb.write(payload, ts)
+        vec = np.asarray(imu_vector, dtype=np.float32)
+        if vec.shape != (_IMU_FLOATS,):
+            raise ValueError(f"IMU vector must have shape ({_IMU_FLOATS},), got {vec.shape}")
+        return self._rb.write(vec.tobytes(), ts)
 
-    def latest_seq(self) -> int:
-        """Highest published seq_no, without copying any data."""
-        return self._rb.latest_seq()
-
-    def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray]]:
-        """(header, (9,) float32 vector) or None"""
-        result = self._rb.read_latest()
-        if result is None:
-            return None
-        header, payload = result
-        vector = np.frombuffer(payload, dtype=np.float32, count=_IMU_FLOATS).copy()
-        return header, vector
-
-    def close(self):
-        self._rb.close()
-
-    def unlink(self):
-        self._rb.unlink()
+    @staticmethod
+    def decode(payload: bytes) -> np.ndarray:
+        """payload -> (9,) float32 vector"""
+        return np.frombuffer(payload, dtype=np.float32, count=_IMU_FLOATS).copy()

@@ -6,6 +6,9 @@ Payload layout:
     [4 bytes]   uint32          num_map_points  (N)
     [N*12 bytes] float32[N][3]  map point positions (x, y, z)
     [4 bytes]   float32         speed (m/s)
+
+read_latest() -> (header, pose, map_points, speed);
+decode(payload) -> (pose, map_points, speed).
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import numpy as np
 
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader
+from .typed import TypedRingBuffer
 
 _POSE_BYTES = 4 * 4 * 4  # 4x4 float32
 _COUNT_FMT = "<I"
@@ -26,7 +30,9 @@ _SPEED_SIZE = 4
 _MAX_PAYLOAD = _POSE_BYTES + _COUNT_SIZE + _MAX_MAP_POINTS * 3 * 4 + _SPEED_SIZE  # ~25 KB
 
 
-class PoseBuffer:
+class PoseBuffer(TypedRingBuffer):
+
+    _MULTI = True
 
     def __init__(
         self,
@@ -63,23 +69,10 @@ class PoseBuffer:
         payload += struct.pack("<f", float(speed))
         return self._rb.write(payload, ts)
 
-    def latest_seq(self) -> int:
-        """Highest published seq_no, without copying any data."""
-        return self._rb.latest_seq()
-
-    def read_latest(
-        self,
-    ) -> Optional[Tuple[SlotHeader, np.ndarray, np.ndarray, float]]:
-        """(header, pose 4x4, map_points Nx3, speed m/s) or None."""
-        result = self._rb.read_latest()
-        if result is None:
-            return None
-
-        header, payload = result
-
-        pose = np.frombuffer(payload, dtype=np.float32, count=16, offset=0).reshape(
-            (4, 4)
-        ).copy()
+    @staticmethod
+    def decode(payload: bytes) -> Tuple[np.ndarray, np.ndarray, float]:
+        """payload -> (pose 4x4, map_points Nx3, speed m/s)"""
+        pose = np.frombuffer(payload, dtype=np.float32, count=16, offset=0).reshape((4, 4)).copy()
 
         (n,) = struct.unpack_from(_COUNT_FMT, payload, _POSE_BYTES)
         if n > 0:
@@ -95,11 +88,4 @@ class PoseBuffer:
             (speed,) = struct.unpack_from("<f", payload, speed_offset)
         else:
             speed = 0.0
-
-        return header, pose, map_points, speed
-
-    def close(self):
-        self._rb.close()
-
-    def unlink(self):
-        self._rb.unlink()
+        return pose, map_points, speed

@@ -3,34 +3,83 @@ Fixed-slot ring buffer on top of multiprocessing.shared_memory. One producer,
 any number of consumers.
 
 Readers on the same box get the data without pickling. Writes never block,
-the oldest slot just gets overwritten, and reads always return the newest
-slot rather than draining a queue. Every slot carries produced_ts and read_ts
-so we can measure lag end to end.
+the oldest slot just gets overwritten. read_latest() returns the newest slot;
+read_since(seq) returns every slot still in the ring that is newer than seq
+(for consumers such as the recorder that must not drop samples). Every slot
+carries produced_ts and read_ts so we can measure lag end to end.
 
-Only one writer per buffer is supported. Slots use a seqlock so a reader
-can't see a half-written record: the writer zeroes seq_no first (readers
-skip zeroed slots), then writes the payload, then writes the header with the
-new seq_no last. The reader copies header + payload, re-reads seq_no, and
-retries if the writer lapped it mid-copy.
+Slot layout (slot_size is rounded up to 64 bytes so every slot, and therefore
+every 8-byte seq field, stays 8-byte aligned):
 
-Readers do write one thing: read_ts, as a single aligned 8-byte float64
-store, which is atomic on x86 and ARM64. The write counter is an
-mp.Value('Q') held by whoever created the buffer, guarded by its own lock.
+    [64 bytes]            SlotHeader (schema.py), seq_no in the first 8 bytes
+    [slot_payload_size]   payload (padded to a multiple of 8)
+    [8 bytes]             uint64 trailing copy of seq_no
+
+Seqlock protocol. Only one writer per buffer is supported.
+
+  writer:  1. header with seq_no = 0 (readers skip zeroed slots), trailer = 0
+           2. payload
+           3. trailing seq_no          (separate 8-byte struct.pack_into)
+           4. header seq_no            (separate 8-byte struct.pack_into, last)
+  reader:  1. copy the header, seq_before = its seq_no (skip if 0)
+           2. copy the payload
+           3. read the trailing seq_no, then re-read the header seq_no
+           4. accept only if seq_before == trailing == seq_after
+
+On weakly ordered CPUs (the Jetson's ARM cores) stores from one memcpy can
+become visible out of order; that is why seq_no is never published in the
+same memcpy as the rest of the header and why the trailer, written after the
+payload, is compared too. Python cannot emit a DMB directly, so between the
+steps both sides also take and release a process-local lock (_fence), whose
+atomic instructions order the surrounding loads/stores in practice. This is
+best effort, not a formal C11 guarantee; tests/test_ring_buffer_consistency.py
+checks that readers never get a torn record.
+
+Readers only write into shared memory when they ask for it: read_latest(
+stamp=True) / read_since(..., stamp=True) store read_ts as a single aligned
+8-byte float64 (atomic on x86 and ARM64). Plain polls never touch the block.
+
+The write counter is an mp.Value('Q', lock=False) created by whoever created
+the buffer and inherited by the producer process (also by a producer that
+start.py restarts after a crash). No lock is needed: there is exactly one live
+writer at a time, because start.py restarts a worker only after the previous
+process has exited. A lock would be actively harmful here: a producer killed
+while holding it would leave it locked and the restarted producer would block
+forever in write().
 """
 
 from __future__ import annotations
 
 import multiprocessing as mp
 import struct
+import threading
 import time
 from multiprocessing import shared_memory
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from .schema import HEADER_SIZE, SCHEMA_VERSION, DTypeTag, SlotHeader
 
 # seqlock retries per read_latest() call. If the writer laps us this many
 # times in a row the reader is way too slow for the slot count anyway
 _READ_RETRIES = 8
+
+_SEQ = struct.Struct("<Q")
+_TS = struct.Struct("<d")
+_READ_TS_OFFSET = 16      # see schema.py
+_TRAILER_SIZE = 8
+_SLOT_ALIGN = 64
+
+_fence_lock = threading.Lock()
+
+
+def _fence() -> None:
+    """Best-effort full memory barrier (see module docstring)."""
+    _fence_lock.acquire()
+    _fence_lock.release()
+
+
+def _round_up(n: int, a: int) -> int:
+    return (n + a - 1) // a * a
 
 
 class SharedRingBuffer:
@@ -43,13 +92,13 @@ class SharedRingBuffer:
     slots : int
         Number of slots in the ring.
     slot_payload_size : int
-        Max payload bytes per slot. Anything longer gets truncated so a
-        write can't spill into the next slot.
+        Max payload bytes per slot. Larger writes raise ValueError.
     dtype_tag : DTypeTag
         Tag stamped into every slot header.
     create : bool
         True creates the block (the orchestrator does this). Read-only
-        workers pass False and attach to the existing block by name.
+        workers pass False and attach to the existing block by name; they
+        must pass the same slots / slot_payload_size.
     """
 
     def __init__(
@@ -63,7 +112,8 @@ class SharedRingBuffer:
         self.name = name
         self.slots = slots
         self.slot_payload_size = slot_payload_size
-        self.slot_size = HEADER_SIZE + slot_payload_size
+        self._trailer_rel = HEADER_SIZE + _round_up(slot_payload_size, 8)
+        self.slot_size = _round_up(self._trailer_rel + _TRAILER_SIZE, _SLOT_ALIGN)
         self.dtype_tag = dtype_tag
         self._total_size = self.slots * self.slot_size
 
@@ -75,23 +125,32 @@ class SharedRingBuffer:
                 stale.unlink()
             except FileNotFoundError:
                 pass
+            # a fresh POSIX shm block is zero-filled by the kernel, and
+            # seq_no == 0 already means "unwritten", so no explicit clear
             self._shm = shared_memory.SharedMemory(
                 name=name, create=True, size=self._total_size
             )
-            # seq_no == 0 means unwritten
-            self._shm.buf[: self._total_size] = b"\x00" * self._total_size
+            # cross-process write counter; single live writer, see docstring
+            self._seq = mp.Value("Q", 0, lock=False)  # uint64
         else:
             self._shm = shared_memory.SharedMemory(name=name, create=False)
-
-        # cross-process write counter, only the producer bumps it
-        if create:
-            self._seq = mp.Value("Q", 0, lock=True)  # uint64
-        else:
+            if self._shm.size < self._total_size:
+                size = self._shm.size
+                self._shm.close()
+                raise ValueError(
+                    f"shm block {name!r} is {size} bytes, expected at least "
+                    f"{self._total_size} for {slots} x {slot_payload_size}-byte slots"
+                )
             # readers scan slot headers instead
             self._seq = None
 
     def _slot_offset(self, index: int) -> int:
         return index * self.slot_size
+
+    def _slot_seq(self, index: int) -> int:
+        return _SEQ.unpack_from(self._shm.buf, index * self.slot_size)[0]
+
+    # writing
 
     def write(self, payload: bytes, ts: Optional[float] = None) -> SlotHeader:
         """Write raw bytes into the next slot and return the header.
@@ -109,15 +168,14 @@ class SharedRingBuffer:
                 f"payload of {payload_len} bytes exceeds the slot size of {self.slot_payload_size}"
             )
 
-        with self._seq.get_lock():
-            self._seq.value += 1
-            seq_no = self._seq.value
+        self._seq.value += 1
+        seq_no = self._seq.value
 
-        slot_idx = (seq_no - 1) % self.slots
-        offset = self._slot_offset(slot_idx)
+        offset = self._slot_offset((seq_no - 1) % self.slots)
+        buf = self._shm.buf
 
         header = SlotHeader(
-            seq_no=seq_no,
+            seq_no=0,
             produced_ts=time.monotonic() if ts is None else float(ts),
             read_ts=0.0,
             payload_size=payload_len,
@@ -125,80 +183,96 @@ class SharedRingBuffer:
             dtype_tag=int(self.dtype_tag),
         )
 
-        # seqlock publish: invalidate -> payload -> header (seq_no goes last)
-        struct.pack_into("<Q", self._shm.buf, offset, 0)
-        self._shm.buf[offset + HEADER_SIZE : offset + HEADER_SIZE + payload_len] = payload
-        self._shm.buf[offset : offset + HEADER_SIZE] = header.pack()
+        # 1. invalidate: header with seq_no = 0 first, then clear the trailer
+        _SEQ.pack_into(buf, offset, 0)
+        _fence()
+        buf[offset : offset + HEADER_SIZE] = header.pack()
+        _SEQ.pack_into(buf, offset + self._trailer_rel, 0)
+        # 2. payload
+        buf[offset + HEADER_SIZE : offset + HEADER_SIZE + payload_len] = payload
+        _fence()
+        # 3. trailing seq, 4. header seq (publish)
+        _SEQ.pack_into(buf, offset + self._trailer_rel, seq_no)
+        _fence()
+        _SEQ.pack_into(buf, offset, seq_no)
 
+        header.seq_no = seq_no
         return header
+
+    # reading
 
     def latest_seq(self) -> int:
         """Highest published seq_no (0 if nothing written), without copying data.
 
         Lets pollers skip the full payload copy when nothing new has arrived.
         """
-        return max(struct.unpack_from("<Q", self._shm.buf, self._slot_offset(i))[0] for i in range(self.slots))
+        return max(self._slot_seq(i) for i in range(self.slots))
 
-    def read_latest(self) -> Optional[Tuple[SlotHeader, bytes]]:
+    def _read_slot(
+        self, index: int, expected_seq: int = 0, stamp: bool = False
+    ) -> Optional[Tuple[SlotHeader, bytes]]:
+        """One seqlock attempt on one slot. None if the slot is empty, torn,
+        or (with expected_seq) no longer holds that record."""
+        offset = self._slot_offset(index)
+        buf = self._shm.buf
+
+        header = SlotHeader.unpack(bytes(buf[offset : offset + HEADER_SIZE]))
+        seq_before = header.seq_no
+        if seq_before == 0 or (expected_seq and seq_before != expected_seq):
+            return None
+        if header.payload_size > self.slot_payload_size:
+            return None  # header from a half-published write
+        _fence()
+        payload = bytes(
+            buf[offset + HEADER_SIZE : offset + HEADER_SIZE + header.payload_size]
+        )
+        _fence()
+        trailer = _SEQ.unpack_from(buf, offset + self._trailer_rel)[0]
+        seq_after = _SEQ.unpack_from(buf, offset)[0]
+        if not (seq_before == trailer == seq_after):
+            return None  # writer touched the slot during the copy
+
+        now = time.monotonic()
+        header.read_ts = now
+        if stamp:
+            _TS.pack_into(buf, offset + _READ_TS_OFFSET, now)
+        return header, payload
+
+    def read_latest(self, stamp: bool = False) -> Optional[Tuple[SlotHeader, bytes]]:
         """(header, payload) for the slot with the highest seq_no, or None
         if nothing complete has been written yet.
 
-        Also stamps read_ts in the slot header with time.monotonic(), which is
-        how the monitors track consumer lag.
+        header.read_ts is set to the local read time. Only with stamp=True is
+        it also stored in the shared slot header (that's how monitors and the
+        recorder track consumer lag); plain polls don't write to shared memory.
         """
         for _ in range(_READ_RETRIES):
-            result = self._try_read_latest()
-            if result is not None or not self._any_slot_written():
+            seqs = [self._slot_seq(i) for i in range(self.slots)]
+            best = max(range(self.slots), key=seqs.__getitem__)
+            if seqs[best] == 0:
+                return None
+            result = self._read_slot(best, seqs[best], stamp)
+            if result is not None:
                 return result
         return None
 
-    def _any_slot_written(self) -> bool:
-        return any(
-            struct.unpack_from("<Q", self._shm.buf, self._slot_offset(i))[0]
-            for i in range(self.slots)
-        )
+    def read_since(self, seq: int, stamp: bool = False) -> List[Tuple[SlotHeader, bytes]]:
+        """Every record still in the ring with seq_no > seq, oldest first.
 
-    def _try_read_latest(self) -> Optional[Tuple[SlotHeader, bytes]]:
-        """Single seqlock attempt. None if the slot changed under us."""
-        best_seq = 0
-        best_idx = -1
-
-        for i in range(self.slots):
-            offset = self._slot_offset(i)
-            raw_header = bytes(self._shm.buf[offset : offset + HEADER_SIZE])
-            # seq_no = first 8 bytes, LE uint64
-            (seq_no,) = struct.unpack_from("<Q", raw_header, 0)
-            if seq_no > best_seq:
-                best_seq = seq_no
-                best_idx = i
-
-        if best_idx < 0:
-            return None
-
-        offset = self._slot_offset(best_idx)
-        raw_header = bytes(self._shm.buf[offset : offset + HEADER_SIZE])
-        header = SlotHeader.unpack(raw_header)
-
-        if header.seq_no != best_seq:
-            return None  # overwritten between scan and header read
-
-        payload = bytes(
-            self._shm.buf[
-                offset + HEADER_SIZE : offset + HEADER_SIZE + header.payload_size
-            ]
-        )
-
-        # writer touched the slot during the copy? then throw it away
-        (seq_after,) = struct.unpack_from("<Q", self._shm.buf, offset)
-        if seq_after != header.seq_no:
-            return None
-
-        # read_ts lives at header offset 16, see schema.py
-        now = time.monotonic()
-        struct.pack_into("<d", self._shm.buf, offset + 16, now)
-        header.read_ts = now
-
-        return header, payload
+        Each record is read under the seqlock; a slot that the writer
+        overwrites while we read it is skipped (its newer record shows up on
+        the next call). Records older than the ring depth are gone for good:
+        compare the first returned seq_no with seq + 1 to count drops.
+        """
+        seqs = [(self._slot_seq(i), i) for i in range(self.slots)]
+        out: List[Tuple[SlotHeader, bytes]] = []
+        for s, i in sorted(seqs):
+            if s <= seq:
+                continue
+            result = self._read_slot(i, s, stamp)
+            if result is not None:
+                out.append(result)
+        return out
 
     def close(self) -> None:
         """Close our handle. Doesn't unlink."""

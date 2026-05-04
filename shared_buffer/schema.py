@@ -18,6 +18,8 @@ class DTypeTag(IntEnum):
     CONTROL = 5        # steering + throttle in [0, 1], 0.5 = neutral
     LIDAR = 6          # 1080 x float32 ranges
     STATE = 7          # estimated vehicle state (BEV)
+    POINTCLOUD = 8     # N x 3 float32 SLAM map points
+    BOUNDARY = 9       # outer + inner track polylines
 
 
 # header layout, 64 bytes total
@@ -25,7 +27,8 @@ class DTypeTag(IntEnum):
 #   Offset  Size  Type      Field
 #   0       8     uint64    seq_no           (monotonically increasing write counter)
 #   8       8     float64   produced_ts      (time.monotonic() of the sample)
-#   16      8     float64   read_ts          (time.monotonic() at read, set by the consumer)
+#   16      8     float64   read_ts          (time.monotonic() at read, only stamped by readers
+#                                             that ask for it: read_latest(stamp=True))
 #   24      4     uint32    payload_size     (actual bytes written in payload area)
 #   28      2     uint16    schema_version
 #   30      2     uint16    dtype_tag        (DTypeTag value)
@@ -35,7 +38,11 @@ HEADER_FORMAT = "<QddIHH32s"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)  # 64 bytes
 HEADER_STRUCT = struct.Struct(HEADER_FORMAT)
 
-SCHEMA_VERSION = 1
+# 2: slot ends with a trailing seq_no copy (see ring_buffer.py), segmentation
+#    masks stored as uint8, POINTCLOUD / BOUNDARY tags. The recording file format
+#    is unchanged apart from these payload details; version 1 files still read.
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 
 
 @dataclass

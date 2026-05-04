@@ -1,22 +1,23 @@
 """
 2D lidar scan: 1080 float32 ranges in metres, angle_min first, angle_max last
-(4320 bytes).
+(4320 bytes). read_latest() -> (header, ranges); decode(payload) -> (1080,) float32.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 
 from .ring_buffer import SharedRingBuffer
 from .schema import DTypeTag, SlotHeader
+from .typed import TypedRingBuffer
 
 _N_RAYS = 1080
 _PAYLOAD_SIZE = _N_RAYS * 4  # 4320 bytes
 
 
-class LidarBuffer:
+class LidarBuffer(TypedRingBuffer):
 
     def __init__(
         self,
@@ -37,20 +38,7 @@ class LidarBuffer:
         payload = ranges.astype(np.float32).tobytes()
         return self._rb.write(payload, ts)
 
-    def latest_seq(self) -> int:
-        """Highest published seq_no, without copying any data."""
-        return self._rb.latest_seq()
-
-    def read_latest(self) -> Optional[Tuple[SlotHeader, np.ndarray]]:
-        result = self._rb.read_latest()
-        if result is None:
-            return None
-        header, payload = result
-        ranges = np.frombuffer(payload, dtype=np.float32, count=_N_RAYS).copy()
-        return header, ranges
-
-    def close(self):
-        self._rb.close()
-
-    def unlink(self):
-        self._rb.unlink()
+    @staticmethod
+    def decode(payload: bytes) -> np.ndarray:
+        """payload -> (1080,) float32 ranges"""
+        return np.frombuffer(payload, dtype=np.float32, count=_N_RAYS).copy()

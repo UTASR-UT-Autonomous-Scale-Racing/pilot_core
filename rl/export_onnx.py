@@ -6,7 +6,8 @@ Export a PPO policy from rl/train.py to ONNX for running on the car
 The graph bakes in the VecNormalize step, so it's the full deterministic path:
 raw obs -> (obs - mean) / sqrt(var + eps), clipped -> mean action -> clip to
 the action space. A <out>.json sidecar next to it records the obs settings
-(n_ahead, boundary spacing/smoothing) the policy was trained with.
+(n_ahead, boundary spacing/smoothing), the policy rate (policy_hz) and the
+SafetyConfig the training env's actuator ran with.
 
 Usage:
     python rl/export_onnx.py --run PPO_3   # latest checkpoint of that run
@@ -64,7 +65,14 @@ def export(model, vec_normalize, env_kwargs: dict, out_path: str) -> str:
                       dynamic_axes={"obs": {0: "batch"}, "action": {0: "batch"}},
                       opset_version=17, dynamo=False)
 
+    safety = env_kwargs.get("safety")
     meta = {
+        # env steps per second during training; TrackEnv defaulted to 10 Hz
+        "policy_hz": float(env_kwargs.get("policy_hz", 10.0)),
+        # SafetyConfig fields of the training actuator. None = trained before
+        # this was recorded (those envs capped forward throttle at
+        # max_throttle_no_speed, 0.4, since they had no speed source)
+        "safety": dict(safety) if safety is not None else None,
         "observation": {
             "n_ahead": int(env_kwargs["n_ahead"]),
             "boundary_spacing": float(env_kwargs["boundary_spacing"]),
@@ -89,17 +97,15 @@ def main() -> int:
     ap.add_argument("--out", default="policy.onnx", help="output ONNX path (default: policy.onnx)")
     args = ap.parse_args()
 
-    # train.py expects to be run from rl/ (it does `from track_env import ...`).
-    # We import it anyway because that registers TrackCNNExtractor, which the
-    # unpickler needs
-    sys.path.insert(0, os.path.join(REPO_ROOT, "rl"))
+    # registers TrackCNNExtractor for the unpickler, without importing train.py
     import importlib
-    train = importlib.import_module("train")
+    importlib.import_module("rl.extractors")
+    from rl.checkpoints import find_checkpoint
 
     if args.run:
         run_dir = os.path.join(REPO_ROOT, "rl", "checkpoints", args.run)
         # model + vecnormalize must come from the same step
-        model_path, vec_path = train._find_checkpoint(run_dir, args.step)
+        model_path, vec_path = find_checkpoint(run_dir, args.step)
         args.model = args.model or model_path
         args.vecnormalize = args.vecnormalize or vec_path
         args.config = args.config or os.path.join(run_dir, "config.json")

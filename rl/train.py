@@ -14,6 +14,11 @@ have to be given together; the -step flags are optional:
     python rl/train.py --policy-from PPO_5 --policy-step 75000 \
                        --value-from PPO_3 --value-step 50000
 
+Merge and resume both keep counting timesteps (reset_num_timesteps=False).
+--vis-port 5558 streams the observed boundary points to rl/vis_obs_ros2.py.
+The actuator in the env runs the same SafetySupervisor limits as the car,
+read from --pilot-config (default config_zmq.yaml; defaults if missing).
+
 Checkpoints (zips, VecNormalize pkls, config.json) land in
 rl/checkpoints/PPO_N/, logs in rl/logs/PPO_N/run_K/. Use rl/export_onnx.py to
 get something the car can run.
@@ -26,75 +31,24 @@ default path is rl/boundaries_easy.
 """
 
 import argparse
-import glob
 import json
+import multiprocessing as mp
 import os
 import re
 import sys
+from dataclasses import asdict
 from typing import Any
 
-# repo root, for shared_buffer / workers
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# repo root, for shared_buffer / workers / rl.*
+REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+sys.path.insert(0, REPO_ROOT)
 
-import torch
-import torch.nn as nn
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from track_env import TrackEnv
-
-
-class TrackCNNExtractor(BaseFeaturesExtractor):
-    """1D CNN over the boundary points in the obs.
-
-    Not used by default, PPO_KWARGS is a plain MlpPolicy. To try it, put
-    features_extractor_class=TrackCNNExtractor and
-    features_extractor_kwargs=dict(n_ahead=...) into POLICY_KWARGS.
-
-    Obs is outer (x, y) pairs, then inner (x, y) pairs, then speed last. Each
-    wall's n_ahead+1 points are ordered closest -> furthest, so a conv with
-    shared weights can pick up curvature, where an MLP just sees a flat
-    unordered vector.
-    """
-
-    def __init__(self, observation_space, n_ahead: int = 20, features_dim: int = 64):
-        super().__init__(observation_space, features_dim=features_dim)
-        self._seq_len = n_ahead + 1
-
-        # channels: outer_x, outer_y, inner_x, inner_y
-        self.cnn = nn.Sequential(
-            nn.Conv1d(4, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(32, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-        )
-        cnn_out_dim = 32 * self._seq_len  # same padding, length unchanged
-
-        self.fc = nn.Sequential(
-            nn.Linear(cnn_out_dim + 1, features_dim),  # +1 for speed
-            nn.ReLU(),
-        )
-
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        seq_len = self._seq_len
-
-        boundary = obs[:, :-1]          # (batch, 4*seq_len)
-        speed    = obs[:, -1:]
-
-        # interleaved xy -> (batch, seq_len, 2) per wall
-        outer = boundary[:, :2*seq_len].reshape(-1, seq_len, 2)
-        inner = boundary[:, 2*seq_len:].reshape(-1, seq_len, 2)
-
-        # Conv1d wants (batch, channels, seq_len)
-        x = torch.cat([outer, inner], dim=2).permute(0, 2, 1)
-
-        x = self.cnn(x)  # (batch, 32, seq_len)
-        x = x.flatten(1)
-        x = self.fc(torch.cat([x, speed], dim=1))
-        return x
+from rl.checkpoints import find_checkpoint, step_from_path
 
 
 # config
@@ -115,6 +69,8 @@ ENV_KWARGS = dict(
     policy_hz              = 20.0,
 )
 
+# To try the 1D CNN: `from rl.extractors import TrackCNNExtractor` and add
+# features_extractor_class=TrackCNNExtractor, features_extractor_kwargs=dict(n_ahead=...)
 POLICY_KWARGS = dict(
     net_arch=dict(
         pi=[256, 256],        # this is what gets exported to ONNX
@@ -213,14 +169,15 @@ def _next_resume_index(run_log_dir: str) -> int:
     return max(nums) + 1 if nums else 1
 
 
-def _save_config(run_dir: str) -> None:
-    """Written so a later resume can check it's compatible."""
+def _save_config(run_dir: str, env_kwargs: dict[str, Any]) -> None:
+    """Written so a later resume/merge/export uses the same env settings.
+    env_kwargs is what the env was actually built with."""
     # policy_kwargs is nested; it's saved separately as POLICY_KWARGS
     ppo_serializable = {k: v for k, v in PPO_KWARGS.items() if k != "policy_kwargs"}
     config = {
         "BOUNDARY_PATH": BOUNDARY_PATH,
         "TOTAL_TIMESTEPS": TOTAL_TIMESTEPS,
-        "ENV_KWARGS": ENV_KWARGS,
+        "ENV_KWARGS": env_kwargs,
         "PPO_KWARGS": ppo_serializable,
         "POLICY_KWARGS": POLICY_KWARGS,
     }
@@ -233,10 +190,36 @@ def _load_config(run_dir: str) -> dict:
         return json.load(f)
 
 
-def _step_from_path(model_path: str) -> int:
-    """Step number from a checkpoint filename (0 for the final one)."""
-    m = re.search(r"ppo_track_(\d+)_steps\.zip", model_path)
-    return int(m.group(1)) if m else 0
+def safety_from_pilot_config(path: str | None) -> dict:
+    """SafetyConfig fields the car would run with for this pilot config.
+
+    Mirrors start.py: the ``safety`` section, with speed_per_throttle
+    defaulting to track_control.speed.longitudinal.speed_per_throttle (3.0).
+    A missing file gives the SafetyConfig defaults.
+    """
+    from control.safety import SafetyConfig
+
+    cfg: dict = {}
+    if path and os.path.exists(path):
+        import yaml
+        with open(path) as f:
+            cfg = yaml.safe_load(f) or {}
+    safety = dict(cfg.get("safety") or {})
+    spt = (cfg.get("track_control") or {}).get("speed", {}).get("longitudinal", {}).get("speed_per_throttle", 3.0)
+    safety.setdefault("speed_per_throttle", spt)
+    return asdict(SafetyConfig(**safety))
+
+
+def resolve_env_kwargs(base: dict[str, Any], safety: dict) -> dict[str, Any]:
+    """Env kwargs to build (and save) the env with: vis port stripped (it's a
+    runtime flag), safety filled in if the saved config predates it."""
+    kwargs = {k: v for k, v in base.items() if k != "vis_zmq_port"}
+    if kwargs.get("safety") is None:
+        kwargs["safety"] = dict(safety)
+    elif kwargs["safety"] != safety:
+        print(f"NOTE: using the run's saved safety settings {kwargs['safety']} "
+              f"instead of the pilot config's {safety}")
+    return kwargs
 
 
 def _transplant_value_network(policy_model: PPO, value_model: PPO) -> None:
@@ -273,42 +256,52 @@ def _transplant_value_network(policy_model: PPO, value_model: PPO) -> None:
     print(f"Transplanted {len(value_keys)} value-network tensors, optimizer reset.")
 
 
-def _find_checkpoint(run_dir: str, step: int | None) -> tuple[str, str]:
-    """(model zip, vecnormalize pkl) for a step; step=None means latest."""
-    if step is not None:
-        model_path = os.path.join(run_dir, f"ppo_track_{step}_steps.zip")
-        vec_path   = os.path.join(run_dir, f"vec_normalize_{step}.pkl")
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"No model checkpoint at step {step}: {model_path}")
-        if not os.path.exists(vec_path):
-            raise FileNotFoundError(f"No VecNormalize stats at step {step}: {vec_path}")
-        return model_path, vec_path
+def merge_overrides(pol_config: dict, val_config: dict) -> dict[str, Any]:
+    """Hyperparameters for a merged model: lr + clip_range from the policy
+    run, clip_range_vf + vf_coef from the value run.
 
-    zips = glob.glob(os.path.join(run_dir, "ppo_track_*_steps.zip"))
-    if not zips:
-        final_model = os.path.join(run_dir, "ppo_track_final.zip")
-        final_vec   = os.path.join(run_dir, "vec_normalize.pkl")
-        if os.path.exists(final_model) and os.path.exists(final_vec):
-            return final_model, final_vec
-        raise FileNotFoundError(f"No checkpoints found in {run_dir}")
-
-    def _step_num(p: str) -> int:
-        m = re.search(r"ppo_track_(\d+)_steps\.zip", p)
-        return int(m.group(1)) if m else -1
-
-    latest     = max(zips, key=_step_num)
-    latest_step = _step_num(latest)
-    vec_path   = os.path.join(run_dir, f"vec_normalize_{latest_step}.pkl")
-    if not os.path.exists(vec_path):
-        raise FileNotFoundError(
-            f"Model checkpoint found ({latest}) but no matching VecNormalize stats: {vec_path}"
-        )
-    return latest, vec_path
+    They go into PPO.load(custom_objects=...) so _setup_model() turns them
+    into proper schedules (setting e.g. model.clip_range = 0.2 after loading
+    leaves a float where SB3 expects a callable)."""
+    pol_ppo = pol_config.get("PPO_KWARGS", {})
+    val_ppo = val_config.get("PPO_KWARGS", {})
+    overrides: dict[str, Any] = {}
+    for key, src in (("learning_rate", pol_ppo), ("clip_range", pol_ppo),
+                     ("clip_range_vf", val_ppo), ("vf_coef", val_ppo)):
+        if key in src:
+            overrides[key] = src[key]
+    return overrides
 
 
-def make_env(env_kwargs: dict[str, Any] | None = None) -> TrackEnv:
-    kwargs = env_kwargs or ENV_KWARGS
-    env = TrackEnv(**kwargs)
+def load_merged_model(pol_model_path: str, val_model_path: str, pol_config: dict, val_config: dict,
+                      env, tensorboard_log: str | None = None) -> PPO:
+    """Policy net (+ features) from one checkpoint, value net from another."""
+    pol_model = PPO.load(pol_model_path, env=env, device="cpu", tensorboard_log=tensorboard_log,
+                         custom_objects=merge_overrides(pol_config, val_config))
+    val_model = PPO.load(val_model_path, device="cpu")  # weights only, no env
+    _transplant_value_network(pol_model, val_model)
+    del val_model
+    # timestep counter continues from the value checkpoint
+    pol_model.num_timesteps = step_from_path(val_model_path)
+    return pol_model
+
+
+def load_resumed_model(model_path: str, env, tensorboard_log: str | None = None) -> PPO:
+    """Reload a checkpoint; the current PPO_KWARGS override what was saved."""
+    overrides = {k: v for k, v in PPO_KWARGS.items() if k not in ("policy", "policy_kwargs", "device")}
+    model = PPO.load(model_path, env=env, device=PPO_KWARGS.get("device", "cpu"),
+                     tensorboard_log=tensorboard_log, custom_objects=overrides)
+    # PPO.load() doesn't reliably restore num_timesteps, take it from the filename
+    resume_step = step_from_path(model_path)
+    if resume_step > 0:
+        model.num_timesteps = resume_step
+    return model
+
+
+def make_env(env_kwargs: dict[str, Any], vis_port: int | None = None):
+    from rl.track_env import TrackEnv
+
+    env = TrackEnv(**env_kwargs, vis_zmq_port=vis_port)
     env.start()
     env.load_boundaries_from_path(BOUNDARY_PATH)
     return env
@@ -328,24 +321,40 @@ def main() -> None:
                         help="Run to take value network weights from, e.g. PPO_2")
     parser.add_argument("--value-step",  metavar="N", type=int, dest="value_step",  default=None,
                         help="Step to use from --value-from (default: latest)")
+    parser.add_argument("--vis-port", type=int, default=None, dest="vis_port",
+                        help="Stream observed boundary points for rl/vis_obs_ros2.py on this port (e.g. 5558)")
+    parser.add_argument("--pilot-config", default=os.path.join(REPO_ROOT, "config_zmq.yaml"),
+                        dest="pilot_config",
+                        help="pilot config whose `safety` section the env's actuator uses (default: config_zmq.yaml)")
     args = parser.parse_args()
+    if bool(args.policy_from) != bool(args.value_from):
+        parser.error("--policy-from and --value-from have to be given together")
+
+    # workers are spawned from the env; buffers are created in this process
+    try:
+        mp.set_start_method("spawn")
+    except RuntimeError:
+        pass  # already set
+
+    safety = safety_from_pilot_config(args.pilot_config)
+    tb_root = None
 
     if args.policy_from and args.value_from:
-        # merge
+        mode = "merge"
         pol_dir  = os.path.join(CHECKPOINT_DIR, args.policy_from)
         val_dir  = os.path.join(CHECKPOINT_DIR, args.value_from)
         for d in [pol_dir, val_dir]:
             if not os.path.isdir(d):
                 raise FileNotFoundError(f"Run directory not found: {d}")
 
-        pol_model_path, pol_vec_path = _find_checkpoint(pol_dir, args.policy_step)
-        val_model_path, _            = _find_checkpoint(val_dir, args.value_step)
+        pol_model_path, pol_vec_path = find_checkpoint(pol_dir, args.policy_step)
+        val_model_path, _            = find_checkpoint(val_dir, args.value_step)
 
         pol_config = _load_config(pol_dir)
         val_config = _load_config(val_dir)
 
         # obs shape has to match the policy checkpoint since that's the net input
-        env_kwargs_to_use = pol_config["ENV_KWARGS"]
+        env_kwargs_to_use = resolve_env_kwargs(pol_config["ENV_KWARGS"], safety)
 
         # results go into a fresh run dir
         run_num   = _next_run_number()
@@ -354,56 +363,32 @@ def main() -> None:
         log_path  = os.path.join(LOG_DIR, run_name, "run_1")
         os.makedirs(ckpt_path, exist_ok=True)
         os.makedirs(log_path,  exist_ok=True)
-        _save_config(ckpt_path)
+        _save_config(ckpt_path, env_kwargs_to_use)
+        tb_root = os.path.join(LOG_DIR, run_name)
 
         print(f"Merge → {run_name}")
         print(f"  policy weights : {args.policy_from} / {os.path.basename(pol_model_path)}")
         print(f"  value  weights : {args.value_from}  / {os.path.basename(val_model_path)}")
 
         print("Starting environment...")
-        raw_env = Monitor(make_env(env_kwargs_to_use), filename=os.path.join(log_path, "monitor"))
+        raw_env = Monitor(make_env(env_kwargs_to_use, args.vis_port), filename=os.path.join(log_path, "monitor"))
         env = DummyVecEnv([lambda: raw_env])
         # VecNormalize comes from the policy side, obs stats belong with the policy
         env = VecNormalize.load(pol_vec_path, env)
         env.training    = True
         env.norm_reward = True
 
-        pol_model = PPO.load(pol_model_path, env=env,
-                             tensorboard_log=os.path.join(LOG_DIR, run_name))
-        val_model = PPO.load(val_model_path)  # weights only, no env
-
-        _transplant_value_network(pol_model, val_model)
-        del val_model
-
-        # hyperparams: lr + clip_range from the policy run,
-        # clip_range_vf + vf_coef from the value run
-        pol_ppo = pol_config.get("PPO_KWARGS", {})
-        val_ppo = val_config.get("PPO_KWARGS", {})
-        if "learning_rate" in pol_ppo:
-            pol_model.learning_rate = float(pol_ppo["learning_rate"])
-        if "clip_range" in pol_ppo:
-            pol_model.clip_range = float(pol_ppo["clip_range"])
-        if "clip_range_vf" in val_ppo:
-            pol_model.clip_range_vf = float(val_ppo["clip_range_vf"])
-        if "vf_coef" in val_ppo:
-            pol_model.vf_coef = float(val_ppo["vf_coef"])
-
-        # timestep counter continues from the value checkpoint
-        val_step = _step_from_path(val_model_path)
-        pol_model.num_timesteps = val_step
-        print(f"  starting timestep: {val_step}")
-
-        model = pol_model
+        model = load_merged_model(pol_model_path, val_model_path, pol_config, val_config, env, tb_root)
+        print(f"  starting timestep: {model.num_timesteps}")
 
     elif args.resume:
-        # resume
+        mode = "resume"
         run_name  = args.resume
         ckpt_path = os.path.join(CHECKPOINT_DIR, run_name)
         if not os.path.isdir(ckpt_path):
             raise FileNotFoundError(f"Run directory not found: {ckpt_path}")
 
-        saved_config = _load_config(ckpt_path)
-        saved_env_kwargs = saved_config["ENV_KWARGS"]
+        saved_env_kwargs = _load_config(ckpt_path)["ENV_KWARGS"]
 
         # n_ahead sets the obs shape, so it has to match the saved model
         if saved_env_kwargs.get("n_ahead") != ENV_KWARGS.get("n_ahead"):
@@ -411,38 +396,31 @@ def main() -> None:
                 f"WARNING: saved n_ahead={saved_env_kwargs['n_ahead']} differs from "
                 f"current n_ahead={ENV_KWARGS['n_ahead']}. Using saved config to match model."
             )
-        env_kwargs_to_use = saved_env_kwargs
+        env_kwargs_to_use = resolve_env_kwargs(saved_env_kwargs, safety)
+        _save_config(ckpt_path, env_kwargs_to_use)
+        tb_root = os.path.join(LOG_DIR, run_name)
 
-        model_path, vec_path = _find_checkpoint(ckpt_path, args.step)
+        model_path, vec_path = find_checkpoint(ckpt_path, args.step)
         step_label = f"step {args.step}" if args.step else "latest checkpoint"
         print(f"Resuming {run_name} from {step_label}: {os.path.basename(model_path)}")
 
-        resume_idx = _next_resume_index(os.path.join(LOG_DIR, run_name))
-        log_path   = os.path.join(LOG_DIR, run_name, f"run_{resume_idx}")
+        resume_idx = _next_resume_index(tb_root)
+        log_path   = os.path.join(tb_root, f"run_{resume_idx}")
         os.makedirs(log_path, exist_ok=True)
 
         print("Starting environment...")
-        raw_env = Monitor(make_env(env_kwargs_to_use), filename=os.path.join(log_path, "monitor"))
+        raw_env = Monitor(make_env(env_kwargs_to_use, args.vis_port), filename=os.path.join(log_path, "monitor"))
         env = DummyVecEnv([lambda: raw_env])
         env = VecNormalize.load(vec_path, env)
         env.training   = True
         env.norm_reward = True
 
         print(f"Loading model from {model_path} ...")
-        # custom_objects lets the current PPO_KWARGS override what was saved
-        overrides = {k: v for k, v in PPO_KWARGS.items()
-                     if k not in ("policy", "policy_kwargs")}
-        model = PPO.load(model_path, env=env,
-                         tensorboard_log=os.path.join(LOG_DIR, run_name),
-                         custom_objects=overrides)
-        # hack: PPO.load() doesn't reliably restore num_timesteps, take it from the filename
-        resume_step = _step_from_path(model_path)
-        if resume_step > 0:
-            model.num_timesteps = resume_step
-            print(f"Restored num_timesteps = {resume_step}")
+        model = load_resumed_model(model_path, env, tb_root)
+        print(f"num_timesteps = {model.num_timesteps}")
 
     else:
-        # new run
+        mode = "new"
         run_num  = _next_run_number()
         run_name = f"PPO_{run_num}"
         ckpt_path = os.path.join(CHECKPOINT_DIR, run_name)
@@ -450,11 +428,13 @@ def main() -> None:
         os.makedirs(ckpt_path, exist_ok=True)
         os.makedirs(log_path,  exist_ok=True)
 
-        _save_config(ckpt_path)
+        env_kwargs_to_use = resolve_env_kwargs(ENV_KWARGS, safety)
+        _save_config(ckpt_path, env_kwargs_to_use)
+        tb_root = os.path.join(LOG_DIR, run_name)
         print(f"Starting new run: {run_name}")
 
         print("Starting environment...")
-        raw_env = Monitor(make_env(), filename=os.path.join(log_path, "monitor"))
+        raw_env = Monitor(make_env(env_kwargs_to_use, args.vis_port), filename=os.path.join(log_path, "monitor"))
         env = DummyVecEnv([lambda: raw_env])
         env = VecNormalize(
             env,
@@ -466,12 +446,10 @@ def main() -> None:
         )
 
         print("Building PPO model...")
-        model = PPO(env=env, tensorboard_log=os.path.join(LOG_DIR, run_name), **PPO_KWARGS)
-
-        env_kwargs_to_use = ENV_KWARGS
+        model = PPO(env=env, tensorboard_log=tb_root, **PPO_KWARGS)
 
     print(f"Run: {run_name}  |  checkpoints → {ckpt_path}")
-    print(f"TensorBoard:  tensorboard --logdir {os.path.join(LOG_DIR, run_name)}")
+    print(f"TensorBoard:  tensorboard --logdir {tb_root}")
 
     callbacks = [
         EpisodeLogger(),
@@ -486,18 +464,19 @@ def main() -> None:
         ),
     ]
 
-    model.learn(
-        total_timesteps      = TOTAL_TIMESTEPS,
-        callback             = callbacks,
-        progress_bar         = True,
-        reset_num_timesteps  = (args.resume is None),
-    )
-
-    model.save(os.path.join(ckpt_path, "ppo_track_final"))
-    env.save(os.path.join(ckpt_path, "vec_normalize.pkl"))
-    print(f"Saved final model → {os.path.join(ckpt_path, 'ppo_track_final.zip')}")
-
-    env.close()
+    try:
+        model.learn(
+            total_timesteps      = TOTAL_TIMESTEPS,
+            callback             = callbacks,
+            progress_bar         = True,
+            # merge and resume both continue the step counter
+            reset_num_timesteps  = (mode == "new"),
+        )
+        model.save(os.path.join(ckpt_path, "ppo_track_final"))
+        env.save(os.path.join(ckpt_path, "vec_normalize.pkl"))
+        print(f"Saved final model → {os.path.join(ckpt_path, 'ppo_track_final.zip')}")
+    finally:
+        env.close()
 
 
 if __name__ == "__main__":

@@ -2,7 +2,8 @@
 Shows what TrackEnv is actually observing, in RViz.
 
 TrackEnv pushes the world-frame boundary points of each observation over a
-ZMQ PUSH socket (vis_zmq_port, 5558 by default). This node pulls them and
+ZMQ PUSH socket when it has a vis_zmq_port (off by default; start training
+with `python rl/train.py --vis-port 5558`). This node pulls them and
 republishes as a MarkerArray on /pilot/obs_points. Run it on the same host as
 rl/train.py from anywhere with ROS2, e.g. the autodrive_devkit container:
 

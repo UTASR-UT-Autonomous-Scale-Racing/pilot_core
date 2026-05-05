@@ -4,15 +4,19 @@ Gymnasium env for RL training against the AutoDRIVE simulator.
 Usage: construct TrackEnv (this creates the shared buffers but doesn't start
 any workers), call env.start() to spawn ZMQSensorWorker + ActuatorWorker,
 then load_boundaries_from_path("rl/boundaries") or load_boundaries(outer,
-inner). After that it's a normal reset()/step() loop. close() kills the
-workers and frees the shared memory.
+inner). After that it's a normal reset()/step() loop. close() stops the
+workers and frees the shared memory. The multiprocessing start method is the
+caller's business (rl/train.py sets "spawn").
 
-Observation, (n_ahead+1)*4 + 1 floats in the vehicle-local frame:
+Observation, (n_ahead+1)*4 + 1 floats in the vehicle-local frame, built by
+control/boundary.py exactly like control/policy.py does on the car:
     outer[0..n_ahead] (x, y)   closest point + n_ahead ahead
     inner[0..n_ahead] (x, y)
     speed (m/s)
 
-Action is [steering in -1..1, throttle in 0..1].
+Action is [steering in -1..1, throttle in 0..1]. It goes through the same
+ActuatorWorker + SafetySupervisor as on the car (same SafetyConfig, and a
+StateBuffer fed with the sim's speed so the speed-cap taper is active).
 
 Reward per step:
     +0.5 * speed
@@ -21,14 +25,20 @@ Reward per step:
     -0.1 / max(d_wall, 0.05), d_wall = distance to the nearest boundary (m)
 
 Episode ends (terminated) on a wall hit, a completed lap, or being stuck
-(< 0.1 m/s for 10 steps in a row). The collision counter comes from the sim
-over ZMQ. Truncation happens at max_steps, scaled by policy_hz / 10.
+(< 0.1 m/s for 10 steps in a row, not counted during the first stuck_grace_s
+after a reset). The collision counter comes from the sim over ZMQ.
+Truncation happens at max_steps (scaled by policy_hz / 10), or when the pose
+stream stalls for longer than stale_timeout (info["stale_pose"] = True).
 """
 
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
+import os
 import time
+import uuid
+from dataclasses import asdict
 from typing import Optional
 
 import numpy as np
@@ -38,15 +48,11 @@ try:
 except ImportError:
     raise ImportError("gymnasium is required: pip install gymnasium")
 
-from shared_buffer import (
-    ControlBuffer,
-    FrameBuffer,
-    IMUBuffer,
-    PoseBuffer,
-)
+from control.boundary import boundary_window, obs_dim, prepare_boundary, track_observation
+from control.safety import SafetyConfig
+from shared_buffer import ControlBuffer, PoseBuffer, StateBuffer
 from workers import ActuatorWorker, ZMQSensorWorker
 from workers.control_worker import signed_to_unit
-from workers.boundary_resampler import boundary_obs, resample_uniform, smooth_boundary
 
 # AutoDRIVE world is Z-up, X-forward, Y-left, so the ground plane is pose
 # axes (0, 1)
@@ -73,11 +79,23 @@ class TrackEnv(gym.Env):
         max_steps * policy_hz / 10, which keeps episode duration in seconds
         the same whatever policy_hz is.
     policy_hz : float
-        After each action the env sleeps 1/policy_hz and then reads whatever
-        state ZMQSensorWorker has in the meantime.
+        After each action the env sleeps 1/policy_hz and then waits for a
+        pose newer than the last one.
     vis_zmq_port : int or None
         PUSH socket streaming the observed boundary points to
-        rl/vis_obs_ros2.py. None turns it off.
+        rl/vis_obs_ros2.py. None (default) turns it off.
+    safety : dict or None
+        SafetyConfig overrides for the actuator, same as the car's
+        ``safety`` config section. None = SafetyConfig defaults.
+    shm_prefix : str or None
+        Prefix for this env's shared-memory names; a random one by default
+        so several envs (or a crashed run's leftovers) don't collide.
+    stale_timeout : float
+        Seconds without a new pose before step() truncates the episode.
+    reset_timeout : float
+        Seconds reset() waits for the reset to be sent and a fresh pose.
+    stuck_grace_s : float
+        Seconds after reset during which low speed doesn't count as stuck.
     """
 
     metadata = {"render_modes": []}
@@ -92,39 +110,43 @@ class TrackEnv(gym.Env):
         n_ahead: int = 10,
         max_steps: int = 2000,
         policy_hz: float = 10.0,
-        vis_zmq_port: Optional[int] = 5558,
+        vis_zmq_port: Optional[int] = None,
+        safety: Optional[dict] = None,
+        shm_prefix: Optional[str] = None,
+        stale_timeout: float = 0.5,
+        reset_timeout: float = 5.0,
+        stuck_grace_s: float = 1.0,
     ) -> None:
         super().__init__()
 
         self._n_ahead = n_ahead
         self._spacing = boundary_spacing
         self._smooth_window = boundary_smooth_window
-        self._max_steps = max_steps * policy_hz/10
+        self._max_steps = max_steps * policy_hz / 10
+        self._policy_hz = float(policy_hz)
         self._policy_dt = 1.0 / policy_hz
+        self._stale_timeout = float(stale_timeout)
+        self._reset_timeout = float(reset_timeout)
+        self._stuck_grace = int(round(stuck_grace_s * policy_hz))
+        # full SafetyConfig, so it can be recorded next to the model
+        self.safety = asdict(SafetyConfig(**(safety or {})))
 
         # optional: stream obs to RViz
         self._vis_sock = None
         if vis_zmq_port is not None:
-            import zmq as _zmq
-            _ctx = _zmq.Context.instance()
-            self._vis_sock = _ctx.socket(_zmq.PUSH)
-            self._vis_sock.setsockopt(_zmq.SNDHWM, 1)
+            import zmq
+            self._vis_sock = zmq.Context.instance().socket(zmq.PUSH)
+            self._vis_sock.setsockopt(zmq.SNDHWM, 1)
+            self._vis_sock.setsockopt(zmq.LINGER, 0)
             self._vis_sock.bind(f"tcp://*:{vis_zmq_port}")
 
-        # buffers are created in the parent, workers attach to them
-        try:
-            mp.set_start_method("spawn")
-        except RuntimeError:
-            pass  # already set
-
-        self._pose_buf = PoseBuffer(slots=32, name="rl_pose_buf", create=True)
-        self._ctrl_buf = ControlBuffer(slots=32, name="rl_ctrl_buf", create=True)
-        # ZMQSensorWorker wants frame + imu buffers even though we ignore them
-        self._frame_buf = FrameBuffer(
-            slots=4, name="rl_frame_buf", create=True,
-            max_payload=16 + 360 * 640 * 7,  # 360x640 RGB + float32 depth
-        )
-        self._imu_buf = IMUBuffer(slots=32, name="rl_imu_buf", create=True)
+        # buffers are created here, the workers attach to them
+        prefix = shm_prefix or f"rl_{uuid.uuid4().hex[:8]}"
+        self._pose_buf = PoseBuffer(slots=32, name=f"{prefix}_pose", create=True)
+        self._ctrl_buf = ControlBuffer(slots=32, name=f"{prefix}_ctrl", create=True)
+        # speed source for the actuator's speed cap, written by ZMQSensorWorker
+        self._state_buf = StateBuffer(slots=32, name=f"{prefix}_state", create=True)
+        self._buffers = (self._pose_buf, self._ctrl_buf, self._state_buf)
 
         # reset() sets this, ActuatorWorker clears it once the reset is sent
         self._reset_event = mp.Event()
@@ -133,14 +155,16 @@ class TrackEnv(gym.Env):
         self._lap_count = mp.Value('i', 0)
         self._checkpoint_count = mp.Value('i', 0)
 
-        # not started until env.start()
+        # not started until env.start(). No frame/IMU buffers: the env only
+        # needs pose, speed and the counters, so image decoding is skipped
         self._sensor_worker = ZMQSensorWorker(
             name="rl_zmq_sensor",
             host=zmq_host,
             port=zmq_sensor_port,
-            frame_buffer=self._frame_buf,
-            imu_buffer=self._imu_buf,
+            frame_buffer=None,
+            imu_buffer=None,
             pose_buffer=self._pose_buf,
+            state_buffer=self._state_buf,
             collision_counter=self._collision_count,
             lap_counter=self._lap_count,
             checkpoint_counter=self._checkpoint_count,
@@ -151,11 +175,12 @@ class TrackEnv(gym.Env):
             zmq_enabled=True,
             zmq_port=zmq_control_port,
             reset_event=self._reset_event,
+            state_buffer=self._state_buf,
+            safety=self.safety,
         )
 
-        obs_size = (n_ahead + 1) * 4 + 1  # (outer + inner) * xy + speed
         self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(obs_dim(n_ahead),), dtype=np.float32
         )
         self.action_space = gym.spaces.Box(
             low=np.array([-1.0, 0.0], dtype=np.float32),   # [steering, throttle]
@@ -168,14 +193,22 @@ class TrackEnv(gym.Env):
         self._inner: Optional[np.ndarray] = None
 
         self._step_count: int = 0
-        self._last_pose_seq: int = 0
+        self._last_pose_seq: int = 0     # seq of the pose the last obs was built from
+        self._last_pose_ts: float = 0.0  # its produced_ts (time.monotonic())
+        self._last_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
         self._prev_collisions: int = 0
         self._prev_laps: int = 0
         self._prev_checkpoints: int = 0
         self._collision_grace_steps: int = 0  # collisions ignored for this many steps after reset
+        self._stuck_grace_steps: int = 0      # low speed not counted as stuck for this many steps
         self._stuck_steps: int = 0  # consecutive steps under 0.1 m/s
 
         self._processes: list[mp.Process] = []
+        self._closed = False
+
+    @property
+    def policy_hz(self) -> float:
+        return self._policy_hz
 
     def start(self) -> None:
         """Spawn the sensor + actuator processes. Call once, before training."""
@@ -186,12 +219,11 @@ class TrackEnv(gym.Env):
 
     def load_boundaries(self, outer: np.ndarray, inner: np.ndarray) -> None:
         """Takes raw (N, 2) boundaries from MappingWorker, smooths and resamples them."""
-        self._outer = resample_uniform(smooth_boundary(outer, self._smooth_window), self._spacing)
-        self._inner = resample_uniform(smooth_boundary(inner, self._smooth_window), self._spacing)
+        self._outer = prepare_boundary(outer, self._smooth_window, self._spacing)
+        self._inner = prepare_boundary(inner, self._smooth_window, self._spacing)
 
     def load_boundaries_from_path(self, path: str) -> None:
         """path is a dir with outer_line.npy + inner_line.npy, e.g. rl/boundaries"""
-        import os
         outer = np.load(os.path.join(path, "outer_line.npy"))[:, :2]
         inner = np.load(os.path.join(path, "inner_line.npy"))[:, :2]
         self.load_boundaries(outer, inner)
@@ -208,14 +240,25 @@ class TrackEnv(gym.Env):
 
         assert self._outer is not None, "Call load_boundaries() before reset()"
 
-        # tell the sim to put the car back at the start
+        # stop driving, then tell the sim to put the car back at the start
+        self._ctrl_buf.write(*signed_to_unit(0.0, 0.0))
         self._reset_event.set()
-        time.sleep(0.3)  # give it time to reposition and flush stale poses
+        deadline = time.monotonic() + self._reset_timeout
+        while self._reset_event.is_set():   # ActuatorWorker clears it when sent
+            if time.monotonic() > deadline:
+                raise TimeoutError("ActuatorWorker did not send the reset command (is it running?)")
+            time.sleep(0.01)
+        seq_at_reset = self._pose_buf.latest_seq()
 
-        pos, heading, _ = self._wait_for_pose()
+        # give the sim time to reposition and the collision counter to stop
+        # moving after the respawn
+        time.sleep(0.4)
 
-        # extra settle so the collision counter stops moving after the respawn
-        time.sleep(0.1)
+        # only a pose produced after the reset went out counts
+        result = self._wait_for_pose(after_seq=seq_at_reset, timeout=self._reset_timeout)
+        if result is None:
+            raise TimeoutError("No fresh pose from the simulator after reset")
+        pos, heading, speed = result
 
         self._step_count = 0
         # read counters only after settling, otherwise stale collisions leak in
@@ -223,9 +266,10 @@ class TrackEnv(gym.Env):
         self._prev_laps = self._lap_count.value
         self._prev_checkpoints = self._checkpoint_count.value
         self._collision_grace_steps = 3
+        self._stuck_grace_steps = self._stuck_grace
         self._stuck_steps = 0
 
-        obs = self._build_obs(pos, heading, speed=0.0)
+        obs = self._build_obs(pos, heading, speed)
         return obs, {}
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
@@ -242,16 +286,22 @@ class TrackEnv(gym.Env):
         # ZMQSensorWorker keeps receiving while we sleep
         time.sleep(self._policy_dt)
 
-        result = self._read_pose()
+        result = self._wait_for_pose(after_seq=self._last_pose_seq,
+                                     deadline=self._last_pose_ts + self._stale_timeout)
         if result is None:
-            # lost the pose: zero obs, no reward, but don't end the episode
-            zero_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
-            return zero_obs, 0.0, False, False, {}
+            # pose stream stalled: end the episode instead of feeding garbage
+            self._ctrl_buf.write(*signed_to_unit(0.0, 0.0))
+            return self._last_obs.copy(), 0.0, False, True, {"stale_pose": True}
 
         pos, heading, speed = result
+        self._step_count += 1
 
-        # stuck = not moving, e.g. pinned against a wall
-        if speed < 0.1:
+        # stuck = not moving, e.g. pinned against a wall. Not counted right
+        # after a reset while the car is still getting going
+        if self._stuck_grace_steps > 0:
+            self._stuck_grace_steps -= 1
+            self._stuck_steps = 0
+        elif speed < 0.1:
             self._stuck_steps += 1
         else:
             self._stuck_steps = 0
@@ -260,8 +310,6 @@ class TrackEnv(gym.Env):
         obs = self._build_obs(pos, heading, speed)
 
         reward = speed * 0.5
-
-        self._step_count += 1
 
         # checkpoints give a denser progress signal than laps alone
         current_checkpoints = self._checkpoint_count.value
@@ -282,18 +330,16 @@ class TrackEnv(gym.Env):
         if self._collision_grace_steps > 0:
             self._collision_grace_steps -= 1
             collided = False
-            self._prev_collisions = current_collisions
         else:
             collided = current_collisions > self._prev_collisions
-            self._prev_collisions = current_collisions
+        self._prev_collisions = current_collisions
         if collided or stuck:
             reward -= 20.0
 
         # centring penalty, blows up near either wall
-        assert self._outer is not None and self._inner is not None
         d_outer = float(np.linalg.norm(self._outer - pos, axis=1).min())
         d_inner = float(np.linalg.norm(self._inner - pos, axis=1).min())
-        reward -= 1/max(min(d_outer, d_inner), 0.05) * 0.1
+        reward -= 1 / max(min(d_outer, d_inner), 0.05) * 0.1
 
         terminated = collided or lap_completed or stuck
         truncated = self._step_count >= self._max_steps
@@ -309,59 +355,69 @@ class TrackEnv(gym.Env):
         }
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        # ask the workers to finish (the actuator sends neutral on the way out)
+        for worker in (self._sensor_worker, self._actuator_worker):
+            worker.stop()
         for p in self._processes:
-            p.terminate()
-            p.join(timeout=2)
-        for buf in (self._pose_buf, self._ctrl_buf, self._frame_buf, self._imu_buf):
+            p.join(timeout=3.0)
+        for p in self._processes:
+            if p.is_alive():   # fallback only
+                p.terminate()
+                p.join(timeout=1.0)
+        self._processes.clear()
+        if self._vis_sock is not None:
+            self._vis_sock.close(linger=0)
+            self._vis_sock = None
+        for buf in self._buffers:
             try:
                 buf.unlink()
             except Exception:
                 pass
 
-    def _read_pose(self) -> Optional[tuple[np.ndarray, float, float]]:
-        """(pos, heading, speed) from the latest pose, or None."""
-        result = self._pose_buf.read_latest()
-        if result is None:
-            return None
-        _, pose, _, speed = result
-        pos = np.array([pose[_BEV_A0, 3], pose[_BEV_A1, 3]], dtype=np.float32)
-        heading = float(np.arctan2(pose[_BEV_A1, 0], pose[_BEV_A0, 0]))
-        return pos, heading, float(speed)
+    # internals
 
-    def _wait_for_pose(self, timeout: float = 5.0) -> tuple[np.ndarray, float, float]:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            result = self._read_pose()
-            if result is not None:
-                return result
-            time.sleep(0.02)
-        raise TimeoutError("No pose received from simulator within timeout")
+    def _wait_for_pose(
+        self,
+        after_seq: int,
+        timeout: Optional[float] = None,
+        deadline: Optional[float] = None,
+    ) -> Optional[tuple[np.ndarray, float, float]]:
+        """(pos, heading, speed) from the first pose with seq > after_seq, or
+        None if none arrives before the deadline (or within timeout)."""
+        if deadline is None:
+            deadline = time.monotonic() + (timeout if timeout is not None else self._stale_timeout)
+        while True:
+            if self._pose_buf.latest_seq() > after_seq:
+                result = self._pose_buf.read_latest()
+                if result is not None and result[0].seq_no > after_seq:
+                    header, pose, _, speed = result
+                    self._last_pose_seq = header.seq_no
+                    self._last_pose_ts = header.produced_ts
+                    pos = np.array([pose[_BEV_A0, 3], pose[_BEV_A1, 3]], dtype=np.float32)
+                    heading = float(np.arctan2(pose[_BEV_A1, 0], pose[_BEV_A0, 0]))
+                    return pos, heading, float(speed)
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.002)
 
-    def _build_obs(
-        self, pos: np.ndarray, heading: float, speed: float
-    ) -> np.ndarray:
+    def _build_obs(self, pos: np.ndarray, heading: float, speed: float) -> np.ndarray:
         assert self._outer is not None and self._inner is not None
 
-        # world-frame points, only used for the vis stream
-        n_ahead = self._n_ahead
-        idx_o = int(np.linalg.norm(self._outer - pos, axis=1).argmin())
-        idx_i = int(np.linalg.norm(self._inner - pos, axis=1).argmin())
-        n, m = len(self._outer), len(self._inner)
-        o_world = self._outer[np.arange(idx_o, idx_o + n_ahead + 1) % n]
-        i_world = self._inner[np.arange(idx_i, idx_i + n_ahead + 1) % m]
-
         if self._vis_sock is not None:
-            import json
-            import zmq as _zmq
+            import zmq
             msg = json.dumps({
                 "pos": pos.tolist(),
-                "outer": o_world.tolist(),
-                "inner": i_world.tolist(),
+                "outer": boundary_window(self._outer, pos, self._n_ahead).tolist(),
+                "inner": boundary_window(self._inner, pos, self._n_ahead).tolist(),
             })
             try:
-                self._vis_sock.send_string(msg, flags=_zmq.NOBLOCK)
-            except _zmq.Again:
+                self._vis_sock.send_string(msg, flags=zmq.NOBLOCK)
+            except zmq.Again:
                 pass  # nobody listening yet, drop it
 
-        bnd = boundary_obs(pos, heading, self._outer, self._inner, self._n_ahead)
-        return np.append(bnd, speed).astype(np.float32)
+        obs = track_observation(pos, heading, speed, self._outer, self._inner, self._n_ahead)
+        self._last_obs = obs
+        return obs

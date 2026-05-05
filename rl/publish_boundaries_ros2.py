@@ -3,8 +3,8 @@ Small ROS2 node to eyeball saved boundaries in RViz. Loads the outer_line.npy /
 inner_line.npy the mapping worker writes, smooths + resamples them to even
 spacing, and publishes a MarkerArray.
 
-Run it anywhere with ROS2 (the autodrive bridge container works, just copy
-the .npy files in):
+Run it anywhere with ROS2 and a checkout of this repo (it imports
+control/boundary.py), e.g. the autodrive bridge container with the repo mounted:
     python3 publish_boundaries_ros2.py \
         --outer outer_line.npy --inner inner_line.npy \
         --spacing 0.1 --rate 1.0
@@ -13,6 +13,8 @@ Publishes /pilot/saved_boundary in frame "world": red = outer, blue = inner.
 """
 
 import argparse
+import os
+import sys
 
 import numpy as np
 import rclpy
@@ -20,32 +22,9 @@ from rclpy.node import Node
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 
-
-def resample_uniform(points: np.ndarray, spacing: float) -> np.ndarray:
-    """(N, 2) polyline -> points every `spacing` metres of arc length"""
-    if len(points) < 2:
-        return points.astype(np.float32)
-    diffs = np.diff(points, axis=0)
-    seg_lens = np.linalg.norm(diffs, axis=1)
-    arc = np.concatenate([[0.0], np.cumsum(seg_lens)])
-    total_len = arc[-1]
-    if total_len == 0.0:
-        return points[:1].astype(np.float32)
-    targets = np.arange(0.0, total_len, spacing)
-    new_x = np.interp(targets, arc, points[:, 0])
-    new_y = np.interp(targets, arc, points[:, 1])
-    return np.stack([new_x, new_y], axis=1).astype(np.float32)
-
-
-def smooth_boundary(points: np.ndarray, window: int = 15) -> np.ndarray:
-    """Moving average; the lidar wall clusters come out zigzaggy otherwise."""
-    if len(points) < window:
-        return points.astype(np.float32)
-    kernel = np.ones(window) / window
-    # mode='same' keeps the length, but NB the ends get zero-padded
-    px = np.convolve(points[:, 0], kernel, mode='same')
-    py = np.convolve(points[:, 1], kernel, mode='same')
-    return np.stack([px, py], axis=1).astype(np.float32)
+# same smoothing/resampling as training and the car (control/boundary.py)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from control.boundary import resample_uniform, smooth_boundary  # noqa: E402
 
 
 class BoundaryPublisher(Node):

@@ -8,7 +8,6 @@ stable_baselines3, gymnasium and onnx.
 from __future__ import annotations
 
 import os
-import sys
 import time
 import uuid
 from unittest.mock import MagicMock
@@ -146,26 +145,47 @@ def _export_test_policy(tmp_path):
     vec = VecNormalize(DummyVecEnv([Dummy]), norm_obs=True, clip_obs=10.0)
     model = sb3.PPO("MlpPolicy", vec, n_steps=32, batch_size=16, device="cpu", verbose=0, seed=0)
     model.learn(64)
-    env_kwargs = {"n_ahead": n_ahead, "boundary_spacing": 0.4, "boundary_smooth_window": 5}
+    env_kwargs = {"n_ahead": n_ahead, "boundary_spacing": 0.4, "boundary_smooth_window": 5,
+                  "policy_hz": 20.0, "safety": {"speed_cap": 1.5, "cap_margin": 0.2}}
     path = export(model, vec, env_kwargs, str(tmp_path / "policy.onnx"))
     return path, model, vec
 
 
 class TestPolicy:
 
-    def test_observation_matches_training_builder(self):
-        pytest.importorskip("onnxruntime")
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-        from control import policy as cp
-        from workers import boundary_resampler as br
+    def test_follower_uses_shared_boundary_code(self, tmp_path):
+        """Observation parity with training is covered in tests/test_boundary_obs.py;
+        here: the follower goes through control.boundary with the sidecar settings."""
+        from control.boundary import prepare_boundary, track_observation
+        from control.policy import PolicyFollower
 
+        path, _, _ = _export_test_policy(tmp_path)
+        outer, inner, centre = oval_track()
+        f = PolicyFollower(path, outer, inner)
+        np.testing.assert_array_equal(f.outer, prepare_boundary(outer, 5, 0.4))
+        np.testing.assert_array_equal(f.inner, prepare_boundary(inner, 5, 0.4))
+        st = VehicleState(t=0.0, x=6.4, y=0.3, yaw=1.4, v=0.7)
+        np.testing.assert_array_equal(
+            f.observation(st), track_observation(st.position.astype(np.float32), 1.4, 0.7, f.outer, f.inner, 10))
+
+    def test_sidecar_policy_hz_safety_and_obs_dim_check(self, tmp_path):
+        import json
+
+        from control.policy import PolicyFollower, PolicyMeta
+
+        path, _, _ = _export_test_policy(tmp_path)
+        meta = PolicyMeta.load(path)
+        assert meta.policy_hz == 20.0
+        assert meta.safety == {"speed_cap": 1.5, "cap_margin": 0.2}
         outer, inner, _ = oval_track()
-        o_rs = cp.resample_uniform(cp.smooth_boundary(outer, 5), 0.4)
-        np.testing.assert_allclose(o_rs, br.resample_uniform(br.smooth_boundary(outer, 5), 0.4))
-        i_rs = cp.resample_uniform(cp.smooth_boundary(inner, 5), 0.4)
-        pos, heading = np.array([6.4, 0.3], np.float32), 1.4
-        np.testing.assert_allclose(cp.boundary_obs(pos, heading, o_rs, i_rs, 10),
-                                   br.boundary_obs(pos, heading, o_rs, i_rs, 10), atol=1e-6)
+        assert PolicyFollower(path, outer, inner).policy_hz == 20.0
+
+        side = os.path.splitext(path)[0] + ".json"
+        data = json.load(open(side))
+        data["observation"]["n_ahead"] = 12           # obs_dim no longer (n_ahead+1)*4+1
+        json.dump(data, open(side, "w"))
+        with pytest.raises(ValueError, match="obs_dim"):
+            PolicyMeta.load(path)
 
     def test_export_matches_sb3_and_follower_runs(self, tmp_path):
         import onnxruntime as ort

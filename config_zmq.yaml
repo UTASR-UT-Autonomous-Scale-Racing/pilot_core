@@ -24,13 +24,17 @@ fps: 30
 # DepthCamera.cs (15.0): the sim sends 8-bit linear depth and
 # ZMQSensorWorker turns it into metres as pixel / 255 * depth_max_meters
 depth_max_meters: 15.0
+# Raw uint16 depth (encoding "raw") is only accepted with an explicit scale,
+# metres per unit. The default bridge sends 8-bit depth, so it's unused.
+depth_raw_scale: null
 
-segmentation_config_path: "pilot_vision/models/deeplab/config.yaml"
+# Track segmentation is off in the sim: there's no trained sim model, and the
+# ground_plane segmenter needs camera intrinsics the sim config doesn't have.
+# To enable it, set enabled: true and pick a model (docs/vision.md).
 vision:
-  model: pilot_vision           # pilot_vision | onnx | ground_plane (docs/vision.md)
-  onnx_model: track_seg.onnx    # model: onnx — network from scripts/train_vision.py (+ .json sidecar)
+  enabled: false
 
-control_mode: "pid"             # pure_pursuit | stanley | lqr | mpc | policy | pid | ftg | lidar_pid | depth_ftg | vae | bc
+control_mode: "pure_pursuit"    # pure_pursuit | stanley | lqr | mpc | policy | depth_ftg | vae | bc
 
 # lidar, for LidarProjectionWorker (enable_slam + use_zmq_pose).
 # The sim models a Hokuyo UST-10LX: 1080 rays over ±135°, 0.06-10 m, mounted
@@ -45,9 +49,15 @@ lidar:
 enable_slam: true               # NB with use_zmq_pose this means lidar projection, not ORB-SLAM3
 use_saved_map: false            # skip mapping, load boundaries from saved_map_path
 saved_map_path: "rl/boundaries_easy"   # dir with outer_line.npy / inner_line.npy
+# ORB-SLAM3 in the sim (use_zmq_pose: false) needs an ORB-SLAM3 settings file
+# with the sim camera's intrinsics. None is shipped for the simulator: create
+# one (e.g. adapt scripts/gen_orbslam_settings.py output to the sim camera)
+# and uncomment `settings`. The same file supplies intrinsics to depth_ftg and
+# the ground_plane segmenter; without it they fall back to the OAK-D file,
+# which does not match the sim camera.
 slam:
   vocabulary: "ORB_SLAM3/Vocabulary/ORBvoc.txt"
-  settings: "simulator_orbslam_settings.yaml"
+  # settings: "sim_orbslam_settings.yaml"
 
 # mapping
 mapping:
@@ -55,27 +65,6 @@ mapping:
   bev_axes: [0, 1]              # sim world is Z-up so X, Y are horizontal. ORB-SLAM3 camera frame would be [0, 2]
   forward_axis: 0               # X forward in the sim vehicle frame (2 for ORB-SLAM3 camera frame)
   boundary_save_path: "rl/boundaries_easy"   # null = don't save
-
-# pid and lidar_pid
-pid:
-  kp_steer: 2.0
-  ki_steer: 0.0
-  kd_steer: 0.1
-  target_throttle: 0.05         # signed [-1, 1]
-  sector_deg: 60.0              # lidar_pid only: half-angle of the forward sector it looks for walls in
-  slow_corner_factor: 0.6       # lidar_pid only: throttle multiplier at full steer
-
-# ftg: follow-the-gap on a virtual scan cast against the mapped boundaries
-ftg:
-  num_beams: 360
-  fov_deg: 270.0                # total, centred on heading
-  max_range: 5.0                # m
-  bubble_radius_deg: 30.0       # half-width of the bubble around the nearest obstacle
-  smooth_window: 5              # moving average over the ranges
-  target_throttle: 0.05
-  throttle_corner_scale: 0.5    # throttle = base * (1 - scale * |steering|)
-  noise_std: 0.05               # steering noise
-  gap_strategy: "deepest"       # "deepest" or "centroid"
 
 # buffer slots
 buffers:
@@ -98,10 +87,9 @@ buffers:
 
 # telemetry back to the sim, on zmq_telemetry_port
 zmq_publish:
-  enabled: true
-  control: true
+  enabled: true                 # commands already reach the sim via the actuator on 5556
   pose: true                    # trajectory
-  segmentation: true
+  segmentation: false           # vision is disabled in the sim (see vision above)
   boundary: true                # only if mapping is running
   pointcloud: true              # same
 
@@ -110,7 +98,5 @@ recording: false                # also start.py --recording
 recording_path: "/tmp/pilot_recordings"
 recording_config:
   sample_k: 1                   # every k-th sample
-  top_n: 1000                   # per buffer, 0 = unlimited
+  top_n: 1000                   # records per file (then rotate), 0 = unlimited
 
-web_publish:
-  enabled: false

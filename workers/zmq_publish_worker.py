@@ -3,8 +3,10 @@ Sends telemetry from the shared buffers back to the simulator (visualisation,
 logging) over a ZMQ PUB socket.
 
 Wire format is one string per message, "<topic> <json>", so subscribers can
-filter on the topic prefix. Topics: control (signed [-1, 1], +1 steer = left),
-telemetry (pose), segmentation, map (track boundaries), pointcloud.
+filter on the topic prefix. Topics: telemetry (pose), segmentation (uint8
+mask, 1 = drivable track, 0 = not), map (track boundaries), pointcloud.
+Commands are not echoed here: ActuatorWorker already streams them to the sim
+on the control port (5556).
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from typing import Any, Optional
 import numpy as np
 
 from .base_worker import BaseWorker
-from shared_buffer import ControlBuffer, PoseBuffer, SegmentationBuffer
+from shared_buffer import PoseBuffer, SegmentationBuffer
 
 try:
     from shared_buffer import TrackBoundaryBuffer
@@ -39,24 +41,22 @@ class ZMQPublishWorker(BaseWorker):
     """ZMQ telemetry publisher.
 
     Binds a PUB socket on ``port`` (5557 by default). Every buffer is
-    optional: control_buffer, pose_buffer, seg_buffer, boundary_buffer,
-    pointcloud_buffer (world-frame XYZ, sent as base64 float32). ``publish``
-    is a dict of bools picking which of control / pose / segmentation /
-    boundary / pointcloud actually get sent.
+    optional: pose_buffer, seg_buffer, boundary_buffer, pointcloud_buffer
+    (world-frame XYZ, sent as base64 float32). ``publish`` is a dict of
+    bools picking which of pose / segmentation / boundary / pointcloud
+    actually get sent.
     """
 
     def __init__(self, name: str = "zmq_publish", **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
         self._socket = None
         self._context = None
-        self._ctrl_buf: Optional[ControlBuffer] = None
         self._pose_buf: Optional[PoseBuffer] = None
         self._seg_buf: Optional[SegmentationBuffer] = None
         self._boundary_buf: Optional[Any] = None
         self._pc_buf: Optional[Any] = None
         self._publish_config: dict = {}
         self._last_seq = {
-            'control': 0,
             'pose': 0,
             'segmentation': 0,
             'boundary': 0,
@@ -82,14 +82,12 @@ class ZMQPublishWorker(BaseWorker):
             self.logger.error(f"Failed to bind to port {port}: {e}")
             raise
 
-        self._ctrl_buf = self.config.get("control_buffer")
         self._pose_buf = self.config.get("pose_buffer")
         self._seg_buf = self.config.get("seg_buffer")
         self._boundary_buf = self.config.get("boundary_buffer")
         self._pc_buf = self.config.get("pointcloud_buffer")
 
         self._publish_config = self.config.get("publish", {
-            "control": True,
             "pose": False,
             "segmentation": False,
             "boundary": False,
@@ -101,9 +99,6 @@ class ZMQPublishWorker(BaseWorker):
 
     def step(self) -> None:
         self._frame_count += 1
-
-        if self._publish_config.get("control", False) and self._ctrl_buf:
-            self._publish_control()
 
         if self._publish_config.get("pose", False) and self._pose_buf:
             self._publish_pose()
@@ -120,35 +115,6 @@ class ZMQPublishWorker(BaseWorker):
                 self._publish_pointcloud()
 
         time.sleep(0.01)
-
-    def _publish_control(self) -> None:
-        """Echo the latest control command back to the sim."""
-        try:
-            result = self._ctrl_buf.read_latest()
-            if result is None:
-                return
-
-            header, steering_norm, throttle_norm = result
-            if header.seq_no <= self._last_seq['control']:
-                return
-            self._last_seq['control'] = header.seq_no
-
-            # buffer holds [0, 1], sim wants [-1, 1]. Steering is flipped
-            # since the sim uses +1 = left
-            steering = 1.0 - (steering_norm * 2.0)
-            throttle = (throttle_norm * 2.0) - 1.0
-
-            message = json.dumps({
-                'seq': header.seq_no,
-                'timestamp': header.produced_ts,
-                'steering': float(steering),
-                'throttle': float(throttle),
-            })
-
-            self._socket.send_string(f"control {message}", zmq.NOBLOCK)
-
-        except Exception as e:
-            self.logger.debug(f"Control publish failed: {e}")
 
     def _publish_pose(self) -> None:
         try:
@@ -186,16 +152,18 @@ class ZMQPublishWorker(BaseWorker):
                 return
             self._last_seq['segmentation'] = header.seq_no
 
-            # raw uint8, base64'd. No compression
-            mask_bytes = mask.astype(np.uint8).tobytes()
-            mask_b64 = base64.b64encode(mask_bytes).decode('utf-8')
+            # binary mask (1 = drivable), raw uint8 bytes base64'd. No compression
+            if mask.dtype != np.uint8:
+                mask = (mask > 0).astype(np.uint8)
+            mask_b64 = base64.b64encode(np.ascontiguousarray(mask).tobytes()).decode('utf-8')
 
             message = json.dumps({
                 'seq': header.seq_no,
                 'timestamp': header.produced_ts,
                 'mask': mask_b64,
-                'shape': mask.shape,
+                'shape': list(mask.shape),
                 'dtype': 'uint8',
+                'values': 'binary',   # 0 = not track, 1 = drivable track
             })
 
             self._socket.send_string(f"segmentation {message}", zmq.NOBLOCK)

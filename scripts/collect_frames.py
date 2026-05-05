@@ -3,12 +3,15 @@
 Dump RGB frames from the simulator's ZMQ stream to disk.
 
 Subscribes to the same sensor port ZMQSensorWorker uses (5555) and saves
-front_camera frames as frame_NNNNNN.jpg. The bytes are already JPEG so they're
-written straight out, no re-encode. Only the AutoDRIVE bridge needs to be up,
-not the pipeline.
+front_camera frames. JPEG frames (the bridge default) are written straight
+out as frame_NNNNNN.jpg, no re-encode; raw frames (encoding 'raw' + 'shape')
+are saved losslessly as frame_NNNNNN.png. Only the AutoDRIVE bridge needs to
+be up, not the pipeline.
 
+Each run writes into its own timestamped subfolder of --output
+(e.g. ./dataset/rgb/20260923_141502), so runs never overwrite each other.
 --output is relative to wherever you run it from:
-    python scripts/collect_frames.py                         # -> ./dataset/rgb
+    python scripts/collect_frames.py                         # -> ./dataset/rgb/<session>
     python scripts/collect_frames.py --output ./dataset/rgb  # custom output dir
     python scripts/collect_frames.py --every 5 --max 2000    # every 5th frame, stop at 2000
     python scripts/collect_frames.py --host localhost --port 5555
@@ -21,6 +24,8 @@ import os
 import sys
 import time
 
+import numpy as np
+
 try:
     import zmq
 except ImportError:
@@ -31,16 +36,45 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect RGB frames from simulator ZMQ stream")
     parser.add_argument("--host",   default="localhost",    help="ZMQ publisher host (default: localhost)")
     parser.add_argument("--port",   type=int, default=5555, help="ZMQ sensor port (default: 5555)")
-    parser.add_argument("--output", default="./dataset/rgb",help="Output directory for JPEG files (default: ./dataset/rgb)")
+    parser.add_argument("--output", default="./dataset/rgb",
+                        help="Parent directory; each run gets a timestamped subfolder (default: ./dataset/rgb)")
     parser.add_argument("--every",  type=int, default=3,    help="Save every N-th frame (default: 3)")
     parser.add_argument("--max",    type=int, default=0,    help="Stop after saving this many frames (0 = unlimited)")
     return parser.parse_args()
 
 
+def session_dir(parent: str) -> str:
+    """New per-run folder under parent, named by start time (suffixed if taken)."""
+    base = os.path.join(parent, time.strftime("%Y%m%d_%H%M%S"))
+    path, n = base, 1
+    while os.path.exists(path):
+        path, n = f"{base}_{n}", n + 1
+    os.makedirs(path)
+    return path
+
+
+def frame_to_file(fc: dict, stem: str) -> tuple[str, bytes]:
+    """(filename, bytes) for one front_camera message; raises on bad data."""
+    raw = base64.b64decode(fc["data"])
+    encoding = fc.get("encoding", "raw")
+    if encoding == "jpeg":
+        return stem + ".jpg", raw
+    if encoding != "raw":
+        raise ValueError(f"unknown encoding {encoding!r}")
+    import cv2
+    img = np.frombuffer(raw, dtype=np.uint8).reshape(fc["shape"])
+    if img.ndim == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)   # raw frames are RGB, like ZMQSensorWorker assumes
+    ok, png = cv2.imencode(".png", img)
+    if not ok:
+        raise ValueError("PNG encode failed")
+    return stem + ".png", png.tobytes()
+
+
 def main() -> None:
     args = parse_args()
 
-    os.makedirs(args.output, exist_ok=True)
+    args.output = session_dir(args.output)
 
     context = zmq.Context()
     sock = context.socket(zmq.SUB)
@@ -87,17 +121,14 @@ def main() -> None:
             if frames_seen % args.every != 0:
                 continue
 
-            # base64 of a JPEG, write as-is
             try:
-                jpeg_bytes = base64.b64decode(fc["data"])
+                filename, payload = frame_to_file(fc, f"frame_{frames_saved:06d}")
             except Exception as e:
                 print(f"Warning: failed to decode frame {frames_seen}: {e}")
                 continue
 
-            filename = f"frame_{frames_saved:06d}.jpg"
-            filepath = os.path.join(args.output, filename)
-            with open(filepath, "wb") as f:
-                f.write(jpeg_bytes)
+            with open(os.path.join(args.output, filename), "wb") as f:
+                f.write(payload)
 
             frames_saved += 1
 
@@ -114,7 +145,7 @@ def main() -> None:
     finally:
         elapsed = time.time() - start_time
         print(f"\nDone. {frames_saved} frames saved to '{args.output}' "
-              f"in {elapsed:.1f}s ({frames_saved/elapsed:.1f} fps saved)")
+              f"in {elapsed:.1f}s ({frames_saved / max(elapsed, 1e-6):.1f} fps saved)")
         sock.close()
         context.term()
 

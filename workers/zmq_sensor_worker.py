@@ -4,14 +4,18 @@ the frame, IMU, pose and LIDAR buffers. In simulator mode it stands in for
 CameraWorker + IMUWorker.
 
 frame_buf gets RGB uint8 and depth as float32 metres. 8-bit depth images are
-scaled linearly, 0 = near and 255 = depth_max_meters.
+scaled linearly, 0 = near and 255 = depth_max_meters. Raw uint16 depth is
+only accepted with an explicit depth_raw_scale (metres per unit). Without a
+frame_buffer (the RL env) camera/depth decoding is skipped entirely.
 
 The sim reports commands as signed [-1, 1] with +1 steer = left. They're
 remapped to [0, 1] (0.5 neutral, steering 0 = full left) and stored in the
 last two slots of the IMU vector.
 
 Ground-truth vehicle-to-world pose (ROS, Z-up; quaternion arrives as
-[x, y, z, w]) goes to PoseBuffer along with the speed.
+[x, y, z, w]) goes to PoseBuffer along with the speed, and optionally to a
+StateBuffer as a VehicleState (x, y, yaw on the ground plane, v = sim speed),
+which gives the actuator's speed cap a speed source without a StateWorker.
 """
 
 from __future__ import annotations
@@ -24,8 +28,10 @@ from typing import Any
 
 import numpy as np
 
+from control.types import VehicleState
+
 from .base_worker import BaseWorker
-from shared_buffer import FrameBuffer, IMUBuffer, PoseBuffer, LidarBuffer
+from shared_buffer import FrameBuffer, IMUBuffer, PoseBuffer, LidarBuffer, StateBuffer
 
 try:
     import zmq
@@ -45,14 +51,24 @@ class ZMQSensorWorker(BaseWorker):
     -------------
     host, port : str, int
         Where autodrive_bridge publishes (localhost:5555 by default).
-    frame_buffer : FrameBuffer
-    imu_buffer : IMUBuffer
+    frame_buffer : FrameBuffer, optional
+        RGB + depth. None skips all image decoding.
+    imu_buffer : IMUBuffer, optional
     pose_buffer : PoseBuffer, optional
         Simulator ground-truth poses.
+    state_buffer : StateBuffer, optional
+        VehicleState from the ground-truth pose + sim speed (ground plane =
+        world X, Y; the sim is Z-up).
     lidar_buffer : LidarBuffer, optional
         1080-ray 2D scan.
     depth_max_meters : float
-        What pixel value 255 means for 8-bit depth images. Default 10.0
+        What pixel value 255 means for 8-bit depth images. Default 15.0,
+        the sim depth camera's far clip.
+    depth_raw_scale : float, optional
+        Metres per unit for raw uint16 depth. Required if the bridge sends
+        raw depth; without it raw depth frames get zero depth and an error.
+    no_message_warn_s : float
+        Warn when nothing arrives for this long (default 1.0 s).
     collision_counter, lap_counter, checkpoint_counter : mp.Value, optional
         Mirrors of the sim's counters, read by the gym env.
     """
@@ -65,10 +81,17 @@ class ZMQSensorWorker(BaseWorker):
         self._imu_buf: IMUBuffer | None = None
         self._pose_buf: PoseBuffer | None = None
         self._lidar_buf: LidarBuffer | None = None
+        self._state_buf: StateBuffer | None = None
         self._frame_count = 0
         self._last_report_time = 0
-        self._depth_max_meters: float = 10.0
+        self._depth_max_meters: float = 15.0
+        self._depth_raw_scale: float | None = None
         self._depth_logged = False
+        self._raw_depth_error_logged = False
+        self._last_msg_time = 0.0
+        self._last_silence_warn = 0.0
+        self._silent = False
+        self._no_msg_warn_s = 1.0
         self._pos_logged = False
         # mp.Value('i') each, shared with the gym env
         self._collision_counter = None
@@ -85,7 +108,6 @@ class ZMQSensorWorker(BaseWorker):
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.SUB)
         self._socket.setsockopt(zmq.RCVHWM, 10)
-        self._socket.setsockopt(zmq.RCVTIMEO, 100)  # ms
         self._socket.setsockopt(zmq.CONFLATE, 1)  # latest message only, drop the backlog
 
         try:
@@ -96,24 +118,45 @@ class ZMQSensorWorker(BaseWorker):
             self.logger.error(f"Failed to connect to {host}:{port}: {e}")
             raise
 
-        self._frame_buf = self.config["frame_buffer"]
-        self._imu_buf = self.config["imu_buffer"]
+        self._frame_buf = self.config.get("frame_buffer")
+        self._imu_buf = self.config.get("imu_buffer")
         self._pose_buf = self.config.get("pose_buffer")
+        self._state_buf = self.config.get("state_buffer")
         self._lidar_buf = self.config.get("lidar_buffer")
-        self._depth_max_meters = float(self.config.get("depth_max_meters", 10.0))
+        self._depth_max_meters = float(self.config.get("depth_max_meters", 15.0))
+        scale = self.config.get("depth_raw_scale")
+        self._depth_raw_scale = float(scale) if scale is not None else None
+        self._no_msg_warn_s = float(self.config.get("no_message_warn_s", 1.0))
         self._collision_counter = self.config.get("collision_counter")
         self._lap_counter = self.config.get("lap_counter")
         self._checkpoint_counter = self.config.get("checkpoint_counter")
 
-        self._last_report_time = time.time()
-        self.logger.info(f"ZMQSensorWorker ready (depth_max_meters={self._depth_max_meters})")
+        self._last_report_time = time.monotonic()
+        self._last_msg_time = time.monotonic()
+        self.logger.info(
+            f"ZMQSensorWorker ready (depth_max_meters={self._depth_max_meters}, "
+            f"depth_raw_scale={self._depth_raw_scale}, frames={'on' if self._frame_buf is not None else 'off'})"
+        )
 
     def step(self) -> None:
+        # block (up to 100 ms, so stop() is still noticed) instead of spinning
+        if not self._socket.poll(timeout=100):
+            self._check_silence(time.monotonic())
+            return
         try:
             msg_json = self._socket.recv_string(zmq.NOBLOCK)
+        except zmq.Again:
+            return
+        now = time.monotonic()
+        if self._silent:
+            self.logger.info(f"Sensor stream back after {now - self._last_msg_time:.1f} s")
+            self._silent = False
+        self._last_msg_time = now
+        try:
             data = json.loads(msg_json)
 
-            self._process_frame_data(data)
+            if self._frame_buf is not None:
+                self._process_frame_data(data)
             self._process_imu_data(data)
             self._process_pose_data(data)
             self._process_lidar_data(data)
@@ -121,7 +164,6 @@ class ZMQSensorWorker(BaseWorker):
 
             self._frame_count += 1
 
-            now = time.time()
             if now - self._last_report_time >= 1.0:
                 elapsed = now - self._last_report_time
                 fps = self._frame_count / elapsed if elapsed > 0 else 0
@@ -129,14 +171,19 @@ class ZMQSensorWorker(BaseWorker):
                 self._frame_count = 0
                 self._last_report_time = now
 
-        except zmq.Again:
-            time.sleep(0.001)
         except json.JSONDecodeError as e:
             self.logger.warning(f"Failed to decode JSON: {e}")
-            time.sleep(0.001)
         except Exception as e:
             self.logger.error(f"Error processing sensor data: {e}")
             time.sleep(0.01)
+
+    def _check_silence(self, now: float) -> None:
+        """Warn when the sim has gone quiet (repeats every 5 s while it stays quiet)."""
+        gap = now - self._last_msg_time
+        if gap > self._no_msg_warn_s and (not self._silent or now - self._last_silence_warn > 5.0):
+            self.logger.warning(f"No sensor message from the simulator for {gap:.1f} s")
+            self._silent = True
+            self._last_silence_warn = now
 
     def _process_frame_data(self, data: dict) -> None:
         if 'front_camera' not in data or not data['front_camera']:
@@ -185,13 +232,7 @@ class ZMQSensorWorker(BaseWorker):
                             )
                             self._depth_logged = True
                     else:
-                        # raw uint16, passed through as-is (no unit conversion!)
-                        depth_flat = np.frombuffer(depth_bytes, dtype=np.uint16)
-                        try:
-                            depth = depth_flat.reshape(depth_cam['shape'][:2]).astype(np.float32)
-                        except ValueError:
-                            side = int(np.sqrt(len(depth_flat)))
-                            depth = depth_flat[:side*side].reshape((side, side)).astype(np.float32)
+                        depth = self._decode_raw_depth(depth_bytes, depth_cam)
 
                     if depth.shape != rgb.shape[:2]:
                         depth = cv2.resize(depth, (rgb.shape[1], rgb.shape[0]),
@@ -207,7 +248,24 @@ class ZMQSensorWorker(BaseWorker):
         except Exception as e:
             self.logger.warning(f"Frame processing failed: {e}")
 
+    def _decode_raw_depth(self, depth_bytes: bytes, depth_cam: dict) -> np.ndarray:
+        """Raw uint16 depth -> metres. Needs depth_raw_scale and the frame's
+        'shape'; anything else raises (the caller substitutes zeros)."""
+        if self._depth_raw_scale is None:
+            if not self._raw_depth_error_logged:
+                self.logger.error("Raw uint16 depth received but depth_raw_scale (m per unit) "
+                                  "is not configured; depth is zeroed")
+                self._raw_depth_error_logged = True
+            raise ValueError("depth_raw_scale not set")
+        shape = depth_cam.get('shape')
+        if not shape:
+            raise ValueError("raw depth frame has no 'shape'")
+        depth_flat = np.frombuffer(depth_bytes, dtype=np.uint16)
+        return depth_flat.reshape(tuple(shape[:2])).astype(np.float32) * self._depth_raw_scale
+
     def _process_imu_data(self, data: dict) -> None:
+        if self._imu_buf is None:
+            return
         try:
             if 'orientation_quat' in data:
                 # bridge sends [x, y, z, w] (ROS order), the IMU vector wants [w, x, y, z]
@@ -254,7 +312,7 @@ class ZMQSensorWorker(BaseWorker):
             )
             self._pos_logged = True
 
-        if self._pose_buf is None:
+        if self._pose_buf is None and self._state_buf is None:
             return
 
         try:
@@ -276,7 +334,14 @@ class ZMQSensorWorker(BaseWorker):
             pose[0:3, 0:3] = R
 
             speed = float(data.get('speed', 0.0))
-            self._pose_buf.write(pose, None, speed=speed)
+            now = time.monotonic()
+            if self._pose_buf is not None:
+                self._pose_buf.write(pose, None, speed=speed, ts=now)
+            if self._state_buf is not None:
+                # sim world is Z-up: ground plane is X, Y; yaw from the body X axis
+                yaw = float(np.arctan2(R[1, 0], R[0, 0]))
+                self._state_buf.write(
+                    VehicleState(t=now, x=float(pos[0]), y=float(pos[1]), yaw=yaw, v=speed), ts=now)
 
         except Exception as e:
             self.logger.warning(f"Pose processing failed: {e}")

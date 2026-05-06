@@ -126,26 +126,23 @@ mapping:
   boundary_min_points: 50       # wall points needed before we try extracting boundaries
 
 recording: false                # dump buffers to disk (or start.py --recording)
-recording_path: /tmp/pilot_recordings
+recording_path: /tmp/pilot_recordings   # a timestamped folder per run is created here
+# Read back with scripts/read_recording.py; turn into BC / vision datasets with
+# scripts/recording_to_dataset.py. For steering labels from a hand-driven lap,
+# record the I2C IMU (use_oakd_imu: false): its slot 8 is the RC steering pulse.
 recording_config:
   sample_k: 1                   # keep every k-th sample, 1 = all
-  top_n: 0                      # max records per buffer, 0 = no limit
+  top_n: 0                      # records per file, 0 = one unbounded file
+  on_full: rotate               # when a file has top_n records: rotate (new file) | stop
+  keep_files: 2                 # rotate keeps the newest N files per buffer, 0 = all
+  flush_interval: 1.0           # s
   # per-buffer overrides, anything missing falls back to the values above
   frame:
     sample_k: 2                 # frames are big
     top_n: 5000
-  imu:
-    sample_k: 1                 # imu is tiny, keep it all
-    top_n: 0
   segmentation:
     sample_k: 2
     top_n: 5000
-  pose:
-    sample_k: 1
-    top_n: 0
-  control:
-    sample_k: 1
-    top_n: 0
   pointcloud:
     sample_k: 5
     top_n: 2000

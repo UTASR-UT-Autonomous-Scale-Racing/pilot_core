@@ -22,6 +22,7 @@ import os
 import signal
 import sys
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List
 
 import numpy as np
@@ -39,6 +40,7 @@ from shared_buffer import (
     TrackBoundaryBuffer,
 )
 
+from shared_buffer.segment_buffer import max_payload_for as seg_max_payload_for
 from workers import (
     ActuatorWorker,
     BaseWorker,
@@ -199,38 +201,34 @@ class KeyboardControl:
             self._fd = None
 
 
-def main() -> None:
-    args = parse_args()
+@dataclass
+class Pipeline:
+    workers: List[BaseWorker]
+    buffers: List[Any]
+    armed_event: Any
+    loop_event: Any
+    mapping_done_event: Any
+    localize_event: Any
+    enable_slam: bool
 
-    # spawn everywhere, so Event/Value/Process all share one context and the
-    # semaphores/locks actually get shared with the children
-    mp.set_start_method("spawn", force=True)
 
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="[%(asctime)s %(levelname)s %(name)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
+def build_pipeline(config: Dict[str, Any]) -> Pipeline:
+    """Create the shared buffers, events and workers for a config. Nothing is
+    spawned; the buffers are unlinked again if anything fails."""
+    buffers: List[Any] = []
+    try:
+        return _build(config, buffers)
+    except BaseException:
+        for buf in buffers:
+            try:
+                buf.unlink()
+            except Exception:
+                pass
+        raise
+
+
+def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     logger = logging.getLogger("start")
-
-    config = load_config(args.config)
-    logger.info(f"Loaded config from {args.config}")
-
-    # Every worker is its own process. If each one spins up a full BLAS/OpenMP
-    # thread pool, small CPUs get badly oversubscribed. Children inherit this env.
-    threads = str(config.get("threads_per_worker", 1))
-    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-        os.environ.setdefault(var, threads)
-
-    # CLI flags win over the config
-    if args.recording:
-        config["recording"] = True
-    if args.enable_slam:
-        config["enable_slam"] = True
-    if args.oakd_imu:
-        config["use_oakd_imu"] = True
-
     enable_slam = config.get("enable_slam", False)
     use_saved_map = config.get("use_saved_map", False)
     saved_map_path = config.get("saved_map_path", "rl/boundaries")
@@ -256,13 +254,11 @@ def main() -> None:
         name="imu_buf",
         create=True,
     )
-    # Seg buffer payload: meta(8) + W*H float32 mask
-    _seg_max_payload = 8 + width * height * 4
     seg_buf = SegmentationBuffer(
         slots=buf_cfg.get("segmentation", {}).get("slots", 4),
         name="seg_buf",
         create=True,
-        max_payload=_seg_max_payload,
+        max_payload=seg_max_payload_for(height, width),
     )
     pose_buf = PoseBuffer(
         slots=buf_cfg.get("pose", {}).get("slots", 8),
@@ -275,8 +271,7 @@ def main() -> None:
         create=True,
     )
 
-    global _buffers
-    _buffers = [frame_buf, imu_buf, seg_buf, pose_buf, ctrl_buf]
+    buffers.extend([frame_buf, imu_buf, seg_buf, pose_buf, ctrl_buf])
 
     pc_buf = None
     boundary_buf = None
@@ -293,7 +288,7 @@ def main() -> None:
             name="boundary_buf",
             create=True,
         )
-        _buffers.extend([b for b in [pc_buf, boundary_buf] if b is not None])
+        buffers.extend([b for b in [pc_buf, boundary_buf] if b is not None])
     needs_lidar = use_zmq and enable_slam and use_zmq_pose
     if needs_lidar:
         lidar_buf = LidarBuffer(
@@ -301,7 +296,7 @@ def main() -> None:
             name="lidar_buf",
             create=True,
         )
-        _buffers.append(lidar_buf)
+        buffers.append(lidar_buf)
 
     # state estimate only makes sense if something is producing poses
     has_pose_source = enable_slam or use_zmq_pose
@@ -312,7 +307,7 @@ def main() -> None:
             name="state_buf",
             create=True,
         )
-        _buffers.append(state_buf)
+        buffers.append(state_buf)
 
     logger.info("Shared buffers created")
 
@@ -367,13 +362,12 @@ def main() -> None:
     zmq_control_port = config.get("zmq_control_port", 5556)
     zmq_telemetry_port = config.get("zmq_telemetry_port", 5557)
 
-    global _workers
-    _workers = []
+    workers: List[BaseWorker] = []
 
     # sensors
     if use_zmq:
         # sim: a single ZMQ subscriber stands in for all the hardware sensors
-        _workers.append(
+        workers.append(
             ZMQSensorWorker(
                 name="zmq_sensor",
                 host=zmq_host,
@@ -382,7 +376,8 @@ def main() -> None:
                 imu_buffer=imu_buf,
                 pose_buffer=pose_buf if use_zmq_pose else None,
                 lidar_buffer=lidar_buf,
-                depth_max_meters=config.get("depth_max_meters", 10.0),
+                depth_max_meters=config.get("depth_max_meters", 15.0),
+                depth_raw_scale=config.get("depth_raw_scale"),
             )
         )
         logger.info(f"ZMQ sensor mode enabled (host={zmq_host}, port={zmq_sensor_port})")
@@ -391,7 +386,7 @@ def main() -> None:
         # IMU the camera worker streams it. Otherwise a separate IMU worker
         # reads I2C (or synthetic data).
         oakd_imu_via_camera = use_oakd_imu and not use_synthetic
-        _workers.append(
+        workers.append(
             CameraWorker(
                 name="camera",
                 output_buffer=frame_buf,
@@ -402,7 +397,7 @@ def main() -> None:
             )
         )
         if not oakd_imu_via_camera:
-            _workers.append(
+            workers.append(
                 IMUWorker(
                     name="imu",
                     output_buffer=imu_buf,
@@ -415,7 +410,7 @@ def main() -> None:
     # Drivable-track segmentation. Nothing consumes seg_buf yet (it is recorded
     # and published as telemetry), so it is off unless vision.enabled is set.
     if vision_cfg.get("enabled", False):
-        _workers.append(
+        workers.append(
             VisionWorker(
                 name="vision",
                 input_buffer=frame_buf,
@@ -428,21 +423,26 @@ def main() -> None:
             )
         )
 
+    # Safety supervisor. Unless it's set explicitly, the steady-state throttle
+    # bound uses the same drivetrain gain as the speed controller.
+    safety_cfg = dict(config.get("safety", {}))
+    safety_cfg.setdefault("speed_per_throttle", speed_per_throttle)
+
     # Control. The track modes need a pose source (SLAM or sim ground truth);
     # depth_ftg / vae / bc only need frame_buf.
-    global _armed_event
-    _armed_event = mp.Event()
+    armed_event = mp.Event()
     if control_mode in TRACK_MODES and has_pose_source:
-        _workers.append(
+        workers.append(
             ControlWorker(
                 name="control",
                 mode=control_mode,
                 output_buffer=ctrl_buf,
-                armed_event=_armed_event,
+                armed_event=armed_event,
                 state_buffer=state_buf,
                 boundary_buffer=boundary_buf,
                 mapping_done_event=mapping_done_event,
                 track_config=config.get("track_control", {}),
+                safety=safety_cfg,
                 vehicle_params=config.get("vehicle_params", "vehicle_params.yaml"),
                 frame_buffer=frame_buf,
                 camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
@@ -450,12 +450,12 @@ def main() -> None:
             )
         )
     elif control_mode in ("depth_ftg", "vae", "bc"):
-        _workers.append(
+        workers.append(
             ControlWorker(
                 name="control",
                 mode=control_mode,
                 output_buffer=ctrl_buf,
-                armed_event=_armed_event,
+                armed_event=armed_event,
                 frame_buffer=frame_buf,
                 camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
                 depth_ftg_config=depth_ftg_cfg,
@@ -471,11 +471,10 @@ def main() -> None:
             if needs_pose else
             " — valid modes: " + ", ".join((*TRACK_MODES, "depth_ftg", "vae", "bc"))
         )
-        _release_buffers()
         raise SystemExit(f"control_mode {control_mode!r} cannot run with this configuration{hint}")
 
     if has_pose_source:
-        _workers.append(
+        workers.append(
             StateWorker(
                 name="state",
                 pose_buffer=pose_buf,
@@ -487,14 +486,9 @@ def main() -> None:
             )
         )
 
-    # Safety supervisor. Unless it's set explicitly, the steady-state throttle
-    # bound uses the same drivetrain gain as the speed controller.
-    safety_cfg = dict(config.get("safety", {}))
-    safety_cfg.setdefault("speed_per_throttle", speed_per_throttle)
-
     # actuator: I2C to the hardware and/or ZMQ control out to the sim.
     # Stays neutral until the operator arms from the terminal
-    _workers.append(
+    workers.append(
         ActuatorWorker(
             name="actuator",
             input_buffer=ctrl_buf,
@@ -502,7 +496,7 @@ def main() -> None:
             i2c_bus=i2c_bus,
             zmq_enabled=use_zmq,
             zmq_port=zmq_control_port,
-            armed_event=_armed_event,
+            armed_event=armed_event,
             state_buffer=state_buf,
             safety=safety_cfg,
             pwm=config.get("pwm", {}),
@@ -513,7 +507,7 @@ def main() -> None:
     if enable_slam and use_zmq_pose:
         # ground-truth pose mode: 2D LIDAR scan -> world-frame 3D points
         lidar_cfg = config.get("lidar", {})
-        _workers.append(
+        workers.append(
             LidarProjectionWorker(
                 name="lidar_proj",
                 lidar_buffer=lidar_buf,
@@ -527,7 +521,7 @@ def main() -> None:
         )
         logger.info("Using ZMQ ground truth pose + LIDAR projection for point cloud")
     elif enable_slam:
-        _workers.append(
+        workers.append(
             SLAMWorker(
                 name="slam",
                 input_buffer=frame_buf,
@@ -546,7 +540,7 @@ def main() -> None:
         )
 
     if enable_slam and not use_saved_map:
-        _workers.append(
+        workers.append(
             MappingWorker(
                 name="mapping",
                 pose_buffer=pose_buf,
@@ -563,45 +557,39 @@ def main() -> None:
         )
 
     if config.get("recording", False):
+        # One recorder process, one file series per buffer, in a per-run folder.
+        # recording_config.<buffer>.{sample_k, top_n, on_full, keep_files}
+        # override the defaults per buffer.
         rec_cfg = config.get("recording_config", {})
-        rec_dir = config.get("recording_path", "/tmp/pilot_recordings")
-        rec_sample_k = rec_cfg.get("sample_k", 1)
-        rec_top_n = rec_cfg.get("top_n", 0)
-
-        # One recorder per active buffer. Each keeps every k-th sequence
-        # number, up to top_n records (0 = no limit). Override per buffer with
-        # recording_config.<buffer_name>.{sample_k, top_n}
-        rec_buffers: Dict[str, Any] = {
-            "frame": frame_buf,
-            "imu": imu_buf,
-            "segmentation": seg_buf,
-            "pose": pose_buf,
-            "control": ctrl_buf,
+        rec_dir = os.path.join(config.get("recording_path", "/tmp/pilot_recordings"), time.strftime("%Y%m%d_%H%M%S"))
+        candidates = {
+            "frame": frame_buf, "imu": imu_buf, "segmentation": seg_buf if vision_cfg.get("enabled", False) else None,
+            "pose": pose_buf, "control": ctrl_buf, "pointcloud": pc_buf, "boundary": boundary_buf,
+            "state": state_buf, "lidar": lidar_buf,
         }
-        if pc_buf is not None:
-            rec_buffers["pointcloud"] = pc_buf
-        if boundary_buf is not None:
-            rec_buffers["boundary"] = boundary_buf
-
-        for buf_name, buf_obj in rec_buffers.items():
-            per_buf_cfg = rec_cfg.get(buf_name, {})
-            k = per_buf_cfg.get("sample_k", rec_sample_k)
-            n = per_buf_cfg.get("top_n", rec_top_n)
-            _workers.append(
-                BufferRecorderWorker(
-                    name=f"rec_{buf_name}",
-                    buffer=buf_obj,
-                    buffer_name=buf_name,
-                    output_dir=rec_dir,
-                    sample_k=k,
-                    top_n=n,
-                )
+        per_buffer_keys = ("sample_k", "top_n", "on_full", "keep_files")
+        rec_buffers = {
+            name: {"buffer": buf, **{k: v for k, v in (rec_cfg.get(name) or {}).items() if k in per_buffer_keys}}
+            for name, buf in candidates.items() if buf is not None
+        }
+        workers.append(
+            BufferRecorderWorker(
+                name="recorder",
+                buffers=rec_buffers,
+                output_dir=rec_dir,
+                sample_k=rec_cfg.get("sample_k", 1),
+                top_n=rec_cfg.get("top_n", 0),
+                on_full=rec_cfg.get("on_full", "rotate"),
+                keep_files=rec_cfg.get("keep_files", 2),
+                flush_interval=rec_cfg.get("flush_interval", 1.0),
             )
+        )
+        logger.info(f"Recording {', '.join(rec_buffers)} to {rec_dir}")
 
     # ZMQ telemetry for the sim visualiser
     zmq_publish_cfg = config.get("zmq_publish", {})
     if use_zmq and zmq_publish_cfg.get("enabled", False):
-        _workers.append(
+        workers.append(
             ZMQPublishWorker(
                 name="zmq_publish",
                 port=zmq_telemetry_port,
@@ -613,6 +601,49 @@ def main() -> None:
             )
         )
         logger.info(f"ZMQ telemetry publisher enabled on port {zmq_telemetry_port}")
+
+    return Pipeline(workers, buffers, armed_event, loop_event, mapping_done_event, localize_event, enable_slam)
+
+
+def main() -> None:
+    args = parse_args()
+
+    # spawn everywhere, so Event/Value/Process all share one context and the
+    # semaphores/locks actually get shared with the children
+    mp.set_start_method("spawn", force=True)
+
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="[%(asctime)s %(levelname)s %(name)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logger = logging.getLogger("start")
+
+    config = load_config(args.config)
+    logger.info(f"Loaded config from {args.config}")
+
+    # Every worker is its own process. If each one spins up a full BLAS/OpenMP
+    # thread pool, small CPUs get badly oversubscribed. Children inherit this env.
+    threads = str(config.get("threads_per_worker", 1))
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, threads)
+
+    # CLI flags win over the config
+    if args.recording:
+        config["recording"] = True
+    if args.enable_slam:
+        config["enable_slam"] = True
+    if args.oakd_imu:
+        config["use_oakd_imu"] = True
+
+    global _workers, _buffers, _armed_event
+    pipeline = build_pipeline(config)
+    _workers, _buffers, _armed_event = pipeline.workers, pipeline.buffers, pipeline.armed_event
+    enable_slam = pipeline.enable_slam
+    loop_event = pipeline.loop_event
+    mapping_done_event = pipeline.mapping_done_event
+    localize_event = pipeline.localize_event
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, _shutdown)

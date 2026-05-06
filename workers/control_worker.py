@@ -62,6 +62,7 @@ class ControlWorker(BaseWorker):
         controllers are reset while it is clear)
     track modes: state_buffer, boundary_buffer, mapping_done_event,
         track_config (the track_control config section), vehicle_params,
+        safety (runtime safety settings, compared with a policy's),
         plus frame_buffer / camera_settings / depth_ftg_config if the
         fallback is on
     depth_ftg: frame_buffer, camera_settings, depth_ftg_config
@@ -121,6 +122,7 @@ class ControlWorker(BaseWorker):
         self._track_cfg = self.config.get("track_config", {})
         self._last_state_seq = 0
         self._last_state_time = time.monotonic()
+        self._next_policy_step = 0.0
         # optional map-free fallback for when the state estimate goes stale
         if self._track_cfg.get("fallback") == "depth_ftg":
             self._fallback = self._make_depth_follower()
@@ -141,7 +143,14 @@ class ControlWorker(BaseWorker):
 
             model = cfg.get("policy", {}).get("model", "policy.onnx")
             self._follower = PolicyFollower(model, outer, inner)
-            self.logger.info(f"Policy loaded: {model} (obs_dim={self._follower.meta.obs_dim})")
+            # step at the rate the policy was trained at (TrackEnv's 10 Hz for old sidecars)
+            hz = self._follower.policy_hz or 10.0
+            self._policy_period = 1.0 / hz
+            self.logger.info(f"Policy loaded: {model} (obs_dim={self._follower.meta.obs_dim}, {hz:g} Hz)")
+            trained = self._follower.safety
+            runtime = self.config.get("safety")
+            if trained and runtime and any(trained.get(k) != v for k, v in runtime.items() if k in trained):
+                self.logger.warning(f"Policy was trained with different safety settings: {trained}")
             return
         track = TrackModel(outer, inner, spacing=cfg.get("spacing", 0.05))
         reversed_ = track.align_direction(state.x, state.y, state.yaw)
@@ -184,6 +193,11 @@ class ControlWorker(BaseWorker):
             _, outer, inner = bnd
             self._build_follower(outer, inner, state)
 
+        if self._mode == "policy":
+            now = time.monotonic()
+            if now < self._next_policy_step:
+                return
+            self._next_policy_step = now + self._policy_period
         cmd = self._follower.step(state)
         steer_unit, throttle_unit = signed_to_unit(cmd.steering, cmd.throttle)
         self._ctrl_buf.write(steer_unit, throttle_unit)

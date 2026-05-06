@@ -75,27 +75,30 @@ when the estimate recovers.
 | `bc` | `control.imitation.DepthPolicyFollower` + `control.bc` | End-to-end CNN, depth frame → steering |
 | `vae` | `control.imitation.DepthPolicyFollower` + `control.vae` | VAE latent of the depth frame → steering head |
 
-The map-free modes drive at a cruise speed that drops with steering. `depth_ftg`
-assumes a level camera at `depth_ftg.camera_height` above the ground.
+The map-free modes drive at a cruise speed that drops with steering. They output
+neutral when less than `min_valid_fraction` of the depth image is valid, or when an
+obstacle is closer than `stop_distance` ahead. `depth_ftg` needs the camera height and
+pitch (`depth_ftg.camera_height`, `camera_pitch`).
 
-### Legacy and simulator modes
-
-`pid` and `ftg` steer on raw poses and boundaries (`workers/track_pid_controller.py`,
-`workers/track_ftg_controller.py`). The PID only aligns heading with the local boundary
-direction and has no cross-track term, so it drifts; prefer the track followers.
-`lidar_pid` centres between walls using the simulator's LiDAR.
+Controllers are reset while the car is disarmed, so integrators don't wind up
+before it is allowed to move.
 
 ## Safety supervisor
 
 `control.SafetySupervisor` runs inside `ActuatorWorker` on every output tick (config `safety`):
 
 1. **Arming:** outputs are neutral until the operator presses `a`; `SPACE` disarms immediately.
-2. **Watchdog:** if the newest command is older than `command_timeout` (150 ms), throttle goes
-   neutral and steering is held, so the car coasts to a stop.
+   While disarmed, the actuator sends nothing over I2C and the Arduino passes the RC
+   receiver through. The orchestrator also disarms when a worker on the command path
+   (camera, SLAM, state, control, actuator) crashes.
+2. **Watchdog:** if the newest command is older than `command_timeout` (150 ms), is
+   stamped in the future, or is not a finite number, throttle goes neutral and
+   steering is held, so the car coasts to a stop.
 3. **Speed cap:** forward throttle tapers to zero over the last `cap_margin` below
    `speed_cap` (1.5 m/s), and never exceeds `speed_cap / speed_per_throttle`, the throttle
    whose steady-state speed is the cap. The second limit holds even when the speed estimate lags.
-   Without a speed estimate, forward throttle is capped at `max_throttle_no_speed`.
+   Without a (finite) speed estimate, forward throttle is capped at `max_throttle_no_speed`.
+   Reverse throttle is capped at `max_reverse_throttle`.
 4. **Slew limits** on steering and throttle. Dropping to neutral is never delayed.
 
 ## Configuration
@@ -105,9 +108,9 @@ All keys are commented in `config.yaml`. The control-related sections are:
 | Section | Contents |
 |---- |----- |
 | `track_control` | Per-controller gains (`pure_pursuit`, `stanley`, `lqr`, `mpc`), `policy.model`, `speed` (profile + `longitudinal`), `fallback` |
-| `depth_ftg`, `bc`, `vae` | Map-free controllers (camera height, cruise speed, model paths) |
+| `depth_ftg`, `bc`, `vae` | Map-free controllers (camera height and pitch, cruise speed, stop checks, model paths) |
 | `estimator` | EKF noise settings and staleness timeout |
-| `safety` | Watchdog, speed cap, slew rates |
+| `safety` | Watchdog, speed cap, reverse cap, slew rates |
 | `pwm` | Servo / ESC pulse widths |
 | `vehicle_params.yaml` | Wheelbase, steering limits, friction, etc. |
 
@@ -160,8 +163,15 @@ Each script collects the data (or loads the `--data` cache), trains, exports an 
 file plus a `.json` sidecar, and prints closed-loop results on held-out tracks. Point
 `bc.model` / `vae.model` in the config at the exported file.
 
-These models learn **rendered** depth. To drive the real car, retrain on recorded
-real depth frames with expert labels.
+These models learn **rendered** depth. To drive the real car, retrain on real depth
+frames. Record a hand-driven lap (`--recording`, I2C IMU so the RC steering pulse is
+recorded), then build the training file and train on it:
+
+```bash
+python scripts/read_recording.py /tmp/pilot_recordings/<run>          # check what was recorded
+python scripts/recording_to_dataset.py /tmp/pilot_recordings/<run> --bc real.npz --label-source imu --config config.yaml
+python scripts/train_bc_policy.py --data real.npz --out bc_policy.onnx
+```
 
 ### RL policy (`policy`)
 
@@ -202,4 +212,4 @@ sidecar records the observation settings the policy was trained with. Set
 
 - The EKF uses poses only. Fusing the OAK-D IMU would reduce the speed-estimate lag.
 - `depth_ftg` can alternate between two similar gaps in cluttered scenes.
-- `rl/train.py` defines `TrackCNNExtractor` but trains the default MLP policy.
+- `rl/train.py` trains the default MLP policy; `rl/extractors.py` holds an unused CNN extractor.

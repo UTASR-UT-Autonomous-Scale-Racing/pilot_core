@@ -4,7 +4,8 @@
 image at frame resolution where 1 = drivable track and 0 = everything else
 (track walls, off-track floor, background). It publishes the mask to `seg_buf`.
 
-Today `seg_buf` is recorded and published as telemetry; no controller or mapping step uses it yet.
+Today `seg_buf` is recorded and published as telemetry; no controller or mapping step
+uses it yet, so vision is off unless `vision.enabled: true`.
 
 ## Segmenters
 
@@ -12,9 +13,8 @@ Choose one with `vision.model` in the config:
 
 | `vision.model` | What it is | Needs |
 | -------------- | ---------- | ----- |
-| `pilot_vision` (default) | A model from the `pilot_vision` submodule (e.g. its DeepLabV3), chosen by `segmentation_config_path`. Its output is converted to the mask format | pilot_vision model files |
+| `ground_plane` (default) | Training-free: fits the floor plane to the depth image (RANSAC) and marks the floor between the car and the first obstacle in each column | depth camera, intrinsics (`slam.settings`) |
 | `onnx` | A candidate network trained with `scripts/train_vision.py` (`vision.onnx_model`) | trained `.onnx` + `.json` |
-| `ground_plane` | Training-free: fits the floor plane to the depth image (RANSAC) and marks the floor between the car and the first obstacle in each column | depth camera, intrinsics (`slam.settings`) |
 
 ## Candidate networks
 
@@ -37,12 +37,20 @@ The candidates have not been trained on track data yet, so there are no accuracy
 
 ## Training a candidate
 
-Put labelled frames in this layout (masks from the SAM2 auto-labelling tools in
-`pilot_vision` fit once exported as single-channel PNGs):
+Put labelled frames in this layout (masks from the SAM2 auto-labelling tools in the
+`pilot_vision` repository fit once exported as single-channel PNGs):
 
 ```
 <data>/images/<name>.png|.jpg     camera frames
 <data>/masks/<name>.png           non-zero = drivable track
+```
+
+Camera frames from a recording (`start.py --recording`) can be exported into this
+layout. `--bootstrap-masks` adds masks from `ground_plane` as a starting point; they are
+auto-labels, listed in `auto_labels.json`, and need reviewing before training:
+
+```bash
+python scripts/recording_to_dataset.py /tmp/pilot_recordings/<run> --vision datasets/track --bootstrap-masks
 ```
 
 ```bash
@@ -57,6 +65,7 @@ validation IoU. The script prints the validation IoU and writes `<out>.onnx` plu
 
 ```yaml
 vision:
+  enabled: true
   model: onnx
   onnx_model: track_seg.onnx
 ```

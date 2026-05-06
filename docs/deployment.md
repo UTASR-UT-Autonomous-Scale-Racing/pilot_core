@@ -1,7 +1,13 @@
 # Deployment on the Jetson
 
 There are two ways to run pilot_core on the car's Jetson Orin: natively, or in
-Docker. Both use `config.yaml`, which enables the I2C actuator on `/dev/i2c-1`.
+Docker. Both use `config.yaml` unless you pass `--config`. It enables the I2C
+actuator on `/dev/i2c-1`.
+
+The actuator is silent on I2C until the car is armed, so the RC transmitter drives
+while disarmed (the hand-driven mapping lap). Armed, the Arduino follows the Jetson
+as long as commands keep arriving (within 250 ms) and the RC sticks are centred;
+moving a stick takes over. See the "Jetson interface" section in `firmware/README.md`.
 
 ## Native
 
@@ -10,10 +16,10 @@ scripts/jetson_run.sh [start.py arguments]
 ```
 
 The script sets the Jetson to maximum performance (`nvpmodel -m 0`, `jetson_clocks`),
-**hard-resets pilot_core and its submodules to their remote branches** (local changes
-on the car are discarded), and launches `start.py --config config.yaml` with `sudo`
-for I2C and USB access. It expects the `.venv` and the ORB-SLAM3 build described in
-[slam.md](slam.md).
+fast-forwards pilot_core (it refuses to run with uncommitted changes, so nothing is
+discarded), puts the submodules on the commits pilot_core pins, activates `.venv`
+and launches `start.py` (with `--config config.yaml` unless you pass one). It expects
+the `.venv` and the ORB-SLAM3 build described in [slam.md](slam.md).
 
 ## Docker
 
@@ -21,9 +27,9 @@ for I2C and USB access. It expects the `.venv` and the ORB-SLAM3 build described
 scripts/start.sh [start.py arguments]
 ```
 
-`start.sh` pulls the repositories, checks that the configured segmentation model
-config exists, sets performance mode and the OAK-D udev rule, builds the image from
-`Dockerfile`, and runs it with:
+`start.sh` fast-forwards pilot_core, puts the submodules on their pinned commits,
+checks the config exists, sets performance mode and the OAK-D udev rule (once),
+builds the image from `Dockerfile`, and runs it in the foreground with:
 
 | Flag | Why |
 |- | |
@@ -31,9 +37,13 @@ config exists, sets performance mode and the OAK-D udev rule, builds the image f
 | `--privileged` | USB access for the OAK-D |
 | `--device /dev/i2c-1` | Arduino over I2C |
 | `--net=host` | Telemetry and debugging |
+| `--ipc=host` | Room in `/dev/shm` for the shared-memory buffers (Docker's default is 64 MB) |
 
-The image's entrypoint is `start.py`, and any arguments are forwarded to it. The image
-does not build ORB-SLAM3; mount or build it inside the container to use SLAM.
+The image's entrypoint is `start.py`, and any arguments are forwarded to it. By
+default the image builds ORB-SLAM3 and the Python wrapper (the `ORB_SLAM3` submodule
+must be checked out). `docker build --target noslam .` skips SLAM for a quick build.
+The base image is JetPack 6 (`L4T_BASE` build argument); the container's L4T major
+version must match the Jetson's.
 
 Useful commands:
 

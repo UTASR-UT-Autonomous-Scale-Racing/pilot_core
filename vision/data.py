@@ -6,8 +6,9 @@ Dataset layout (one mask per image, same file stem):
     <root>/images/<name>.png|.jpg     RGB camera frames
     <root>/masks/<name>.png           drivable track = non-zero, everything else = 0
 
-Masks from the SAM2 auto-labelling tools in pilot_vision fit this layout once
-exported as single-channel PNGs.
+Masks from the SAM2 auto-labelling tools in the pilot_vision repository fit this
+layout once exported as single-channel PNGs; scripts/recording_to_dataset.py
+exports recorded frames into it.
 
 Loss: binary cross-entropy + soft Dice (F. Milletari, N. Navab, S.-A. Ahmadi,
 "V-Net", 3DV 2016), which keeps small or thin track regions from being

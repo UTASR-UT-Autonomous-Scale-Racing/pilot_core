@@ -9,7 +9,7 @@ python start.py --config config_zmq.yaml
 ```
 
 | Port | Direction | Content |
-|- |------ |---- |
+| ---- | --------- | ------- |
 | 5555 | simulator → pilot_core | camera (JPEG), depth, ground-truth pose, IMU, LiDAR, speed, lap/collision counters |
 | 5556 | pilot_core → simulator | `{"steering", "throttle", "reset"}` in [−1, 1], steering +1 = left |
 | 5557 | pilot_core → simulator | telemetry for visualisation (boundaries, pose, point cloud, segmentation as a binary mask) |

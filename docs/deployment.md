@@ -32,7 +32,7 @@ checks the config exists, sets performance mode and the OAK-D udev rule (once),
 builds the image from `Dockerfile`, and runs it in the foreground with:
 
 | Flag | Why |
-|- | |
+| ---- | --- |
 | `--runtime nvidia` | GPU access |
 | `--privileged` | USB access for the OAK-D |
 | `--device /dev/i2c-1` | Arduino over I2C |

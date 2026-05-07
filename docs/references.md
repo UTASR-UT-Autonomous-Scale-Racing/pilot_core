@@ -3,7 +3,7 @@
 The paper or book each implementation follows. Each module also cites it in its docstring.
 
 | Component | `control_mode` / module | Reference |
-|------ |-------------------- |------ |
+| --------- | ----------------------- | --------- |
 | Pure Pursuit | `pure_pursuit` · `control/controllers.py` | R. C. Coulter, "Implementation of the Pure Pursuit Path Tracking Algorithm", CMU-RI-TR-92-01, 1992 |
 | Stanley | `stanley` · `control/controllers.py` | S. Thrun et al., "Stanley: The Robot that Won the DARPA Grand Challenge", *J. Field Robotics* 23(9), 2006; G. Hoffmann et al., "Autonomous Automobile Trajectory Tracking for Off-Road Driving", ACC 2007 |
 | LQR (path-error model) | `lqr` · `control/lqr.py` | J. M. Snider, "Automatic Steering Methods for Autonomous Automobile Path Tracking", CMU-RI-TR-09-08, 2009; R. Rajamani, *Vehicle Dynamics and Control*, Springer, 2012 |

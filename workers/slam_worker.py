@@ -1,34 +1,57 @@
 """
 SLAMWorker: FrameBuffer -> ORB_SLAM3 RGBD tracking (pybind11 wrapper) ->
-PoseBuffer, plus the map point cloud.
+PoseBuffer, plus the map point cloud and the keyframe trajectory.
 
 PoseBuffer gets camera-to-world (Twc), so pose[:3, 3] is the camera position
 in the map frame. ORB-SLAM3 hands back world-to-camera (Tcw) and we invert it
 here. If tracking isn't OK we don't publish at all, since the pose ORB-SLAM3
 returns then is identity or stale.
 
-Two phases. While mapping it's TrackRGBD every frame, point cloud published
-when the map changes, loop closure signalled. Once driving we switch to
-localization mode and only use TrackRGBD for the live pose.
+Timestamps: track_rgbd gets the frame's capture time (header.produced_ts, set
+by CameraWorker from the DepthAI capture timestamp, time.monotonic() clock),
+and the pose / point cloud are written with that same timestamp, so the EKF
+in StateWorker fuses capture-time poses.
+
+Level world frame: ORB-SLAM3's world frame is the camera frame at map
+initialisation, which is pitched down (and maybe rolled), so its X-Z plane is
+tilted against the floor. From the first frames' depth we fit the floor plane
+(RANSAC, vision.segmenters.GroundPlaneSegmenter.fit_plane) and build the
+rotation R_level from that camera frame to a floor-aligned frame with the same
+origin: Y along the floor normal pointing down (so "Y down" still holds and the
+BEV axes [0, 2] still work), Z = camera forward projected onto the floor, X =
+Y x Z. Every published pose is R_level @ Twc and every map point R_level @ p.
+The camera is rigidly mounted, so the same R_level also holds after a map
+reset (the new map's world frame is again a camera frame). Poses are held
+back until the floor has been fitted (level_frames good fits); if that fails
+for level_timeout_frames the worker warns and publishes unlevelled poses.
+
+Map resets: ORB-SLAM3 starts a new map (or re-initialises the active one)
+after tracking is lost for good; the world frame then changes. We watch the
+wrapper's map_info() (map id, first keyframe id). On a change we log a
+warning and set map_reset_event (if given) so MappingWorker drops what it has
+recorded. While mapping, poses resume in the new map. In localization mode
+(the track boundaries live in the old map frame) poses stay withheld until
+ORB-SLAM3 is back in the reference map.
+
+Two phases. While mapping it's TrackRGBD every frame, point cloud + keyframe
+positions published when the map changes (and every N frames), loop closure
+signalled. Once driving we switch to localization mode and only use
+TrackRGBD for the live pose.
 """
 
 from __future__ import annotations
 
 import math
 import multiprocessing as mp
+import os
 import time
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import numpy as np
 
 from .base_worker import BaseWorker
 from shared_buffer import FrameBuffer, PoseBuffer
-
-# optional, only needed if a point-cloud buffer is passed in
-try:
-    from shared_buffer.pointcloud_buffer import PointCloudBuffer
-except ImportError:
-    PointCloudBuffer = None  # type: ignore[misc]
 
 
 # ORB_SLAM3::Tracking::eTrackingState
@@ -47,6 +70,46 @@ def invert_se3(T: np.ndarray) -> np.ndarray:
     return inv
 
 
+def level_rotation(n_down: np.ndarray) -> np.ndarray:
+    """3x3 rotation from the camera frame to a floor-aligned frame.
+
+    n_down is the floor normal in camera coordinates pointing down (away
+    from the camera, towards the floor). Rows of the result are the level
+    axes in camera coordinates: X = Y x Z, Y = n_down, Z = camera forward
+    projected onto the floor. p_level = R @ p_cam.
+    """
+    y = np.asarray(n_down, dtype=np.float64)
+    y = y / np.linalg.norm(y)
+    z = np.array([0.0, 0.0, 1.0]) - y[2] * y
+    z /= np.linalg.norm(z)
+    x = np.cross(y, z)
+    return np.stack([x, y, z]).astype(np.float32)
+
+
+def read_settings_intrinsics(path: str) -> Optional[SimpleNamespace]:
+    """fx, fy, cx, cy (and width, height) from an ORB-SLAM3 settings YAML."""
+    import cv2
+
+    if not os.path.isfile(path):
+        return None
+    fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
+    try:
+        vals = {}
+        for key in ("fx", "fy", "cx", "cy"):
+            node = fs.getNode(f"Camera1.{key}")
+            if node.empty():
+                node = fs.getNode(f"Camera.{key}")
+            if node.empty():
+                return None
+            vals[key] = float(node.real())
+        for key in ("width", "height"):
+            node = fs.getNode(f"Camera.{key}")
+            vals[key] = int(node.real()) if not node.empty() else None
+        return SimpleNamespace(**vals)
+    finally:
+        fs.release()
+
+
 class SLAMWorker(BaseWorker):
     """Visual SLAM worker (ORB_SLAM3 through pybind11).
 
@@ -55,46 +118,82 @@ class SLAMWorker(BaseWorker):
     input_buffer : FrameBuffer
         RGB + depth in.
     output_buffer : PoseBuffer
-        Twc out.
+        Twc out (level world frame, capture timestamps).
     pointcloud_buffer : PointCloudBuffer, optional
-        3D map points.
+        3D map points (level world frame).
+    keyframe_buffer : PointCloudBuffer, optional
+        Keyframe camera positions of the current map in keyframe order (level
+        world frame), published with the point cloud. After a loop closure /
+        global BA these are the corrected trajectory, which MappingWorker
+        prefers over the live poses.
     vocab_path : str
         ORBvoc.txt
     settings_path : str
-        ORB_SLAM3 camera settings YAML.
+        ORB_SLAM3 camera settings YAML (also gives the intrinsics for the
+        floor fit).
     loop_event : multiprocessing.Event, optional
-        Set when ORB-SLAM3 reports a map change (loop closure or global BA).
+        Set when ORB-SLAM3 reports a loop closure / global BA on the current map.
     localize_event : multiprocessing.Event, optional
         When set we switch ORB-SLAM3 into localization-only mode.
+    map_reset_event : multiprocessing.Event, optional
+        Set when ORB-SLAM3 switches to a new or re-initialised map (the world
+        frame changed). Cleared by the consumer (MappingWorker).
     warmup_frames : int
         Frames to drop at startup while stereo depth settles. Default 15.
-
-    If orbslam3_python isn't installed this runs as a stub: identity poses,
-    no point cloud.
+    level_world : bool
+        Publish in the floor-aligned frame (default True).
+    level_frames, level_timeout_frames : int
+        Good floor fits to average (5) and frames to try before giving up (150).
+    synthetic : bool
+        Synthetic run (also PILOT_SYNTHETIC=1). Only then is the identity-pose
+        stub allowed when orbslam3_python is missing; otherwise setup() fails.
     """
+
+    _PC_PUBLISH_INTERVAL = 30  # also publish point cloud every N frames
 
     def __init__(self, name: str = "slam", **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
         self._frame_buf: FrameBuffer | None = None
         self._pose_buf: PoseBuffer | None = None
         self._pc_buf: Optional[Any] = None
+        self._kf_buf: Optional[Any] = None
         self._slam = None
         self._last_seq = 0
         self._frame_count = 0
         self._loop_event: Optional[mp.Event] = None
         self._localize_event: Optional[mp.Event] = None
+        self._map_reset_event: Optional[mp.Event] = None
         self._localization_activated = False
         self._tracking_ok = True
-        self._PC_PUBLISH_INTERVAL = 30  # also publish point cloud every N frames
         self._warmup_frames = 0
+
+        # floor alignment
+        self._level_world = bool(kwargs.get("level_world", True))
+        self._level_frames = int(kwargs.get("level_frames", 5))
+        self._level_timeout = int(kwargs.get("level_timeout_frames", 150))
+        self._K: Optional[SimpleNamespace] = None
+        self._plane_fitter = None
+        self._plane_fits: list[np.ndarray] = []
+        self._level_tries = 0
+        self._R_level: Optional[np.ndarray] = None  # 4x4, world -> level
+
+        # map identity
+        self._map_key: Optional[tuple] = None   # current (map_id, init_kf_id)
+        self._ref_map_key: Optional[tuple] = None  # map the poses are published in
 
     def setup(self) -> None:
         self._frame_buf = self.config["input_buffer"]
         self._pose_buf = self.config["output_buffer"]
         self._pc_buf = self.config.get("pointcloud_buffer")
+        self._kf_buf = self.config.get("keyframe_buffer")
         self._loop_event = self.config.get("loop_event")
         self._localize_event = self.config.get("localize_event")
+        self._map_reset_event = self.config.get("map_reset_event")
         self._warmup_frames = int(self.config.get("warmup_frames", 15))
+        synthetic = (
+            bool(self.config.get("synthetic", False))
+            or os.environ.get("PILOT_SYNTHETIC", "") == "1"
+        )
 
         vocab_path = self.config.get(
             "vocab_path", "ORB_SLAM3/Vocabulary/ORBvoc.txt"
@@ -105,20 +204,104 @@ class SLAMWorker(BaseWorker):
 
         try:
             import orbslam3_python as _slam_mod
-
-            self._slam = _slam_mod.System(
-                vocab_path, settings_path, _slam_mod.RGBD
-            )
-            self.logger.info(
-                f"ORB_SLAM3 initialised (vocab={vocab_path}, "
-                f"settings={settings_path})"
-            )
-        except ImportError:
+        except ImportError as exc:
+            if not synthetic:
+                raise RuntimeError(
+                    f"orbslam3_python could not be imported ({exc}). Build the "
+                    "ORB-SLAM3 bindings (docs/slam.md). If the module exists, a "
+                    "shared library is not found: rebuild orbslam3_wrapper (it "
+                    "sets an RPATH) or add ORB_SLAM3/lib and its Thirdparty lib "
+                    "dirs to LD_LIBRARY_PATH. The identity-pose stub is only "
+                    "allowed in synthetic mode (synthetic: true / PILOT_SYNTHETIC=1)."
+                ) from exc
             self.logger.warning(
-                "orbslam3_python not available — running SLAM stub "
-                "(identity poses, no point cloud)"
+                "orbslam3_python not available — synthetic mode, running SLAM "
+                "stub (identity poses, no point cloud)"
             )
             self._slam = None
+            return
+
+        self._slam = _slam_mod.System(vocab_path, settings_path, _slam_mod.RGBD)
+        self.logger.info(
+            f"ORB_SLAM3 initialised (vocab={vocab_path}, settings={settings_path})"
+        )
+        if self._level_world:
+            self._K = read_settings_intrinsics(settings_path)
+            if self._K is None:
+                self.logger.warning(
+                    f"No intrinsics in {settings_path} — cannot fit the floor, "
+                    "publishing the unlevelled ORB-SLAM3 frame"
+                )
+
+    # floor alignment
+
+    def _update_level(self, depth: np.ndarray) -> None:
+        """Fit the floor in this frame's depth until R_level is known."""
+        if not self._level_world or self._K is None:
+            self._R_level = np.eye(4, dtype=np.float32)
+            return
+        if self._plane_fitter is None:
+            from vision.segmenters import GroundPlaneSegmenter
+            self._plane_fitter = GroundPlaneSegmenter(self._K)
+
+        self._level_tries += 1
+        pts, valid = self._plane_fitter._points(depth)
+        lower = valid.copy()
+        lower[: lower.shape[0] // 2] = False  # floor is in the lower half
+        plane = self._plane_fitter.fit_plane(pts[lower])  # n points up, n.p + d = 0
+        if plane is not None:
+            self._plane_fits.append(plane)
+
+        if len(self._plane_fits) >= self._level_frames:
+            planes = np.array(self._plane_fits)
+            n_up = planes[:, :3].mean(axis=0)
+            n_up /= np.linalg.norm(n_up)
+            cam_height = float(np.median(planes[:, 3]))
+            R = np.eye(4, dtype=np.float32)
+            R[:3, :3] = level_rotation(-n_up)
+            self._R_level = R
+            pitch = math.degrees(math.atan2(-n_up[2], -n_up[1]))
+            roll = math.degrees(math.atan2(n_up[0], -n_up[1]))
+            self.logger.info(
+                f"Floor fitted from {len(planes)} frames: camera pitch {pitch:.1f} deg, "
+                f"roll {roll:.1f} deg, height {cam_height:.3f} m — publishing in the "
+                f"level world frame"
+            )
+        elif self._level_tries >= self._level_timeout:
+            self._R_level = np.eye(4, dtype=np.float32)
+            self.logger.warning(
+                f"Floor not found in {self._level_tries} frames "
+                f"({len(self._plane_fits)} good fits) — publishing the unlevelled "
+                "ORB-SLAM3 frame (BEV will be tilted)"
+            )
+
+    def _level_points(self, pts: np.ndarray) -> np.ndarray:
+        return (pts @ self._R_level[:3, :3].T).astype(np.float32)
+
+    # map identity
+
+    def _check_map(self) -> bool:
+        """Watch for new / re-initialised maps. True if poses may be published."""
+        if not hasattr(self._slam, "map_info"):
+            return True
+        map_id, init_kf, n_kf = self._slam.map_info()
+        key = (int(map_id), int(init_kf))
+        if n_kf == 0:
+            return False  # map was just cleared, nothing to localise against
+        if key != self._map_key:
+            if self._map_key is not None:
+                self.logger.warning(
+                    f"ORB-SLAM3 switched map {self._map_key} -> {key} "
+                    f"({n_kf} keyframes): the world frame changed"
+                )
+                if self._map_reset_event is not None:
+                    self._map_reset_event.set()
+            self._map_key = key
+            if self._ref_map_key is None or not self._localization_activated:
+                self._ref_map_key = key
+        if key != self._ref_map_key:
+            return False  # localization mode in a map that isn't the mapped track
+        return True
 
     def step(self) -> None:
         # mapping done -> localization only
@@ -132,6 +315,9 @@ class SLAMWorker(BaseWorker):
                 self.logger.info("Switched to localization-only mode")
             self._localization_activated = True
 
+        if self._frame_buf.latest_seq() <= self._last_seq:
+            time.sleep(0.005)
+            return
         result = self._frame_buf.read_latest()
         if result is None:
             time.sleep(0.01)
@@ -142,12 +328,20 @@ class SLAMWorker(BaseWorker):
             time.sleep(0.005)
             return
         self._last_seq = header.seq_no
+        ts = header.produced_ts  # capture time (time.monotonic clock)
 
         self._frame_count += 1
 
-        # Drop the warm-up frames. Right after the OAK-D starts the stereo
-        # depth is sparse, and ORB-SLAM3 would initialise a thin map, lose it,
-        # and keep resetting.
+        if self._slam is None:
+            # stub (synthetic mode only), no orbslam3_python
+            self._pose_buf.write(np.eye(4, dtype=np.float32), ts=ts)
+            return
+
+        # Drop the warm-up frames for tracking. Right after the OAK-D starts
+        # the stereo depth is sparse, and ORB-SLAM3 would initialise a thin
+        # map, lose it, and keep resetting. They still go into the floor fit.
+        if self._R_level is None:
+            self._update_level(depth)
         if self._frame_count <= self._warmup_frames:
             return
 
@@ -161,62 +355,58 @@ class SLAMWorker(BaseWorker):
                 f"nonzero_pct={100*len(nonzero)/(depth.size):.1f}%"
             )
 
-        if self._slam is not None:
-            Tcw = self._slam.track_rgbd(rgb, depth, header.produced_ts)
-            state = self._slam.get_tracking_state()
-            tracking_ok = state == _TRACKING_OK
-            if tracking_ok != self._tracking_ok:
-                self._tracking_ok = tracking_ok
-                if tracking_ok:
-                    self.logger.info("Tracking OK")
-                else:
-                    self.logger.warning("Tracking lost — withholding poses")
-            Twc = invert_se3(np.asarray(Tcw, dtype=np.float32))
+        Tcw = self._slam.track_rgbd(rgb, depth, ts)
+        state = self._slam.get_tracking_state()
+        tracking_ok = state == _TRACKING_OK
+        if tracking_ok != self._tracking_ok:
+            self._tracking_ok = tracking_ok
             if tracking_ok:
-                self._pose_buf.write(Twc)
+                self.logger.info("Tracking OK")
+            else:
+                self.logger.warning("Tracking lost — withholding poses")
 
-            if self._frame_count % 30 == 0:
-                tx, ty, tz = (float(v) for v in Twc[:3, 3])
-                all_pts = np.asarray(self._slam.get_all_map_points(), dtype=np.float32)
-                if len(all_pts) > 0:
-                    lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
-                    pt_range = (
-                        f"X=[{lo[0]:.3f},{hi[0]:.3f}] Y=[{lo[1]:.3f},{hi[1]:.3f}] "
-                        f"Z=[{lo[2]:.3f},{hi[2]:.3f}]"
-                    )
-                else:
-                    pt_range = "no pts"
-                self.logger.info(
-                    f"SLAM state={_STATE_NAMES.get(state, state)} "
-                    f"pos=({tx:.3f},{ty:.3f},{tz:.3f}) "
-                    f"dist={math.sqrt(tx * tx + ty * ty + tz * tz):.3f}m "
-                    f"map_pts={len(all_pts)} frames={self._frame_count}"
-                )
-                self.logger.debug(f"  map_pt_range: {pt_range}")
+        map_ok = self._check_map() if tracking_ok else False
+        level_ok = self._R_level is not None
+        Twc = invert_se3(np.asarray(Tcw, dtype=np.float32))
+        if level_ok:
+            Twc = self._R_level @ Twc
+        if tracking_ok and map_ok and level_ok:
+            self._pose_buf.write(Twc, ts=ts)
 
-            # Publish on map change and also every N frames, otherwise
-            # MappingWorker has no wall points until a loop is detected.
-            map_changed = self._slam.map_changed()
-            publish_pc = map_changed or (
-                self._pc_buf is not None
-                and self._frame_count % self._PC_PUBLISH_INTERVAL == 0
+        if self._frame_count % 30 == 0:
+            tx, ty, tz = (float(v) for v in Twc[:3, 3])
+            self.logger.info(
+                f"SLAM state={_STATE_NAMES.get(state, state)} "
+                f"pos=({tx:.3f},{ty:.3f},{tz:.3f}) "
+                f"dist={math.sqrt(tx * tx + ty * ty + tz * tz):.3f}m "
+                f"map={self._map_key} frames={self._frame_count}"
+                + ("" if level_ok else " (fitting floor, poses held)")
             )
-            if publish_pc and self._pc_buf is not None:
-                all_pts = np.asarray(self._slam.get_all_map_points(), dtype=np.float32)
-                if len(all_pts) > 0:
-                    self._pc_buf.write(all_pts)
-                    if map_changed:
-                        self.logger.info(f"Map changed — published {len(all_pts)} pts")
-                    else:
-                        self.logger.debug(f"Periodic PC publish: {len(all_pts)} pts")
 
-            # map_changed() is true once per loop closure / global BA
-            if map_changed and self._loop_event is not None:
-                self._loop_event.set()
-        else:
-            # stub, no orbslam3_python
-            identity = np.eye(4, dtype=np.float32)
-            self._pose_buf.write(identity)
+        # Publish on map change and also every N frames, otherwise
+        # MappingWorker has no wall points until a loop is detected.
+        map_changed = self._slam.map_changed()
+        publish_pc = map_changed or self._frame_count % self._PC_PUBLISH_INTERVAL == 0
+        if publish_pc and level_ok and (self._pc_buf is not None or self._kf_buf is not None):
+            self._publish_map(ts, map_changed)
+
+        # map_changed() is true once per loop closure / global BA
+        if map_changed and self._loop_event is not None:
+            self._loop_event.set()
+
+    def _publish_map(self, ts: float, map_changed: bool) -> None:
+        if self._pc_buf is not None:
+            all_pts = np.asarray(self._slam.get_all_map_points(), dtype=np.float32)
+            if len(all_pts) > 0:
+                self._pc_buf.write(self._level_points(all_pts), ts=ts)
+                if map_changed:
+                    self.logger.info(f"Map changed — published {len(all_pts)} pts")
+                else:
+                    self.logger.debug(f"Periodic PC publish: {len(all_pts)} pts")
+        if self._kf_buf is not None:
+            kf = np.asarray(self._slam.get_all_keyframe_poses(), dtype=np.float32)
+            if len(kf) > 0:
+                self._kf_buf.write(self._level_points(kf[:, :3, 3]), ts=ts)
 
     def teardown(self) -> None:
         if self._slam is not None:

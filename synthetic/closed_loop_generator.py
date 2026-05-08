@@ -18,6 +18,8 @@ from typing import List, Tuple
 import cv2
 import numpy as np
 
+from synthetic import SYNTH_FX
+
 
 class ClosedLoopFrameGenerator:
     """Closed-loop RGBD + IMU sequence around an elliptical track.
@@ -31,7 +33,7 @@ class ClosedLoopFrameGenerator:
     def __init__(
         self,
         width: int = 640,
-        height: int = 480,
+        height: int = 400,
         n_frames: int = 200,
         straight_len: float = 4.0,
         turn_radius: float = 2.0,
@@ -54,9 +56,9 @@ class ClosedLoopFrameGenerator:
         self.fps = fps
         self.rng = np.random.RandomState(seed)
 
-        # NB: keep these in sync with the SLAM settings yaml
-        self.fx = 456.99
-        self.fy = 456.99
+        # same intrinsics as synthetic_slam_settings.yaml (640x400)
+        self.fx = SYNTH_FX * width / 640.0
+        self.fy = self.fx
         self.cx = width / 2.0
         self.cy = height / 2.0
 

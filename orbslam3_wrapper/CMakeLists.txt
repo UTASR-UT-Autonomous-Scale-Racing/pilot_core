@@ -21,7 +21,7 @@ find_package(OpenCV 4.4 REQUIRED)
 find_package(Eigen3 3 REQUIRED)
 
 # ORB_SLAM3 paths
-set(ORBSLAM3_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../ORB_SLAM3)
+get_filename_component(ORBSLAM3_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../ORB_SLAM3 ABSOLUTE)
 set(ORBSLAM3_LIB ${ORBSLAM3_DIR}/lib/libORB_SLAM3.so)
 
 # Python module
@@ -49,7 +49,19 @@ target_link_libraries(orbslam3_python PRIVATE
     ${OpenCV_LIBS}
 )
 
-# Write the .so to the repo root (next to start.py) so it is importable there
+# Write the .so to the repo root (next to start.py) so it is importable there.
+# The RPATH lets it find libORB_SLAM3 and its Thirdparty libs without
+# LD_LIBRARY_PATH. /usr/local/lib is for Pangolin. RUNPATH only applies to
+# direct dependencies, so the Thirdparty dirs are listed too in case
+# libORB_SLAM3.so was built without its own RUNPATH.
+set(ORBSLAM3_RPATH
+    ${ORBSLAM3_DIR}/lib
+    ${ORBSLAM3_DIR}/Thirdparty/DBoW2/lib
+    ${ORBSLAM3_DIR}/Thirdparty/g2o/lib
+    /usr/local/lib
+)
 set_target_properties(orbslam3_python PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../
+    BUILD_RPATH "${ORBSLAM3_RPATH}"
+    INSTALL_RPATH "${ORBSLAM3_RPATH}"
 )

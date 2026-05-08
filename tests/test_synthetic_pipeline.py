@@ -242,8 +242,9 @@ class TestFullSyntheticPipeline:
         assert 2 in mask
 
     def test_full_pipeline_synthetic_no_hardware(self):
-        """camera -> vision -> SLAM -> mapping -> PID, all synthetic."""
-        from workers import CameraWorker, ControlWorker, MappingWorker, SLAMWorker
+        """camera -> vision -> SLAM stub -> mapping, all synthetic. (The control
+        side is covered by the control tests.)"""
+        from workers import CameraWorker, MappingWorker, SLAMWorker
 
         fn = f"fullsyn_f_{_uid()}"
         pn = f"fullsyn_p_{_uid()}"
@@ -287,7 +288,7 @@ class TestFullSyntheticPipeline:
 
             mapper = MappingWorker(
                 name="mapping",
-                pose_buffer=pb, segment_buffer=sb,
+                pose_buffer=pb,
                 pointcloud_buffer=pcb, boundary_buffer=bb,
                 loop_event=loop_ev, mapping_done_event=done_ev,
                 boundary_min_points=10,
@@ -308,12 +309,18 @@ class TestFullSyntheticPipeline:
                     mask[depth >= 1.5] = 2  # wall
                     sb.write(mask)
 
-                # fake wall points on an ellipse
-                theta = np.linspace(0, 2 * np.pi, 50) + i * 0.2
-                pts = np.column_stack([
-                    8.0 * np.cos(theta),
-                    np.zeros(50),
-                    5.0 * np.sin(theta),
+                # The stub publishes identity poses, which the mapper drops as
+                # stationary. Drive a lap of the centre line on top of it.
+                phi = 2 * np.pi * i / 15
+                T = np.eye(4, dtype=np.float32)
+                T[0, 3], T[2, 3] = 6.5 * np.cos(phi), 4.0 * np.sin(phi)
+                pb.write(T)
+
+                # fake wall points on two ellipses either side of it
+                theta = np.linspace(0, 2 * np.pi, 100)
+                pts = np.vstack([
+                    np.column_stack([a * np.cos(theta), np.zeros(100), b * np.sin(theta)])
+                    for a, b in ((8.0, 5.0), (5.0, 3.0))
                 ]).astype(np.float32)
                 pcb.write(pts)
 
@@ -331,32 +338,6 @@ class TestFullSyntheticPipeline:
             _, outer_line, inner_line = bnd_result
             assert len(outer_line) > 0
             assert len(inner_line) > 0
-
-            ctrl = ControlWorker(
-                name="control", mode="pid",
-                output_buffer=cb, pose_buffer=pb,
-                boundary_buffer=bb, mapping_done_event=done_ev,
-                pid_config={
-                    "kp_steer": 1.0, "ki_steer": 0.0,
-                    "kd_steer": 0.1, "target_throttle": 0.3,
-                    "noise_std": 0.0,
-                },
-            )
-            ctrl._logger = MagicMock()
-            ctrl.setup()
-
-            T = np.eye(4, dtype=np.float32)
-            T[0, 3] = 6.5
-            pb.write(T)
-
-            for _ in range(5):
-                ctrl.step()
-
-            result = cb.read_latest()
-            assert result is not None
-            _, steer, throttle = result
-            assert 0.0 <= steer <= 1.0        # ControlBuffer contract: [0, 1]
-            assert 0.0 <= throttle <= 1.0
 
             cam.teardown()
         finally:

@@ -47,16 +47,10 @@ logger = logging.getLogger(__name__)
 
 class FrameLogger:
     """2x2 debug video: RGB | depth on top, IMU | BEV map below.
-    Panels are 640x480, so the video is 1280x960."""
+    Panels are 640x480 (frames are resized), so the video is 1280x960."""
 
     PANEL_W = 640
     PANEL_H = 480
-
-    # must match synthetic_slam_settings.yaml
-    FX = 456.99
-    FY = 456.99
-    CX = 320.0
-    CY = 240.0
 
     BEV_RANGE = 5.0  # +/- 5 m around the centroid
 
@@ -413,7 +407,6 @@ class TestSLAMSyntheticPipeline:
         logger.info(f"Phase A complete: {tracking_ok}/{n} frames tracked OK")
         logger.info(f"Map points: {len(map_points)}")
         logger.info(f"Map changes: {map_changed_count}")
-        logger.info(f"Trajectory length: {slam_system.trajectory_length()}")
 
         # Only 30%: init eats a few frames and the synthetic scene can lose
         # tracking in the turns
@@ -452,6 +445,8 @@ class TestSLAMSyntheticPipeline:
         logger.info(f"Keyframes: {n_kf}")
 
         assert n_kf >= 3, f"Expected ≥3 keyframes, got {n_kf}"
+        map_id, init_kf, n_kf_map = slam_system.map_info()
+        assert n_kf_map >= 3           # current map (the local mapper may still be culling)
         logger.info("✓ Keyframe count OK")
 
     # phase B: second lap over the mapped track
@@ -519,7 +514,7 @@ class TestSLAMSyntheticPipeline:
         logger.info(f"  Map points          : {n_pts}")
         logger.info(f"  Keyframes           : {len(kf)}")
         logger.info(f"  Map changed         : {TestSLAMSyntheticPipeline._map_changed}")
-        logger.info(f"  Trajectory length   : {slam_system.trajectory_length()}")
+        logger.info(f"  Map info            : {slam_system.map_info()}")
         logger.info("═" * 60)
 
         # just reporting, always passes

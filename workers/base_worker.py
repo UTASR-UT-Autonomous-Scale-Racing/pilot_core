@@ -6,8 +6,9 @@ Inside the child, setup() runs once, then step() in a tight loop until
 stop() is called (or SIGTERM / SIGHUP arrives, or the parent process dies),
 then teardown().
 
-Exit codes: 0 after a normal stop, 1 if setup() failed or step() kept
-failing (max_step_failures in a row), so the orchestrator can restart it.
+Exit codes: 0 after a normal stop, 1 if setup() failed, step() raised
+FatalWorkerError, or step() kept failing (max_step_failures in a row), so
+the orchestrator can restart it.
 """
 
 from __future__ import annotations
@@ -19,6 +20,12 @@ import signal
 import sys
 import time
 from typing import Any, Dict
+
+
+class FatalWorkerError(RuntimeError):
+    """Raised from step() when the worker cannot continue (e.g. its device is
+    gone for good): the process exits with code 1 and the orchestrator
+    restarts it."""
 
 
 class BaseWorker:
@@ -95,6 +102,10 @@ class BaseWorker:
                 try:
                     self.step()
                     failures = 0
+                except FatalWorkerError:
+                    self._logger.exception("Fatal error in step() — exiting")
+                    exit_code = 1
+                    break
                 except Exception:
                     failures += 1
                     self._logger.exception(f"Exception in step() ({failures}/{self.max_step_failures})")

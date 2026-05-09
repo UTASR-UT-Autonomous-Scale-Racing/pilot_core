@@ -29,6 +29,7 @@ slam:
 
 mapping:
   boundary_min_points: 10       # wall points needed before extracting (50 on the car)
+  max_track_half_width: 1.5     # m, wall points further from the driven line are dropped
 
 recording: false
 recording_path: /tmp/pilot_recordings

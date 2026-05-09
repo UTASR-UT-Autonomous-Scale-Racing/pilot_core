@@ -74,7 +74,7 @@ track_control:
 
 # depth follow-the-gap, map-free (control_mode: depth_ftg, or as the track fallback)
 depth_ftg:
-  camera_height: 0.12           # m above ground, needs measuring on the car
+  camera_height: 0.12           # m above ground, needs measuring on the car (mapping uses it too)
   camera_pitch: 0.0             # rad, positive = pitched down
   min_obstacle_height: 0.04     # m, anything lower is floor
   max_obstacle_height: 0.50     # m, anything higher is ignored
@@ -115,6 +115,11 @@ safety:
   steering_rate: 7.6            # units/s, on the signed [-1, 1] range
   throttle_rate: 4.0            # units/s
 
+# OAK-D
+camera:
+  max_exposure_us: 4000         # auto-exposure limit, keeps motion blur down
+  extended_disparity: true      # closer minimum depth (sub-pixel off)
+
 # SLAM
 enable_slam: true               # ORB-SLAM3 + mapping, same as start.py --enable-slam
 slam:
@@ -124,6 +129,7 @@ slam:
 # mapping / BEV boundaries
 mapping:
   boundary_min_points: 50       # wall points needed before we try extracting boundaries
+  max_track_half_width: 1.5     # m, wall points further from the driven line are dropped
 
 recording: false                # dump buffers to disk (or start.py --recording)
 recording_path: /tmp/pilot_recordings   # a timestamped folder per run is created here

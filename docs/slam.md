@@ -43,11 +43,13 @@ cmake .. -Dpybind11_DIR=$(pybind11-config --cmakedir) -DCMAKE_BUILD_TYPE=Release
 Check it:
 
 ```bash
-export LD_LIBRARY_PATH=$PWD/ORB_SLAM3/lib:/usr/local/lib:$LD_LIBRARY_PATH
 python -c "import orbslam3_python; print('ok')"
 ```
 
-`scripts/run.sh` sets `LD_LIBRARY_PATH` for you:
+The wrapper is built with an RPATH to `ORB_SLAM3/lib` and its third-party libraries, so
+`LD_LIBRARY_PATH` is not needed (`scripts/run.sh` still sets it, which does no harm).
+Without the build, `SLAMWorker` refuses to start unless the run is synthetic, where it
+falls back to a stub that publishes identity poses.
 
 ```bash
 scripts/run.sh --config config_cpu.yaml --enable-slam
@@ -64,16 +66,37 @@ python scripts/gen_orbslam_settings.py --config config.yaml
 ```
 
 The generated file matches what `CameraWorker` sends: undistorted RGB frames, RGB channel
-order, depth in metres (`DepthMapFactor: 1.0`).
+order, depth in metres (`DepthMapFactor: 1.0`). It records the camera's device id
+(`Pilot.deviceId`); `CameraWorker` warns at startup if the connected camera or its
+intrinsics differ from the file by more than 2%.
+
+## World frame and timestamps
+
+ORB-SLAM3's world frame is the first camera frame, which is pitched toward the floor.
+During the first frames `SLAMWorker` fits the floor plane in the depth image (keep the
+car still on the floor while it starts) and from then on publishes poses and map points
+in a levelled frame: same origin, Y down, the floor parallel to the BEV plane. It logs
+the fitted pitch, roll and camera height. Set the measured height in
+`depth_ftg.camera_height`, which mapping uses too.
+
+Poses carry the capture time of the frame they came from, so the state estimator
+works with the true measurement time.
+
+If ORB-SLAM3 loses the map and starts a new one, `SLAMWorker` signals a map reset.
+While mapping, `MappingWorker` drops everything recorded and the lap has to be driven
+again; in localization mode, poses are withheld until SLAM relocalises in the mapped map.
 
 ## Mapping lap
 
 1. Start with `--enable-slam` and drive one lap of the track by hand.
 2. Press `l` in the terminal when the lap is complete (or wait for ORB-SLAM3 to detect
    the loop closure).
-3. `MappingWorker` splits the wall points into left and right boundaries along the
-   driven trajectory and publishes them. SLAM switches to localization-only mode, and
-   you can arm with `a`.
+3. `MappingWorker` takes the loop-corrected keyframe trajectory, trims it to one lap,
+   keeps map points in a height band above the floor and within
+   `mapping.max_track_half_width` of the driven line, splits them into left and right
+   walls (lap direction from the trajectory, so clockwise laps work too) and publishes
+   the smoothed boundaries. SLAM switches to localization-only mode, and you can arm
+   with `a`.
 
 ## Tips
 

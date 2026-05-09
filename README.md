@@ -59,7 +59,7 @@ Data contracts between workers:
 | Buffer       | Contents |
 | ------ | -------- |
 | `frame_buf`  | RGB `uint8` (H, W, 3) and depth in metres `float32` (H, W), aligned |
-| `imu_buf`    | `[qw, qx, qy, qz, ax, ay, az, s7, s8]`, acceleration in m/s². Arduino IMU: s7/s8 = RC throttle/steering pulse widths (µs); OAK-D IMU: gyro rates |
+| `imu_buf`    | `[qw, qx, qy, qz, ax, ay, az, s7, s8]`, acceleration in m/s². Arduino IMU: s7/s8 = RC throttle/steering pulse widths (µs); OAK-D IMU: gyro rates (quaternion NaN on IMUs without a rotation vector) |
 | `pose_buf`   | 4×4 camera-to-world pose, stamped with the frame's capture time; published only while SLAM is tracking |
 | `state_buf`  | `t, x, y, yaw, v, yaw_rate` on the ground plane (EKF estimate) |
 | `ctrl_buf`   | `steering, throttle` in [0, 1], 0.5 = neutral. Steering 0 = full left, 1 = full right; throttle below 0.5 = backward, above = forward |

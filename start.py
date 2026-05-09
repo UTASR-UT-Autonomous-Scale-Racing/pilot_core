@@ -274,6 +274,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     buffers.extend([frame_buf, imu_buf, seg_buf, pose_buf, ctrl_buf])
 
     pc_buf = None
+    kf_buf = None
     boundary_buf = None
     lidar_buf = None
     if enable_slam or use_saved_map:
@@ -283,6 +284,9 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 name="pc_buf",
                 create=True,
             )
+            # ORB-SLAM3 keyframe positions (loop-corrected trajectory for mapping)
+            kf_buf = PointCloudBuffer(slots=2, name="kf_buf", max_points=5000, create=True)
+            buffers.append(kf_buf)
         boundary_buf = TrackBoundaryBuffer(
             slots=buf_cfg.get("boundary", {}).get("slots", 2),
             name="boundary_buf",
@@ -314,6 +318,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     loop_event = mp.Event() if enable_slam else None
     mapping_done_event = mp.Event() if (enable_slam or use_saved_map) else None
     localize_event = mp.Event() if enable_slam else None
+    map_reset_event = mp.Event() if enable_slam else None   # SLAM started a new map
 
     # saved map: push the boundaries into boundary_buf right away
     if use_saved_map and boundary_buf is not None:
@@ -394,6 +399,9 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 resolution=resolution,
                 synthetic=use_synthetic,
                 imu_buffer=imu_buf if oakd_imu_via_camera else None,
+                settings_path=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
+                **{k: v for k, v in config.get("camera", {}).items()
+                   if k in ("max_exposure_us", "extended_disparity", "frame_timeout_s")},
             )
         )
         if not oakd_imu_via_camera:
@@ -404,6 +412,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                     i2c_address=i2c_address,
                     i2c_bus=i2c_bus,
                     synthetic=use_synthetic,
+                    poll_hz=config.get("imu_poll_hz", 100.0),
                 )
             )
 
@@ -527,6 +536,9 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 input_buffer=frame_buf,
                 output_buffer=pose_buf,
                 pointcloud_buffer=pc_buf,
+                keyframe_buffer=kf_buf,
+                map_reset_event=map_reset_event,
+                synthetic=use_synthetic,
                 vocab_path=slam_cfg.get(
                     "vocabulary", "ORB_SLAM3/Vocabulary/ORBvoc.txt"
                 ),
@@ -544,8 +556,9 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             MappingWorker(
                 name="mapping",
                 pose_buffer=pose_buf,
-                segment_buffer=seg_buf,
                 pointcloud_buffer=pc_buf,
+                keyframe_buffer=kf_buf,
+                map_reset_event=map_reset_event,
                 boundary_buffer=boundary_buf,
                 loop_event=loop_event,
                 mapping_done_event=mapping_done_event,
@@ -553,6 +566,11 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 bev_axes=mapping_cfg.get("bev_axes", [0, 2]),
                 forward_axis=mapping_cfg.get("forward_axis", 2),
                 boundary_save_path=mapping_cfg.get("boundary_save_path"),
+                # one measured camera height for the whole config
+                camera_height=mapping_cfg.get("camera_height", depth_ftg_cfg.get("camera_height", 0.15)),
+                **{k: v for k, v in mapping_cfg.items()
+                   if k in ("wall_height_band", "max_track_half_width", "boundary_bin_size",
+                            "boundary_smooth_window", "lap_close_radius", "up_sign")},
             )
         )
 

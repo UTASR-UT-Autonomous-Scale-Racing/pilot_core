@@ -124,6 +124,7 @@ slam:
 
 mapping:
   boundary_min_points: 50       # wall points before boundary extraction starts
+  max_track_half_width: 1.5     # m, wall points further from the driven line are dropped
 
 recording: false                # or --recording
 recording_path: /tmp/pilot_recordings

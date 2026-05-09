@@ -224,3 +224,8 @@ def test_worker_rejects_unknown_mode():
     w._logger = MagicMock()
     with pytest.raises(ValueError):
         w.setup()
+
+
+def test_upside_down_camera_finds_no_floor():
+    depth = _floor_depth(wall_at=2.0)
+    assert GroundPlaneSegmenter(K).get_mask(np.ascontiguousarray(depth[::-1, ::-1])).sum() == 0

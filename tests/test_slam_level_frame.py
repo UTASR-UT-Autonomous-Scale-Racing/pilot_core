@@ -48,3 +48,17 @@ def test_floor_fit_levels_the_pitched_camera():
     p = gen.pitch
     R_pitch = np.array([[1, 0, 0], [0, np.cos(p), np.sin(p)], [0, -np.sin(p), np.cos(p)]])
     np.testing.assert_allclose(R[:3, :3], R_pitch, atol=0.02)
+
+
+def test_plane_above_the_camera_is_not_the_floor():
+    # an upside-down camera sees the floor (or a ceiling) above it: never level on that
+    gen = ClosedLoopFrameGenerator(n_frames=100, straight_len=2.0, turn_radius=1.0)
+    w = SLAMWorker(name="slam", level_frames=3, level_timeout_frames=3)
+    w._logger = MagicMock()
+    w._K = read_settings_intrinsics(SETTINGS)
+    x, z, heading = gen._ellipse_path(0.0)
+    _, depth = gen._render_frame_fast(x, z, heading)
+    for _ in range(3):
+        w._update_level(np.ascontiguousarray(depth[::-1, ::-1]))   # camera rotated 180°
+    assert w._plane_fits == []
+    np.testing.assert_allclose(w._R_level, np.eye(4))          # falls back to the unlevelled frame

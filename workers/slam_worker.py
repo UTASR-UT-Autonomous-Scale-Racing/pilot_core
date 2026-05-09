@@ -144,6 +144,9 @@ class SLAMWorker(BaseWorker):
         Publish in the floor-aligned frame (default True).
     level_frames, level_timeout_frames : int
         Good floor fits to average (5) and frames to try before giving up (150).
+    floor_height_range : (float, float)
+        Camera height above an accepted floor fit, m (0.03, 1.0). Rejects
+        planes above the camera (ceiling, table top, upside-down camera).
     synthetic : bool
         Synthetic run (also PILOT_SYNTHETIC=1). Only then is the identity-pose
         stub allowed when orbslam3_python is missing; otherwise setup() fails.
@@ -171,6 +174,8 @@ class SLAMWorker(BaseWorker):
         self._level_world = bool(kwargs.get("level_world", True))
         self._level_frames = int(kwargs.get("level_frames", 5))
         self._level_timeout = int(kwargs.get("level_timeout_frames", 150))
+        # accepted camera heights above the fitted floor, m
+        self._floor_height_range = tuple(kwargs.get("floor_height_range", (0.03, 1.0)))
         self._K: Optional[SimpleNamespace] = None
         self._plane_fitter = None
         self._plane_fits: list[np.ndarray] = []
@@ -241,14 +246,16 @@ class SLAMWorker(BaseWorker):
             self._R_level = np.eye(4, dtype=np.float32)
             return
         if self._plane_fitter is None:
-            from vision.segmenters import GroundPlaneSegmenter
-            self._plane_fitter = GroundPlaneSegmenter(self._K)
+            from vision.segmenters import GroundPlaneConfig, GroundPlaneSegmenter
+            self._plane_fitter = GroundPlaneSegmenter(
+                self._K, GroundPlaneConfig(camera_height_range=self._floor_height_range))
 
         self._level_tries += 1
         pts, valid = self._plane_fitter._points(depth)
         lower = valid.copy()
         lower[: lower.shape[0] // 2] = False  # floor is in the lower half
-        plane = self._plane_fitter.fit_plane(pts[lower])  # n points up, n.p + d = 0
+        # n points up, n.p + d = 0, d = camera height (planes above the camera are rejected)
+        plane = self._plane_fitter.fit_plane(pts[lower])
         if plane is not None:
             self._plane_fits.append(plane)
 

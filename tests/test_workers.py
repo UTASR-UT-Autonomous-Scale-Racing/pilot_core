@@ -192,6 +192,7 @@ class TestSLAMWorker:
                 output_buffer=pb,
                 vocab_path="nonexistent.txt",
                 settings_path="nonexistent.yaml",
+                synthetic=True,          # the stub is only allowed in synthetic runs
             )
             assert w.name == "slam"
         finally:
@@ -211,6 +212,7 @@ class TestSLAMWorker:
                 output_buffer=pb,
                 vocab_path="nonexistent.txt",
                 settings_path="nonexistent.yaml",
+                synthetic=True,          # the stub is only allowed in synthetic runs
             )
             w._logger = MagicMock()
             # make `import orbslam3_python` fail
@@ -317,53 +319,46 @@ class TestSLAMWorker:
         not os.environ.get("OAKD_AVAILABLE", ""),
         reason="OAK-D + ORB_SLAM3 not available"
     )
-    def test_real_slam_single_frame(self):
-        """Real ORB_SLAM3 tracking on one real frame."""
+    def test_real_slam_tracks_live_frames(self):
+        """Real ORB_SLAM3 on live OAK-D frames publishes a pose. Initialising
+        needs enough texture with valid depth, so allow a few seconds."""
         pytest.importorskip("orbslam3_python")
         from workers import CameraWorker, SLAMWorker
 
-        fn = f"slam_f_{_uid()}"
-        pn = f"slam_p_{_uid()}"
-        fb = FrameBuffer(slots=4, name=fn, create=True)
-        pb = PoseBuffer(slots=4, name=pn, create=True)
+        fb = FrameBuffer(slots=4, name=f"slam_f_{_uid()}", create=True)
+        pb = PoseBuffer(slots=4, name=f"slam_p_{_uid()}", create=True)
+        cam = w = None
         try:
             cam = CameraWorker(name="cam", output_buffer=fb, fps=30, resolution=[640, 400])
             cam._logger = MagicMock()
-            cam._logger.info = print
             cam.setup()
-
-            # skip ~1 s of warm-up, stereo depth is sparse in the first frames
-            deadline = time.time() + 10.0
-            while time.time() < deadline:
-                cam.step()
-                latest = fb.read_latest()
-                if latest is not None and latest[0].seq_no >= 30:
-                    break
-            cam.teardown()
-
             w = SLAMWorker(
                 name="slam",
                 input_buffer=fb,
                 output_buffer=pb,
                 vocab_path="ORB_SLAM3/Vocabulary/ORBvoc.txt",
                 settings_path="orbslam_oakd_rgbd.yaml",
-                warmup_frames=0,
+                warmup_frames=15,
+                level_world=False,       # the floor may not be in view on a desk
             )
             w._logger = MagicMock()
-            w._logger.info = print
-            w._logger.warning = print
             w.setup()
-            w._frame_buf = fb
-            w._pose_buf = pb
-            w._last_seq = 0
 
-            w.step()
-            result = pb.read_latest()
-            assert result is not None
-            _, pose, _, _ = result
+            deadline = time.time() + 15.0
+            result = None
+            while time.time() < deadline and result is None:
+                cam.step()
+                w.step()
+                result = pb.read_latest()
+            assert result is not None, "no pose in 15 s: is the camera looking at a textured, lit scene?"
+            header, pose, _, _ = result
             assert pose.shape == (4, 4)
-            w.teardown()
+            assert header.produced_ts <= time.monotonic()      # capture-time stamp
         finally:
+            if cam is not None:
+                cam.teardown()
+            if w is not None:
+                w.teardown()
             fb.unlink()
             pb.unlink()
 

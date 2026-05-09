@@ -60,6 +60,9 @@ class GroundPlaneConfig:
     obstacle_height: float = 0.04     # m above the plane that counts as an obstacle
     ransac_iterations: int = 60
     min_floor_fraction: float = 0.05  # of sampled pixels; below this no plane is trusted
+    # camera height above an accepted floor, m. Rejects planes above the camera
+    # (ceiling, table top) and an upside-down camera
+    camera_height_range: tuple = (0.03, 1.0)
 
 
 class GroundPlaneSegmenter:
@@ -108,7 +111,10 @@ class GroundPlaneSegmenter:
         centroid = inl.mean(axis=0)
         n = np.linalg.svd(inl - centroid, full_matrices=False)[2][-1]
         n = -n if n[1] > 0 else n
-        return np.append(n, -n @ centroid)
+        d = -n @ centroid                                       # camera height above the plane
+        if not c.camera_height_range[0] <= d <= c.camera_height_range[1]:
+            return None
+        return np.append(n, d)
 
     def get_mask(self, depth: np.ndarray, rgb: np.ndarray | None = None) -> np.ndarray:
         c = self.cfg

@@ -5,6 +5,7 @@
  *   orbslam3_python.System(vocab, settings, sensor_type)
  *       .track_rgbd(rgb, depth, timestamp) -> np.ndarray (4x4 float32, Tcw)
  *       .map_changed()                     -> bool
+ *       .is_running_gba()                  -> bool
  *       .map_info()                        -> (map_id, init_kf_id, n_keyframes)
  *       .get_all_map_points()              -> np.ndarray (N x 3 float32)
  *       .get_all_keyframe_poses()          -> np.ndarray (K x 4 x 4 float32, Twc)
@@ -113,6 +114,12 @@ public:
         return false;
     }
 
+    // True while the loop closer's global bundle adjustment runs in its
+    // thread; the map points are only loop-corrected once it has finished.
+    bool is_running_gba() {
+        return sys_.mpLoopCloser != nullptr && sys_.mpLoopCloser->isRunningGBA();
+    }
+
     // (map_id, init_kf_id, n_keyframes) of the Atlas' current map. The pair
     // (map_id, init_kf_id) changes whenever the world frame is redefined.
     std::tuple<long unsigned, long unsigned, long unsigned> map_info() {
@@ -188,6 +195,8 @@ PYBIND11_MODULE(orbslam3_python, m) {
              "Run one RGBD tracking step, returns the 4x4 Tcw pose as float32")
         .def("map_changed", &SLAM::map_changed,
              "True once after each loop closure / global BA on the current map")
+        .def("is_running_gba", &SLAM::is_running_gba,
+             "True while the global bundle adjustment after a loop closure runs")
         .def("map_info", &SLAM::map_info,
              "(map_id, init_kf_id, n_keyframes) of the current map")
         .def("get_all_map_points", &SLAM::get_all_map_points,

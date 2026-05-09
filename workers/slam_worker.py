@@ -153,6 +153,7 @@ class SLAMWorker(BaseWorker):
     """
 
     _PC_PUBLISH_INTERVAL = 30  # also publish point cloud every N frames
+    _LOOP_SETTLE_S = 1.0       # map stable this long after the last change before signalling a loop
 
     def __init__(self, name: str = "slam", **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
@@ -171,6 +172,8 @@ class SLAMWorker(BaseWorker):
         self._warmup_frames = 0
 
         # floor alignment
+        self._loop_pending = False
+        self._last_map_change = 0.0
         self._level_world = bool(kwargs.get("level_world", True))
         self._level_frames = int(kwargs.get("level_frames", 5))
         self._level_timeout = int(kwargs.get("level_timeout_frames", 150))
@@ -393,13 +396,28 @@ class SLAMWorker(BaseWorker):
         # Publish on map change and also every N frames, otherwise
         # MappingWorker has no wall points until a loop is detected.
         map_changed = self._slam.map_changed()
+        if map_changed:
+            self._last_map_change = time.monotonic()
+            self._loop_pending = True
         publish_pc = map_changed or self._frame_count % self._PC_PUBLISH_INTERVAL == 0
-        if publish_pc and level_ok and (self._pc_buf is not None or self._kf_buf is not None):
-            self._publish_map(ts, map_changed)
 
-        # map_changed() is true once per loop closure / global BA
-        if map_changed and self._loop_event is not None:
-            self._loop_event.set()
+        # A loop closure first corrects the loop, then runs a global bundle
+        # adjustment in ORB-SLAM3's loop-closing thread; only after that are
+        # the map points consistent. So the loop is signalled (and the map
+        # republished) once GBA has finished and the map has been stable for
+        # _LOOP_SETTLE_S, not at the first map change.
+        loop_ready = (
+            self._loop_pending
+            and not (hasattr(self._slam, "is_running_gba") and self._slam.is_running_gba())
+            and time.monotonic() - self._last_map_change >= self._LOOP_SETTLE_S
+        )
+        if (publish_pc or loop_ready) and level_ok and (self._pc_buf is not None or self._kf_buf is not None):
+            self._publish_map(ts, map_changed or loop_ready)
+        if loop_ready and level_ok:
+            self._loop_pending = False
+            if self._loop_event is not None:
+                self.logger.info("Loop closed and map optimised — signalling loop closure")
+                self._loop_event.set()
 
     def _publish_map(self, ts: float, map_changed: bool) -> None:
         if self._pc_buf is not None:

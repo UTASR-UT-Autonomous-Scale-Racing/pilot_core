@@ -141,3 +141,34 @@ def test_stub_only_in_synthetic_mode(monkeypatch):
         assert w._slam is None
     finally:
         fb.unlink(); pb.unlink()
+
+
+def test_loop_is_signalled_only_after_global_ba_settles():
+    import time
+
+    w, fb, pb = _worker_with_fake_slam(np.eye(4, dtype=np.float32), state=2)
+    w._loop_event = MagicMock()
+    w._R_level = np.eye(4, dtype=np.float32)
+    w._slam.get_all_map_points.return_value = np.zeros((5, 3), np.float32)
+    w._pc_buf = MagicMock()
+
+    def new_frame():
+        fb.write(np.zeros((400, 640, 3), np.uint8), np.ones((400, 640), np.float32))
+        w.step()
+
+    try:
+        w._slam.map_changed.return_value = True            # loop detected, GBA starts
+        w._slam.is_running_gba.return_value = True
+        new_frame()
+        w._slam.map_changed.return_value = False
+        new_frame()
+        w._loop_event.set.assert_not_called()               # still optimising
+        w._slam.is_running_gba.return_value = False
+        new_frame()
+        w._loop_event.set.assert_not_called()               # finished, but not settled yet
+        w._last_map_change = time.monotonic() - w._LOOP_SETTLE_S - 0.1
+        new_frame()
+        w._loop_event.set.assert_called_once()
+        assert w._pc_buf.write.called                       # the optimised map went out
+    finally:
+        fb.unlink(); pb.unlink()

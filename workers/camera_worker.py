@@ -105,6 +105,8 @@ class CameraWorker(BaseWorker):
         self._has_rotation_vector = False
         self._step_errors = 0
         self._last_frame_t = 0.0
+        self._got_frame = False
+        self._startup_timeout = 5.0
         self._intrinsics_checked = False
 
     def setup(self) -> None:
@@ -120,6 +122,8 @@ class CameraWorker(BaseWorker):
         self._frame_buf = self.config["output_buffer"]
         self._imu_buf = self.config.get("imu_buffer")
         self._frame_timeout = float(self.config.get("frame_timeout_s", 1.0))
+        # the first frame after (re)opening takes longer: device boot + pipeline start
+        self._startup_timeout = float(self.config.get("startup_timeout_s", 5.0))
         self._max_step_errors = int(self.config.get("max_step_errors", 5))
         self._max_reopen = int(self.config.get("max_reopen_attempts", 3))
         self._settings = read_settings_camera(
@@ -195,6 +199,7 @@ class CameraWorker(BaseWorker):
 
         self._pipeline.start()
         self._last_frame_t = time.monotonic()
+        self._got_frame = False
         self._step_errors = 0
         self.logger.info(
             f"OAK-D camera ready ({platform}) @ {fps} FPS, {width}×{height}, "
@@ -336,10 +341,12 @@ class CameraWorker(BaseWorker):
                 self._reopen(f"{self._step_errors} step errors in a row")
                 return
             raise
+        timeout = self._frame_timeout if self._got_frame else self._startup_timeout
         if got:
             self._last_frame_t = time.monotonic()
-        elif time.monotonic() - self._last_frame_t > self._frame_timeout:
-            self._reopen(f"no frame for {self._frame_timeout:.1f}s")
+            self._got_frame = True
+        elif time.monotonic() - self._last_frame_t > timeout:
+            self._reopen(f"no frame for {timeout:.1f}s")
 
     def _step_device(self) -> bool:
         """Publish the newest synced frame, if any. True if one was published."""

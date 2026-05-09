@@ -20,6 +20,7 @@ def _worker(monkeypatch, step_results):
     w._logger = MagicMock()
     w._frame_timeout, w._max_step_errors, w._max_reopen = 1.0, 3, 2
     w._last_frame_t = time.monotonic()
+    w._got_frame = True                 # past start-up: the 1 s frame timeout applies
     results = list(step_results)
 
     def fake_step():
@@ -81,3 +82,14 @@ def test_settings_check(tmp_path):
     p.write_text(p.read_text() + 'Pilot.deviceId: "ABC"\n')
     assert read_settings_camera(str(p))["device_id"] == "ABC"
     assert read_settings_camera(str(tmp_path / "missing.yaml")) is None
+
+
+def test_first_frame_gets_the_startup_timeout(monkeypatch):
+    w = _worker(monkeypatch, [False, False])
+    w._got_frame = False
+    w._last_frame_t = time.monotonic() - 2.0      # past frame_timeout, inside startup_timeout
+    w.step()
+    w._start_device.assert_not_called()
+    w._last_frame_t = time.monotonic() - 6.0
+    w.step()
+    w._start_device.assert_called_once()

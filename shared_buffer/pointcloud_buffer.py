@@ -45,6 +45,11 @@ class PointCloudBuffer(TypedRingBuffer):
             create=create,
         )
 
+
+    @property
+    def max_points(self) -> int:
+        return self._max_points
+
     def write(self, points: np.ndarray, ts: Optional[float] = None) -> SlotHeader:
         pts = points.astype(np.float32)
         n = min(len(pts), self._max_points)

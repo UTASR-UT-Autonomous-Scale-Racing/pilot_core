@@ -61,7 +61,11 @@ class LidarProjectionWorker(BaseWorker):
         self._range_max: float = 9.5
         self._voxel_size: float = 0.10
         self._move_threshold: float = 0.05
-        self._voxel_map: dict = {}
+        # accumulated cloud: one point per occupied voxel, plus its packed key
+        self._voxel_pts = np.empty((0, 3), dtype=np.float32)
+        self._voxel_keys = np.empty(0, dtype=np.int64)
+        self._pc_capacity: int = 50_000
+        self._capacity_warned = False
         self._last_lidar_seq: int = 0
         self._last_proj_pos: np.ndarray | None = None
         self._frame_count: int = 0
@@ -79,6 +83,8 @@ class LidarProjectionWorker(BaseWorker):
         self._range_max = float(self.config.get("range_max", 9.5))
         self._voxel_size = float(self.config.get("voxel_size", 0.10))
         self._move_threshold = float(self.config.get("move_threshold", 0.05))
+        # PointCloudBuffer has no public capacity accessor, 50k is its default
+        self._pc_capacity = self._pc_buf.max_points
         self.logger.info(
             f"LidarProjectionWorker ready "
             f"(range=[{self._range_min},{self._range_max}]m "
@@ -86,6 +92,9 @@ class LidarProjectionWorker(BaseWorker):
         )
 
     def step(self) -> None:
+        if self._lidar_buf.latest_seq() <= self._last_lidar_seq:
+            time.sleep(0.005)
+            return
         lidar_result = self._lidar_buf.read_latest()
         if lidar_result is None:
             time.sleep(0.01)
@@ -114,27 +123,44 @@ class LidarProjectionWorker(BaseWorker):
             return
 
         # voxel dedup; first point in a cell wins
-        keys = np.floor(pts_world / self._voxel_size).astype(np.int64)
-        new_count = 0
-        for k, pt in zip(map(tuple, keys), pts_world):
-            if k not in self._voxel_map:
-                self._voxel_map[k] = pt
-                new_count += 1
-
-        if not self._voxel_map:
+        new_count = self._add_to_voxel_map(pts_world)
+        if len(self._voxel_pts) == 0:
             return
 
-        all_pts = np.array(list(self._voxel_map.values()), dtype=np.float32)
-        self._pc_buf.write(all_pts)
+        self._pc_buf.write(self._voxel_pts, ts=lidar_header.produced_ts)
         self._frame_count += 1
+
+        if not self._capacity_warned and len(self._voxel_pts) >= 0.9 * self._pc_capacity:
+            self._capacity_warned = True
+            self.logger.warning(
+                f"Point cloud has {len(self._voxel_pts)} voxels, near the "
+                f"PointCloudBuffer capacity of {self._pc_capacity}; points past it "
+                f"are dropped. Increase voxel_size or the buffer's max_points."
+            )
 
         if self._frame_count % 50 == 0:
             tx, ty = float(pose[0, 3]), float(pose[1, 3])
             self.logger.info(
                 f"pos=({tx:.2f},{ty:.2f})  valid_rays={len(pts_world)}  "
-                f"new_voxels={new_count}  total_voxels={len(self._voxel_map)}  "
+                f"new_voxels={new_count}  total_voxels={len(self._voxel_pts)}  "
                 f"frame={self._frame_count}"
             )
+
+    def _add_to_voxel_map(self, pts: np.ndarray) -> int:
+        """Add the points whose voxel is still empty; returns how many were new.
+
+        Voxel indices (np.floor(p / voxel_size)) are packed into one int64 with
+        21 bits per axis, which covers +/-1e6 voxels (+/-100 km at 0.1 m).
+        """
+        idx = np.floor(pts / self._voxel_size).astype(np.int64) + (1 << 20)
+        keys = (idx[:, 0] << 42) | (idx[:, 1] << 21) | idx[:, 2]
+        keys, first = np.unique(keys, return_index=True)   # dedupe within the scan
+        new = ~np.isin(keys, self._voxel_keys, assume_unique=True)
+        if not np.any(new):
+            return 0
+        self._voxel_keys = np.concatenate([self._voxel_keys, keys[new]])
+        self._voxel_pts = np.concatenate([self._voxel_pts, pts[first[new]].astype(np.float32)])
+        return int(new.sum())
 
     def _project_scan(self, ranges: np.ndarray, pose: np.ndarray) -> np.ndarray:
         """(1080,) ranges in metres + Twv pose -> (N, 3) world XYZ, valid rays only."""
@@ -167,5 +193,5 @@ class LidarProjectionWorker(BaseWorker):
     def teardown(self) -> None:
         self.logger.info(
             f"LidarProjectionWorker shut down after {self._frame_count} frames "
-            f"({len(self._voxel_map)} total voxels)"
+            f"({len(self._voxel_pts)} total voxels)"
         )

@@ -91,12 +91,18 @@ again; in localization mode, poses are withheld until SLAM relocalises in the ma
 1. Start with `--enable-slam` and drive one lap of the track by hand.
 2. Press `l` in the terminal when the lap is complete (or wait for ORB-SLAM3 to detect
    the loop closure).
-3. `MappingWorker` takes the loop-corrected keyframe trajectory, trims it to one lap,
-   keeps map points in a height band above the floor and within
-   `mapping.max_track_half_width` of the driven line, splits them into left and right
-   walls (lap direction from the trajectory, so clockwise laps work too) and publishes
-   the smoothed boundaries. SLAM switches to localization-only mode, and you can arm
-   with `a`.
+3. `MappingWorker` takes the loop-corrected keyframe trajectory and trims it to one lap.
+   It keeps map points in a height band above the floor plane, which it fits to the
+   map itself, and within `mapping.max_track_half_width` of the driven line. It works
+   out the lap direction from the trajectory, so clockwise laps work too. Along the lap
+   it places each wall at the nearest dense layer of points, which ignores stray points
+   in front of the wall and anything behind it, then publishes the boundaries. SLAM
+   switches to localization-only mode, and you can arm with `a`.
+
+A loop is signalled once ORB-SLAM3's global bundle adjustment after the loop closure
+has finished, so the boundaries come from the optimised map. On the dev simulator the
+extracted walls are within 1.2 cm (median) of the true walls
+([README](../README.md#a-full-run-in-the-dev-simulator)).
 
 ## Tips
 

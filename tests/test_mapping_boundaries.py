@@ -12,7 +12,7 @@ import pytest
 
 from shared_buffer import PointCloudBuffer, PoseBuffer, TrackBoundaryBuffer
 from workers.mapping_worker import (
-    MappingWorker, clean_trajectory, extract_track_boundaries, signed_area,
+    MappingWorker, clean_trajectory, extract_track_boundaries, floor_heights, signed_area,
 )
 
 A, B = 4.0, 2.5          # centre-line ellipse semi-axes (BEV)
@@ -72,6 +72,42 @@ def test_filters_far_points_floor_and_points_behind_the_wall():
     assert np.median(r) == pytest.approx(1.0, abs=0.03)
     ri = np.linalg.norm(i / [A - HALF, B - HALF], axis=1)
     assert np.median(ri) == pytest.approx(1.0, abs=0.03)   # the floor points were dropped
+
+
+def test_strays_in_front_of_the_wall_and_gaps_in_a_thin_wall():
+    # what a real SLAM map looks like: a dense outer wall, an inner wall seen only
+    # in patches, and sparse stray points between the car and both walls
+    rng = np.random.default_rng(0)
+    traj, closed = clean_trajectory(_lap(laps=1.2))
+    th = rng.uniform(0, 2 * np.pi, 4000)
+    outer = np.column_stack([(A + HALF) * np.cos(th), (B + HALF) * np.sin(th)])
+    th_in = rng.uniform(0, 2 * np.pi, 1500)
+    th_in = th_in[np.sin(3 * th_in) > -0.3]               # three unseen stretches
+    inner = np.column_stack([(A - HALF) * np.cos(th_in), (B - HALF) * np.sin(th_in)])
+    walls = np.vstack([outer, inner]) + rng.normal(0, 0.02, (len(outer) + len(inner), 2))
+    th_s = rng.uniform(0, 2 * np.pi, 600)
+    r = rng.uniform(-HALF + 0.1, HALF - 0.1, 600)         # anywhere across the track
+    strays = np.column_stack([(A + r) * np.cos(th_s), (B + r) * np.sin(th_s)])
+    o, i, _ = extract_track_boundaries(np.vstack([walls, strays]), None, traj, closed)
+    for line, (a, b) in ((o, (A + HALF, B + HALF)), (i, (A - HALF, B - HALF))):
+        # distance to the true ellipse, approximately (fine for these proportions)
+        err = np.abs(np.linalg.norm(line / [a, b], axis=1) - 1.0) * min(a, b)
+        assert np.percentile(err, 95) < 0.08
+    assert len(i) == len(o)                               # the gaps were bridged
+
+
+def test_floor_heights_absorb_a_tilted_floor():
+    rng = np.random.default_rng(1)
+    xy = rng.uniform(-4, 4, (3000, 2))
+    tilt = 0.02 * xy[:, 0]                                # ~1.1 deg, 8 cm across the map
+    floor = np.column_stack([xy, tilt + rng.normal(0, 0.005, 3000)])
+    wall = np.column_stack([rng.uniform(-4, 4, (500, 2)), rng.uniform(0.1, 0.5, 500)])
+    wall[:, 2] += 0.02 * wall[:, 0]
+    h = floor_heights(np.vstack([floor, wall]), floor_guess=0.0)
+    assert h is not None
+    assert np.abs(h[:3000]).max() < 0.03                  # floor at ~0 everywhere
+    assert np.all(h[3000:] > 0.08)
+    assert floor_heights(wall, floor_guess=5.0) is None   # no floor near the guess
 
 
 def _mapper(**kw):

@@ -15,12 +15,14 @@ Extraction (extract_track_boundaries):
   1. trajectory: drop stationary samples, trim to one lap (first return to
      the start after min_lap_length), resample densely;
   2. lap direction from the sign of the shoelace area (CCW > 0 seen from above);
-  3. wall points: keep a height band above the floor (floor = trajectory
-     height - camera_height) and a lateral gate (distance to the trajectory
-     < max_track_half_width);
-  4. side from the sign of the cross product (path tangent) x (path -> point),
-     then per side and per arc-length bin keep only the nearest point (the
-     wall, not what's behind it) and smooth along the lap;
+  3. wall points: keep a height band above the floor plane fitted to the map
+     itself (floor_heights; falls back to trajectory height - camera_height)
+     and a lateral gate (distance to the trajectory < max_track_half_width);
+  4. side from the sign of the cross product (path tangent) x (path -> point);
+     per side and arc-length bin the wall sits at the nearest dense layer of
+     points (_wall_offset: ignores strays in front of the wall and what's
+     behind it); thin bins get the offset interpolated along the lap, and the
+     offset is smoothed, so the boundary follows the path through gaps;
   5. CCW lap: right side = outer, left = inner; CW: the other way round.
 The result goes to TrackBoundaryBuffer (optionally saved to
 boundary_save_path), then mapping_done_event is set.
@@ -145,6 +147,43 @@ def clean_trajectory(
     return traj[: end + 1], True
 
 
+def floor_heights(
+    points: np.ndarray, floor_guess: float, tol: float = 0.1, iterations: int = 200, seed: int = 0,
+) -> Optional[np.ndarray]:
+    """Height of each point above the floor plane fitted to the map itself.
+
+    points is (N, 3) [bev0, bev1, up] with the third column pointing up;
+    floor_guess is the expected floor level on that axis. The floor is the
+    dominant near-horizontal plane among points within tol of the guess
+    (RANSAC, then a least-squares refit). Measuring from it absorbs a small
+    residual tilt or height offset of the SLAM frame, which a threshold on
+    the raw vertical coordinate does not. Returns None if no floor is found.
+    """
+    cand = points[np.abs(points[:, 2] - floor_guess) < tol].astype(np.float64)
+    if len(cand) < 50:
+        return None
+    rng = np.random.default_rng(seed)
+    best, best_n = None, 0
+    for _ in range(iterations):
+        p = cand[rng.choice(len(cand), 3, replace=False)]
+        n = np.cross(p[1] - p[0], p[2] - p[0])
+        norm = np.linalg.norm(n)
+        if norm < 1e-9:
+            continue
+        n = n / norm * np.sign(n[2] or 1.0)
+        if n[2] < 0.95:                          # within ~18 deg of horizontal
+            continue
+        inliers = np.abs((cand - p[0]) @ n) < 0.02
+        if inliers.sum() > best_n:
+            best, best_n = inliers, int(inliers.sum())
+    if best is None or best_n < 0.3 * len(cand):
+        return None
+    c = cand[best].mean(axis=0)
+    n = np.linalg.svd(cand[best] - c, full_matrices=False)[2][-1]
+    n = n if n[2] > 0 else -n
+    return (points - c) @ n
+
+
 def signed_area(xy: np.ndarray) -> float:
     """Shoelace area of the closed polygon; > 0 for counter-clockwise."""
     x, y = xy[:, 0], xy[:, 1]
@@ -171,21 +210,42 @@ def _smooth(pts: np.ndarray, window: int, closed: bool) -> np.ndarray:
     return np.column_stack([np.convolve(padded[:, i], k, mode="valid") for i in range(2)])[: len(pts)]
 
 
+def _wall_offset(offsets: np.ndarray, layer: float = 0.10, dense: float = 0.7) -> tuple[float, int]:
+    """Lateral distance of the wall from one bin's point offsets (m).
+
+    Offsets are histogrammed in layer-wide cells; the wall is the nearest cell
+    holding at least `dense` times as many points as the fullest one, refined to the
+    median of the points in it and its neighbours. Sparse strays between the
+    car and the wall and points behind it (a room beyond a low barrier) are
+    ignored; the nearest single point, or the median of all points, is not
+    robust to both. Returns (offset, number of points in the chosen cell).
+    """
+    cells = np.floor(offsets / layer).astype(np.int64)
+    ids, counts = np.unique(cells, return_counts=True)
+    k = np.flatnonzero(counts >= dense * counts.max())[0]
+    return float(np.median(offsets[np.abs(cells - ids[k]) <= 1])), int(counts[k])
+
+
 def extract_track_boundaries(
     wall_bev: np.ndarray,
     wall_height: Optional[np.ndarray],
     traj_bev: np.ndarray,
     closed: bool,
     max_half_width: float = 1.5,
-    height_band: tuple[float, float] = (0.03, 1.0),
+    height_band: tuple[float, float] = (0.05, 1.0),
     bin_size: float = 0.10,
     smooth_window: int = 5,
+    min_bin_points: int = 3,
 ) -> tuple[np.ndarray, np.ndarray, bool]:
     """Wall points -> (outer, inner, ccw) polylines, ordered along the lap.
 
     wall_bev (N, 2) BEV wall points; wall_height (N,) their height above the
     floor in metres (None: no height filter); traj_bev (T, 2) the cleaned
     one-lap trajectory (see clean_trajectory); closed: it is a full lap.
+    Per bin (bin_size of arc length) and side, the wall is placed at the
+    nearest dense layer of the bin's points (_wall_offset); bins with fewer than
+    min_bin_points points (fewer for sparse maps) get the offset interpolated
+    along the lap, then the offset is smoothed over smooth_window bins.
     """
     from scipy.spatial import KDTree
 
@@ -212,16 +272,50 @@ def extract_track_boundaries(
     cross = tangent[idx, 0] * v[:, 1] - tangent[idx, 1] * v[:, 0]
     bins = np.floor(s[idx] / bin_size).astype(np.int64)
 
-    def _side(mask: np.ndarray) -> np.ndarray:
+    normal = np.column_stack([-tangent[:, 1], tangent[:, 0]])   # left of travel
+
+    n_bins = int(np.floor(s[-1] / bin_size)) + 1
+    centre_idx = np.minimum(np.round((np.arange(n_bins) + 0.5) * bin_size / ds).astype(int), len(path) - 1)
+
+    # Sparse maps (a voxel-filtered LiDAR map has ~1 point per bin) can't afford
+    # the minimum, so it scales with the map's typical count per bin (both
+    # walls together: one sparsely seen wall must not lower its own bar).
+    counts = np.unique(bins * 2 + (cross > 0), return_counts=True)[1]
+    need = int(np.clip(0.25 * np.median(counts), 1, min_bin_points)) if len(counts) else 1
+
+    def _side(mask: np.ndarray, sign: float) -> np.ndarray:
+        # Per bin, the wall is the nearest dense layer of points (see
+        # _wall_offset). Bins with too few points get the offset interpolated
+        # along the lap, and the offset is smoothed, so the boundary follows the
+        # driven path's curvature through gaps instead of cutting corners.
         if not np.any(mask):
             return np.empty((0, 2), np.float32)
-        p, d, b = pts[mask], dist[mask], bins[mask]
-        order = np.lexsort((d, b))                   # by bin, nearest first
-        first = np.unique(b[order], return_index=True)[1]
-        line = p[order[first]]                       # nearest per bin, in arc order
-        return _smooth(line, smooth_window, closed).astype(np.float32)
+        have, offset = [], []
+        for b in np.unique(bins[mask]):
+            sel = mask & (bins == b)
+            if sel.sum() < need:
+                continue
+            off, layer_count = _wall_offset(np.abs(cross[sel]))
+            if layer_count >= need:            # a real layer, not a few strays
+                have.append(b)
+                offset.append(off)
+        if len(have) < 2:
+            return np.empty((0, 2), np.float32)
+        have, offset = np.array(have), np.array(offset)
+        all_bins = np.arange(n_bins)
+        if closed:
+            off = np.interp(all_bins, have, offset, period=n_bins)
+        else:
+            all_bins = np.arange(have[0], have[-1] + 1)
+            off = np.interp(all_bins, have, offset)
+        if smooth_window > 1 and len(off) >= smooth_window:
+            h = smooth_window // 2
+            padded = np.r_[off[-h:], off, off[:h]] if closed else np.r_[[off[0]] * h, off, [off[-1]] * h]
+            off = np.convolve(padded, np.ones(smooth_window) / smooth_window, mode="valid")[: len(all_bins)]
+        j = centre_idx[all_bins]
+        return (path[j] + sign * off[:, None] * normal[j]).astype(np.float32)
 
-    left, right = _side(cross > 0), _side(cross <= 0)
+    left, right = _side(cross > 0, 1.0), _side(cross <= 0, -1.0)
     if ccw:
         return right, left, ccw
     return left, right, ccw
@@ -262,7 +356,7 @@ class MappingWorker(BaseWorker):
     camera_height : float
         Height of the pose origin (camera / vehicle) above the floor, m (0.15).
     wall_height_band : [min, max]
-        Wall points kept between these heights above the floor, m ([0.03, 1.0]).
+        Wall points kept between these heights above the floor plane, m ([0.05, 1.0]).
     max_track_half_width : float
         Lateral gate: wall points further than this from the trajectory are
         dropped, m (1.5).
@@ -314,7 +408,7 @@ class MappingWorker(BaseWorker):
         self._vert_axis = 3 - sum(self._bev_axes)
         self._up_sign = int(c.get("up_sign", -1 if self._vert_axis == 1 else 1))
         self._camera_height = float(c.get("camera_height", 0.15))
-        self._height_band = tuple(c.get("wall_height_band", [0.03, 1.0]))
+        self._height_band = tuple(c.get("wall_height_band", [0.05, 1.0]))
         self._half_width = float(c.get("max_track_half_width", 1.5))
         self._bin_size = float(c.get("boundary_bin_size", 0.10))
         self._smooth_window = int(c.get("boundary_smooth_window", 5))
@@ -418,8 +512,14 @@ class MappingWorker(BaseWorker):
 
         wall_height = None
         if self._wall_vertical is not None and len(self._wall_vertical) == len(all_wall):
-            cam_v = float(np.median(traj[:, 2]))
-            wall_height = self._up_sign * (self._wall_vertical - cam_v) + self._camera_height
+            # heights above the floor plane fitted to the map; if no floor is
+            # found, above camera_height below the driven path
+            up = self._up_sign * self._wall_vertical
+            cam_up = self._up_sign * float(np.median(traj[:, 2]))
+            wall_height = floor_heights(np.column_stack([all_wall, up]), cam_up - self._camera_height)
+            if wall_height is None:
+                self.logger.warning("No floor plane in the map — heights from camera_height instead")
+                wall_height = up - cam_up + self._camera_height
 
         self.logger.info(
             f"Extracting boundaries: {len(all_wall)} wall pts, {len(traj)} trajectory "

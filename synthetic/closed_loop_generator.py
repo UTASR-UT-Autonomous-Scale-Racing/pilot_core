@@ -400,6 +400,33 @@ class ClosedLoopFrameGenerator:
 
         return rgb, depth
 
+    def pose_at(self, i: int) -> np.ndarray:
+        """Ground-truth camera-to-world pose (4x4 float32) of frame i."""
+        theta = 2.0 * math.pi * (i % self.n_frames) / self.n_frames
+        x, z, heading = self._ellipse_path(theta)
+        c_h, s_h = math.cos(heading), math.sin(heading)
+        cp, sp = math.cos(self.pitch), math.sin(self.pitch)
+        # R_wc = R_yaw @ R_pitch, same as _render_frame_fast
+        R_pitch = np.array([[1, 0, 0], [0, cp, sp], [0, -sp, cp]], dtype=np.float32)
+        R_yaw = np.array([[s_h, 0, c_h], [0, 1, 0], [-c_h, 0, s_h]], dtype=np.float32)
+        pose = np.eye(4, dtype=np.float32)
+        pose[:3, :3] = R_yaw @ R_pitch
+        pose[0, 3], pose[1, 3], pose[2, 3] = x, -self.cam_h, z
+        return pose
+
+    def render(self, i: int) -> Tuple[np.ndarray, np.ndarray]:
+        """(rgb, depth) of frame i; frames repeat every n_frames (one lap)."""
+        theta = 2.0 * math.pi * (i % self.n_frames) / self.n_frames
+        return self._render_frame_fast(*self._ellipse_path(theta))
+
+    def walls_xz(self, n: int = 400) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Ground truth in the world XZ plane: (outer wall, inner wall, driven
+        path), each (n, 2)."""
+        t = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+        ellipse = lambda a, b: np.column_stack([a * np.cos(t), b * np.sin(t)])
+        return (ellipse(self._outer_a, self._outer_b), ellipse(self._inner_a, self._inner_b),
+                ellipse(self.semi_major, self.semi_minor))
+
     def generate_all(
         self,
         n_loops: int = 1,
@@ -426,31 +453,8 @@ class ClosedLoopFrameGenerator:
             theta = 2.0 * math.pi * (i % self.n_frames) / self.n_frames
             x, z, heading = self._ellipse_path(theta)
             timestamp = i * dt
-
-            c_h = math.cos(heading)
-            s_h = math.sin(heading)
-            cp = math.cos(self.pitch)
-            sp = math.sin(self.pitch)
-
-            # same R_wc as _render_frame_fast
-            R_pitch = np.array([
-                [1,  0,   0 ],
-                [0,  cp,  sp],
-                [0, -sp,  cp],
-            ], dtype=np.float32)
-            R_yaw = np.array([
-                [ s_h, 0, c_h],
-                [ 0,   1, 0  ],
-                [-c_h, 0, s_h],
-            ], dtype=np.float32)
-            R_wc = R_yaw @ R_pitch
-
-            pose = np.eye(4, dtype=np.float32)
-            pose[:3, :3] = R_wc
-            pose[0, 3] = x
-            pose[1, 3] = -self.cam_h
-            pose[2, 3] = z
-
+            pose = self.pose_at(i)
+            R_wc = pose[:3, :3]
             rgb, depth = self._render_frame_fast(x, z, heading)
 
             # imu

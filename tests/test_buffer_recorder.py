@@ -688,7 +688,7 @@ class TestEdgeCases:
 class TestStartPyRecorderConfig:
     """recording_config in the shipped configs only uses keys start.py knows."""
 
-    BUFFERS = {"frame", "imu", "segmentation", "pose", "control", "pointcloud", "boundary", "state", "lidar"}
+    BUFFERS = {"frame", "imu", "segmentation", "pose", "control", "pointcloud", "keyframes", "boundary", "state", "lidar"}
     GLOBAL_KEYS = {"sample_k", "top_n", "on_full", "keep_files", "flush_interval"}
     PER_BUFFER_KEYS = {"sample_k", "top_n", "on_full", "keep_files"}
 

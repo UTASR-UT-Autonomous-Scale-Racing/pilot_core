@@ -88,6 +88,10 @@ def parse_args() -> argparse.Namespace:
         help="Enable SLAM + mapping (needed by the track-following modes)",
     )
     parser.add_argument(
+        "--control-mode",
+        help="override control_mode from the config (e.g. pure_pursuit, depth_ftg)",
+    )
+    parser.add_argument(
         "--oakd-imu",
         action="store_true",
         help="Use OAK-D on-board IMU instead of I2C Arduino IMU",
@@ -400,6 +404,8 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 synthetic=use_synthetic,
                 imu_buffer=imu_buf if oakd_imu_via_camera else None,
                 settings_path=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
+                synthetic_scene=config.get("synthetic_scene", "corridor"),
+                synthetic_track=config.get("synthetic_track", {}),
                 **{k: v for k, v in config.get("camera", {}).items()
                    if k in ("max_exposure_us", "extended_disparity", "frame_timeout_s")},
             )
@@ -582,7 +588,8 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         rec_dir = os.path.join(config.get("recording_path", "/tmp/pilot_recordings"), time.strftime("%Y%m%d_%H%M%S"))
         candidates = {
             "frame": frame_buf, "imu": imu_buf, "segmentation": seg_buf if vision_cfg.get("enabled", False) else None,
-            "pose": pose_buf, "control": ctrl_buf, "pointcloud": pc_buf, "boundary": boundary_buf,
+            "pose": pose_buf, "control": ctrl_buf, "pointcloud": pc_buf, "keyframes": kf_buf,
+            "boundary": boundary_buf,
             "state": state_buf, "lidar": lidar_buf,
         }
         per_buffer_keys = ("sample_k", "top_n", "on_full", "keep_files")
@@ -654,6 +661,8 @@ def main() -> None:
         config["enable_slam"] = True
     if args.oakd_imu:
         config["use_oakd_imu"] = True
+    if args.control_mode:
+        config["control_mode"] = args.control_mode
 
     global _workers, _buffers, _armed_event
     pipeline = build_pipeline(config)

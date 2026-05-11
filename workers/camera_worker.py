@@ -89,7 +89,10 @@ class CameraWorker(BaseWorker):
     (ORB-SLAM3 settings to check against the live calibration, default
     orbslam_oakd_rgbd.yaml), extended_disparity (default True; closer
     minimum depth, disables sub-pixel), frame_timeout_s (1.0),
-    max_step_errors (5), max_reopen_attempts (3).
+    max_step_errors (5), max_reopen_attempts (3), startup_timeout_s (5.0).
+    Synthetic only: synthetic_scene ("corridor", a flat-shaded stand-in, or
+    "track", the ray-cast closed track from synthetic.closed_loop_generator)
+    and synthetic_track (ClosedLoopFrameGenerator overrides).
     """
 
     def __init__(self, name: str = "camera", **kwargs: Any) -> None:
@@ -100,6 +103,8 @@ class CameraWorker(BaseWorker):
         self._frame_count: int = 0
         self._synthetic = False
         self._synth_gen = None
+        self._synth_scene = "corridor"
+        self._next_frame_t = 0.0
         self._imu_buf = None
         self._imu_q = None
         self._has_rotation_vector = False
@@ -385,20 +390,35 @@ class CameraWorker(BaseWorker):
     # synthetic mode (no hardware)
 
     def _setup_synthetic(self) -> None:
-        from synthetic import SyntheticFrameGenerator
-
         fps = self.config.get("fps", 30)
         width, height = self.config.get("resolution", [640, 400])
         self._frame_buf = self.config["output_buffer"]
         self._synthetic = True
-        self._synth_gen = SyntheticFrameGenerator(width=width, height=height)
+        self._synth_scene = self.config.get("synthetic_scene", "corridor")
+        if self._synth_scene == "track":
+            # ray-cast closed elliptical track (synthetic.closed_loop_generator):
+            # true projection, so SLAM, mapping and the depth modes all work on it
+            from synthetic.closed_loop_generator import ClosedLoopFrameGenerator
+
+            self._synth_gen = ClosedLoopFrameGenerator(
+                width=width, height=height, **self.config.get("synthetic_track", {}))
+        elif self._synth_scene == "corridor":
+            from synthetic import SyntheticFrameGenerator
+
+            self._synth_gen = SyntheticFrameGenerator(width=width, height=height)
+        else:
+            raise ValueError(f"Unknown synthetic_scene {self._synth_scene!r}; options: corridor, track")
         self._target_dt = 1.0 / fps
+        self._next_frame_t = time.monotonic()
         self.logger.info(
-            f"Synthetic camera ready @ {fps} FPS, {width}×{height}"
+            f"Synthetic camera ready ({self._synth_scene}) @ up to {fps} FPS, {width}×{height}"
         )
 
     def _step_synthetic(self) -> None:
-        rgb, depth = self._synth_gen.next_fast()
+        if self._synth_scene == "track":
+            rgb, depth = self._synth_gen.render(self._frame_count)
+        else:
+            rgb, depth = self._synth_gen.next_fast()
         self._frame_buf.write(rgb, depth)
         self._frame_count += 1
         if self._frame_count % 100 == 1:
@@ -406,7 +426,9 @@ class CameraWorker(BaseWorker):
                 f"synth frame #{self._frame_count}  rgb={rgb.shape}  "
                 f"depth range=[{depth.min():.2f}, {depth.max():.2f}]m"
             )
-        time.sleep(self._target_dt)
+        # hold the frame rate; rendering the track can be slower than that
+        self._next_frame_t = max(self._next_frame_t + self._target_dt, time.monotonic())
+        time.sleep(max(self._next_frame_t - time.monotonic(), 0.0))
 
     def teardown(self) -> None:
         if self._synthetic:

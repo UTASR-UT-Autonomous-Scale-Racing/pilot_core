@@ -2,13 +2,26 @@
 # actuator. This is what the dev-local container runs
 # (Dockerfile.dev-local, .devcontainer/dev-local).
 #
-#   python start.py --config config_dev_local.yaml
+#   python start.py --config config_dev_local.yaml                  # map-free depth_ftg
+#   python start.py --config config_dev_local.yaml --enable-slam \
+#       --control-mode pure_pursuit --recording                      # full mapping pipeline
+#
+# The synthetic camera drives a scripted lap of a closed track (the stand-in
+# for the hand-driven mapping lap); press l after a lap to extract the map.
 
 fps: 10                       # Hz
 resolution: [640, 400]
 
 # sensors
 synthetic: true               # instead of the OAK-D
+synthetic_scene: track        # track: ray-cast closed track | corridor: flat-shaded stand-in
+synthetic_track:              # synthetic.closed_loop_generator.ClosedLoopFrameGenerator
+  n_frames: 200               # frames per lap
+  straight_len: 4.0           # m
+  turn_radius: 2.0            # m
+  wall_distance: 0.8          # m, driven line to each wall
+  camera_height: 0.15         # m
+  camera_pitch_deg: 12.0
 use_oakd_imu: false
 i2c_address: null             # dummy actuator/IMU
 i2c_bus: null
@@ -20,6 +33,10 @@ vision:
   onnx_model: track_seg.onnx    # model: onnx — network from scripts/train_vision.py (+ .json sidecar)
 
 control_mode: "depth_ftg"     # map-free, works off the synthetic depth
+
+depth_ftg:                    # the synthetic camera's mounting
+  camera_height: 0.15           # m (mapping uses it too)
+  camera_pitch: 0.2094          # rad, 12 deg down
 
 # slam
 enable_slam: false              # or --enable-slam
@@ -39,7 +56,7 @@ buffers:
   frame:
     slots: 4
   imu:
-    slots: 8
+    slots: 32
   segmentation:
     slots: 4
   pose:

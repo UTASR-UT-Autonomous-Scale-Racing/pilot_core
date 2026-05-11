@@ -1,3 +1,23 @@
+# Simulators
+
+There are two:
+
+- **Dev simulator** (built in, no install): `config_dev_local.yaml`. A synthetic camera
+  ray-casts a closed elliptical track and drives a scripted lap, which is enough for
+  SLAM, mapping, vision and control to run end to end. The camera path does not react
+  to the commands (open loop). The README's
+  [dev-simulator run](../README.md#a-full-run-in-the-dev-simulator) shows the results.
+  The track is set in `synthetic_track` (`synthetic/closed_loop_generator.py`).
+  `synthetic_scene: corridor` switches to the old flat-shaded corridor, which is fast
+  but not a true projection.
+- **AutoDRIVE** (closed loop, below).
+
+```bash
+python start.py --config config_dev_local.yaml --enable-slam --control-mode pure_pursuit --recording
+# after one lap ORB-SLAM3 closes the loop (or press l); then a to arm, q to quit
+python scripts/render_recording.py /tmp/pilot_recordings/<run> --truth config_dev_local.yaml
+```
+
 # AutoDRIVE simulator
 
 pilot_core can drive the Unity-based AutoDRIVE simulator through an

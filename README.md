@@ -20,7 +20,7 @@ python start.py --config config_cpu.yaml           # camera + map-free control, 
 ```
 
 No camera? `python start.py --config config_dev_local.yaml` runs the same pipeline
-on synthetic data.
+on a simulated track ([a full run in the dev simulator](#a-full-run-in-the-dev-simulator)).
 
 While it runs, the terminal takes single-key commands:
 
@@ -68,6 +68,67 @@ Controllers work in signed units (steering +1 = left, throttle +1 = forward) and
 `ControlWorker` converts them to `ctrl_buf`. `ActuatorWorker` turns `ctrl_buf`
 into servo/ESC pulse widths (config section `pwm`).
 
+## A full run in the dev simulator
+
+Everything below comes from one run of the real pipeline, with no hardware, on the
+4-core CPU workstation:
+
+```bash
+python start.py --config config_dev_local.yaml --enable-slam --control-mode pure_pursuit --recording
+python scripts/render_recording.py /tmp/pilot_recordings/<run> --out docs/images --truth config_dev_local.yaml
+```
+
+The synthetic camera (`synthetic_scene: track`) ray-casts a closed track of textured
+walls and floor, with the camera 0.15 m up and pitched 12° down, and drives a scripted
+lap. That lap stands in for the hand-driven mapping lap. The frames go through the same
+workers as on the car: ORB-SLAM3, the state estimator, mapping, vision, control, the
+safety supervisor and the (dummy) actuator. `render_recording.py` builds every figure
+from the recording alone; with `--truth` it also compares against the simulator's
+ground truth.
+
+> The scripted camera does not respond to the commands, so the run is open loop.
+> Closed-loop driving is shown on the right of the track figure, where the bicycle-model
+> simulator from `control/sim.py` drives the **mapped** track and is scored against the
+> **true** walls.
+
+**What the car sees:** RGB and aligned depth, the drivable-track mask from
+`vision.model: ground_plane`, and the virtual laser scan `depth_ftg` builds from the
+depth image, with the gap it steers for.
+
+![What the car sees](docs/images/car_view.png)
+
+**Track mapping.** ORB-SLAM3 closed the loop by itself after one lap. `SLAMWorker`
+signals the loop only once the global bundle adjustment has finished, so mapping uses
+the optimised map. `MappingWorker` then takes the loop-corrected keyframe trajectory,
+keeps map points above the floor plane and near the driven line, and places each wall
+at the nearest dense layer of points along the lap. Dashed lines are the true walls.
+
+![Track mapping](docs/images/map.png)
+
+**The mapped track as the controllers use it.** The mapped track becomes a
+`TrackModel` with a centre line and a speed profile (left). On the right, a simulated
+car drives it with `pure_pursuit`.
+
+![Mapped track and a simulated drive on it](docs/images/track.png)
+
+**Commands over the run.** No command is sent until the map exists. Once mapping
+completes, SLAM switches to localization and `pure_pursuit` steers through each bend of
+the lap.
+
+![Commands and state over the run](docs/images/timeline.png)
+
+Measured against the simulator's ground truth, for this run and a repeat run:
+
+| | Run shown | Repeat run |
+| --- | --- | --- |
+| Floor fit (camera pitch, height; true 12°, 0.15 m) | 12.0°, 0.150 m | 12.0°, 0.150 m |
+| SLAM trajectory error (RMS) | 1.0 cm (677 poses) | 1.4 cm (647 poses) |
+| Extracted boundaries vs true walls (median / 95th pct / max) | 1.2 / 3.5 / 5.9 cm | 1.2 / 4.4 / 14.6 cm |
+| Simulated drive on the mapped track | 3 laps, cross-track RMS 4.8 cm, inside the true walls 100 % | 3 laps, 4.9 cm, 100 % |
+| Frame rate, SLAM + vision + mapping + control on 4 CPU cores | 6.0 FPS | 6.0 FPS |
+
+The frame rate is set by the synthetic renderer (about 150 ms per frame), not the pipeline.
+
 ## Control
 
 After a hand-driven mapping lap (`--enable-slam`, then `l`), the track controllers
@@ -102,13 +163,62 @@ default). The segmenter is set by `vision.model`: the training-free `ground_plan
 `scripts/train_vision.py` (`onnx`: Fast-SCNN, LR-ASPP, DeepLabV3, U-Net).
 See [docs/vision.md](docs/vision.md).
 
-## Recording and datasets
+## Recording, streaming and sampling
 
-`--recording` records every active buffer to a timestamped folder under
-`recording_path`. `scripts/read_recording.py` summarises a recording, and
-`scripts/recording_to_dataset.py` turns it into a behaviour-cloning `.npz` or an
-`images/` + `masks/` segmentation dataset
-([docs/control.md](docs/control.md#behaviour-cloning-bc-and-vae-vae), [docs/vision.md](docs/vision.md)).
+**Recording.** `--recording` (or `recording: true`) starts one recorder process that
+streams every active buffer to disk while the car runs. It writes one file series per
+buffer into a timestamped folder under `recording_path`. The recorder reads *every*
+sample still in each ring buffer, not only the newest, so fast producers are not
+undersampled; any sample overwritten before it could be read is counted and reported.
+The dev run above recorded:
+
+| Buffer | Records | Rate | Size | Contents |
+| ------ | ------- | ---- | ---- | -------- |
+| `frame` | 731 | 6.0 Hz | 1310 MB | RGB + depth |
+| `segmentation` | 730 | 6.0 Hz | 187 MB | drivable-track mask (uint8) |
+| `pose` | 677 | 6.0 Hz | < 0.1 MB | SLAM pose, stamped with the frame's capture time |
+| `state` | 5310 | 47 Hz | 0.1 MB | EKF state `x, y, yaw, v, yaw_rate` |
+| `control` | 3594 | 47 Hz | < 0.1 MB | steering / throttle commands |
+| `imu` | 22732 | 185 Hz | 0.8 MB | IMU |
+| `pointcloud` | 26 | 0.2 Hz | 4.0 MB | SLAM map points (every 30 frames, and once the loop closure is optimised) |
+| `keyframes` | 26 | 0.2 Hz | < 0.1 MB | loop-corrected keyframe trajectory |
+| `boundary` | 1 | once | < 0.1 MB | extracted track boundaries |
+
+No sample was dropped in any buffer.
+
+Every buffer is stamped on the same monotonic clock, so records from different
+buffers can be matched by time. That's how the figures pair each frame with its
+command, and each pose with its ground truth.
+
+**Sampling.** Frames dominate the disk use (a 640×400 RGB-D frame is 1.8 MB: about 11 MB/s at
+6 FPS, 55 MB/s at 30 FPS), so they are sampled at several levels:
+
+| Where | Setting | Effect |
+| ----- | ------- | ------ |
+| Recording | `recording_config.<buffer>.sample_k` | keep every k-th sample (`config.yaml` keeps every 2nd frame) |
+| Recording | `top_n`, `on_full: rotate`, `keep_files` | start a new file after `top_n` records and keep the newest `keep_files`, which bounds disk use on long runs; `on_full: stop` stops instead |
+| Rendering | `render_recording.py --stride N` | the frame sheet shows every N-th recorded frame |
+| Datasets | `recording_to_dataset.py --stride N` | export every N-th frame |
+| SLAM map | every 30 frames, and once a loop closure is optimised | map points are republished occasionally, not per frame |
+
+![Recorded frames, sampled](docs/images/frames.png)
+
+**Live streaming.** In the simulator, `zmq_publish` streams telemetry (pose, boundaries,
+map points, segmentation) on port 5557 while the car drives, and the actuator streams
+its commands on 5556 ([docs/simulator.md](docs/simulator.md)).
+
+**Reading and using recordings:**
+
+```bash
+python scripts/read_recording.py /tmp/pilot_recordings/<run>                  # per-buffer summary
+python scripts/render_recording.py /tmp/pilot_recordings/<run> --out figs/    # the figures above
+python scripts/recording_to_dataset.py /tmp/pilot_recordings/<run> --bc demos.npz --label-source imu
+python scripts/recording_to_dataset.py /tmp/pilot_recordings/<run> --vision datasets/track --bootstrap-masks
+```
+
+`recording_to_dataset.py` builds a behaviour-cloning `.npz` or an `images/` + `masks/`
+segmentation dataset ([docs/control.md](docs/control.md#behaviour-cloning-bc-and-vae-vae),
+[docs/vision.md](docs/vision.md)).
 
 ## Configuration
 
@@ -116,12 +226,12 @@ See [docs/vision.md](docs/vision.md).
 | ---- | --- |
 | `config.yaml` | On the car (Jetson): I2C actuator, SLAM, `pure_pursuit` |
 | `config_cpu.yaml` | Workstation: real OAK-D, CPU, **actuator output disabled** |
-| `config_dev_local.yaml` | No hardware: synthetic camera and IMU |
+| `config_dev_local.yaml` | No hardware: synthetic camera (ray-cast closed track) and IMU |
 | `config_zmq.yaml` | AutoDRIVE simulator ([docs/simulator.md](docs/simulator.md)) |
 | `vehicle_params.yaml` | Vehicle geometry and limits (F1TENTH placeholders until measured) |
 
 `--config` is required. Command-line flags override the config: `--enable-slam`,
-`--recording`, `--oakd-imu`, `--debug`.
+`--recording`, `--control-mode`, `--oakd-imu`, `--debug`.
 
 > **Safety:** only `config.yaml` enables I2C. On a laptop or desktop, `/dev/i2c-*`
 > are motherboard buses, not the car's Arduino, so never point the actuator at them.
@@ -176,6 +286,7 @@ submodules            ORB_SLAM3, firmware (Arduino)
 | `scripts/train_vision.py` | Train a drivable-track segmentation network |
 | `scripts/vision_bench.py` | Size and latency of the segmentation candidates |
 | `scripts/read_recording.py` | Summarise / iterate a recording |
+| `scripts/render_recording.py` | Figures from a recording: car view, map, track, frames, timeline |
 | `scripts/recording_to_dataset.py` | Recording → BC `.npz` or vision `images/` + `masks/` |
 | `scripts/collect_frames.py` | Save simulator camera frames |
 | `scripts/setup.sh [--with-slam]` | Initialise the submodules (ORB_SLAM3 only with `--with-slam`) |

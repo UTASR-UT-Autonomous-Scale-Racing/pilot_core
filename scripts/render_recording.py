@@ -343,7 +343,8 @@ def main() -> int:
     ap.add_argument("--truth", help="config with a synthetic_track section (synthetic runs only)")
     ap.add_argument("--settings", default=os.path.join(REPO_ROOT, "synthetic_slam_settings.yaml"),
                     help="ORB-SLAM3 settings with the camera intrinsics (for the depth_ftg scan)")
-    ap.add_argument("--stride", type=int, default=40, help="frame sampling for frames.png (default 40)")
+    ap.add_argument("--stride", type=int,
+                    help="frame sampling for frames.png (default: 8 frames spread over the run)")
     ap.add_argument("--frame", type=int, help="index of the frame for car_view.png (default: middle)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -357,7 +358,7 @@ def main() -> int:
     t0 = min(b[0].produced_ts for b in (frames, segs, poses, clouds, boundaries, controls, states) if b)
     if frames:
         car_view(frames, segs, args.settings, args.out, args.frame)
-        frames_sheet(frames, controls, args.out, args.stride, t0)
+        frames_sheet(frames, controls, args.out, args.stride or max(1, len(frames) // 8), t0)
     if poses or clouds:
         map_figure(poses, clouds, boundaries, truth, args.out)
     result = track_figure(boundaries, truth, args.out) if boundaries else None

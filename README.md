@@ -197,7 +197,7 @@ command, and each pose with its ground truth.
 | ----- | ------- | ------ |
 | Recording | `recording_config.<buffer>.sample_k` | keep every k-th sample (`config.yaml` keeps every 2nd frame) |
 | Recording | `top_n`, `on_full: rotate`, `keep_files` | start a new file after `top_n` records and keep the newest `keep_files`, which bounds disk use on long runs; `on_full: stop` stops instead |
-| Rendering | `render_recording.py --stride N` | the frame sheet shows every N-th recorded frame |
+| Rendering | `render_recording.py --stride N` | the frame sheet shows every N-th recorded frame (default: 8 spread over the run) |
 | Datasets | `recording_to_dataset.py --stride N` | export every N-th frame |
 | SLAM map | every 30 frames, and once a loop closure is optimised | map points are republished occasionally, not per frame |
 

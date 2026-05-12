@@ -119,6 +119,9 @@ class DepthPolicyFollower:
     def __init__(self, onnx_path: str, cfg: DepthPolicyConfig | None = None) -> None:
         import onnxruntime as ort
 
+        from control.types import resolve_path
+
+        onnx_path = resolve_path(onnx_path)
         with open(os.path.splitext(onnx_path)[0] + ".json") as f:
             self.meta = json.load(f)
         self.max_range = float(self.meta["max_range"])

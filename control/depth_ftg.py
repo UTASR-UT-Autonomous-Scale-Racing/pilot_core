@@ -47,8 +47,10 @@ class Intrinsics:
     @classmethod
     def from_orbslam_settings(cls, path: str) -> "Intrinsics":
         """Pull Camera1.fx/fy/cx/cy out of an ORB-SLAM3 settings yaml."""
+        from .types import resolve_path
+
         vals = {}
-        with open(path) as f:
+        with open(resolve_path(path)) as f:
             for line in f:
                 for key in ("fx", "fy", "cx", "cy"):
                     if line.strip().startswith(f"Camera1.{key}:") or line.strip().startswith(f"Camera.{key}:"):

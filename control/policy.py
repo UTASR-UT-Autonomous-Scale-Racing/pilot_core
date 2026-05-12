@@ -66,6 +66,9 @@ class PolicyFollower:
     def __init__(self, onnx_path: str, outer: np.ndarray, inner: np.ndarray) -> None:
         import onnxruntime as ort
 
+        from .types import resolve_path
+
+        onnx_path = resolve_path(onnx_path)
         self.meta = PolicyMeta.load(onnx_path)
         opts = ort.SessionOptions()
         # tiny network, no point competing with the other workers for cores

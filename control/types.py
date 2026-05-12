@@ -19,6 +19,15 @@ import yaml
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def resolve_path(path: str) -> str:
+    """A config / model / settings path as given if it exists (absolute, or
+    relative to the working directory), otherwise relative to the repo root,
+    where the shipped files live. Lets everything run from any directory."""
+    if os.path.isabs(path) or os.path.exists(path):
+        return path
+    return os.path.join(_REPO_ROOT, path)
+
+
 @dataclass(frozen=True)
 class VehicleParams:
     """Physical params, loaded from vehicle_params.yaml."""
@@ -35,9 +44,7 @@ class VehicleParams:
     @classmethod
     def load(cls, path: str = "vehicle_params.yaml") -> "VehicleParams":
         # unknown keys are ignored, missing ones fall back to defaults
-        if not os.path.isabs(path):
-            path = os.path.join(_REPO_ROOT, path)
-        with open(path) as f:
+        with open(resolve_path(path)) as f:
             raw = yaml.safe_load(f) or {}
         known = {f.name for f in fields(cls)}
         return cls(**{k: float(v) for k, v in raw.items() if k in known})

@@ -14,6 +14,7 @@ Figures (PNG):
   track.png        the mapped track as the controllers see it (centre line, speed
                    profile) and a simulated pure-pursuit drive on it
   timeline.png     commands and speed estimate over the run
+  demo.gif         (--gif) the camera next to the map filling in, over the run
 
 --truth <config> (synthetic runs only) reads the synthetic_track section of a
 config, aligns the ground truth to the SLAM frame (each pose is matched to its
@@ -336,6 +337,66 @@ def timeline(controls, states, boundaries, out_dir, t0):
     _save(fig, out_dir, "timeline.png")
 
 
+def demo_gif(frames, poses, clouds, boundaries, controls, out_dir, t0, n=60, fps=6):
+    """Animated side-by-side: the camera frame and the bird's-eye map filling in
+    as the car drives (map points, trajectory so far, boundaries once extracted)."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from PIL import Image
+
+    from workers.control_worker import unit_to_signed
+
+    pose_ts = np.array([r.produced_ts for r in poses])
+    traj = np.array([r.value[0][[0, 2], 3] for r in poses])
+    fwd = np.array([r.value[0][[0, 2], 2] for r in poses])
+    cloud_ts = np.array([r.produced_ts for r in clouds]) if clouds else np.array([])
+    bnd_t = boundaries[-1].produced_ts if boundaries else np.inf
+    ctrl_ts = np.array([r.produced_ts for r in controls]) if controls else np.array([])
+    lo = np.min(traj, axis=0) - 1.5
+    hi = np.max(traj, axis=0) + 1.5
+
+    images = []
+    for rec in frames[:: max(1, len(frames) // n)]:
+        t = rec.produced_ts
+        fig = plt.figure(figsize=(8.4, 3.3), dpi=80)
+        FigureCanvasAgg(fig)
+        a1 = fig.add_axes([0.0, 0.0, 0.58, 0.86])
+        a1.imshow(rec.value[0])
+        a1.axis("off")
+        a2 = fig.add_axes([0.63, 0.08, 0.35, 0.8])
+        a2.set_xlim(lo[0], hi[0])
+        a2.set_ylim(lo[1], hi[1])
+        a2.set_aspect("equal")
+        a2.tick_params(labelsize=6)
+        k = np.searchsorted(cloud_ts, t) - 1
+        if k >= 0:
+            pts = _bev(clouds[k].value)[::4]
+            a2.scatter(pts[:, 0], pts[:, 1], s=0.5, color=MUTED, lw=0)
+        i = np.searchsorted(pose_ts, t)
+        if i > 0:
+            a2.plot(traj[:i, 0], traj[:i, 1], color=AQUA, lw=1.5)
+            a2.annotate("", xy=traj[i - 1] + 0.8 * fwd[i - 1] / max(np.linalg.norm(fwd[i - 1]), 1e-6),
+                        xytext=traj[i - 1], arrowprops=dict(arrowstyle="-|>", color=INK, lw=1.5))
+        if t >= bnd_t:
+            for line, color in zip(boundaries[-1].value, (BLUE, ORANGE)):
+                c = np.vstack([line, line[:1]])
+                a2.plot(c[:, 0], c[:, 1], color=color, lw=1.5)
+        phase = "driving on the mapped track" if t >= bnd_t else "mapping lap"
+        caption = f"t = {t - t0:5.1f} s   {phase}"
+        j = np.searchsorted(ctrl_ts, t) - 1
+        if j >= 0 and t - ctrl_ts[j] < 0.5:
+            st, th = unit_to_signed(*controls[j].value)
+            caption += f"   steer {st:+.2f}  throttle {th:+.2f}"
+        fig.text(0.01, 0.93, caption, fontsize=9, color=INK, fontweight="bold")
+        fig.canvas.draw()
+        images.append(Image.fromarray(np.asarray(fig.canvas.buffer_rgba())[..., :3]))
+        plt.close(fig)
+    path = os.path.join(out_dir, "demo.gif")
+    frames_p = [im.quantize(colors=128, method=Image.Quantize.MEDIANCUT) for im in images]
+    frames_p[0].save(path, save_all=True, append_images=frames_p[1:], duration=int(1000 / fps), loop=0,
+                     optimize=True)
+    print(f"wrote {path} ({len(images)} frames, {os.path.getsize(path) / 1e6:.1f} MB)")
+
+
 # ---------------------------------------------------------------- main
 
 def main() -> int:
@@ -348,6 +409,7 @@ def main() -> int:
     ap.add_argument("--stride", type=int,
                     help="frame sampling for frames.png (default: 8 frames spread over the run)")
     ap.add_argument("--frame", type=int, help="index of the frame for car_view.png (default: middle)")
+    ap.add_argument("--gif", action="store_true", help="also write demo.gif (camera + map, animated)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -366,6 +428,8 @@ def main() -> int:
     result = track_figure(boundaries, truth, args.out) if boundaries else None
     if controls or states:
         timeline(controls, states, boundaries, args.out, t0)
+    if args.gif and frames and poses:
+        demo_gif(frames, poses, clouds, boundaries, controls, args.out, t0)
 
     print("\n| buffer | records | rate (Hz) | size (MB) |\n| ------ | ------- | --------- | --------- |")
     for name, s in sorted(summarize(args.recording).items()):

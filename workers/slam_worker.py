@@ -90,6 +90,9 @@ def read_settings_intrinsics(path: str) -> Optional[SimpleNamespace]:
     """fx, fy, cx, cy (and width, height) from an ORB-SLAM3 settings YAML."""
     import cv2
 
+    from control.types import resolve_path
+
+    path = resolve_path(path)
     if not os.path.isfile(path):
         return None
     fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
@@ -229,6 +232,9 @@ class SLAMWorker(BaseWorker):
             self._slam = None
             return
 
+        from control.types import resolve_path
+
+        vocab_path, settings_path = resolve_path(vocab_path), resolve_path(settings_path)
         self._slam = _slam_mod.System(vocab_path, settings_path, _slam_mod.RGBD)
         self.logger.info(
             f"ORB_SLAM3 initialised (vocab={vocab_path}, settings={settings_path})"

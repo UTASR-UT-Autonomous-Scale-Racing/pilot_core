@@ -85,7 +85,9 @@ def load_pwm_config(config_path: Optional[str]) -> PWMConfig:
         return PWMConfig()
     import yaml
 
-    with open(config_path) as f:
+    from control.types import resolve_path
+
+    with open(resolve_path(config_path)) as f:
         cfg = yaml.safe_load(f) or {}
     pwm = cfg.get("pwm", {}) or {}
     fields = PWMConfig.__dataclass_fields__
@@ -182,8 +184,10 @@ def build_bc_dataset(
 # --vision
 
 def _settings_size(path: str) -> Optional[Tuple[int, int]]:
+    from control.types import resolve_path
+
     w = h = None
-    with open(path) as f:
+    with open(resolve_path(path)) as f:
         for line in f:
             s = line.strip()
             if s.startswith("Camera.width:"):

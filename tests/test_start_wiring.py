@@ -70,3 +70,16 @@ def test_removed_modes_are_rejected():
     for mode in ("pid", "ftg", "lidar_pid"):
         with pytest.raises(SystemExit):
             _build("config_dev_local.yaml", control_mode=mode)
+
+
+def test_shipped_files_resolve_from_any_directory(tmp_path, monkeypatch):
+    from control.depth_ftg import Intrinsics
+    from control.types import VehicleParams, resolve_path
+
+    monkeypatch.chdir(tmp_path)
+    assert os.path.isfile(resolve_path("orbslam_oakd_rgbd.yaml"))
+    Intrinsics.from_orbslam_settings("synthetic_slam_settings.yaml")
+    VehicleParams.load()
+    assert "control_mode" in start.load_config("config.yaml")
+    (tmp_path / "config.yaml").write_text("control_mode: local\n")      # a local file wins
+    assert start.load_config("config.yaml")["control_mode"] == "local"

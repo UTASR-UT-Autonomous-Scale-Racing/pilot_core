@@ -59,7 +59,9 @@ from workers import (
 from workers.control_worker import TRACK_MODES
 
 def load_config(path: str) -> Dict[str, Any]:
-    with open(path, "r") as f:
+    from control.types import resolve_path
+
+    with open(resolve_path(path), "r") as f:
         return yaml.safe_load(f) or {}
 
 
@@ -235,7 +237,9 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     logger = logging.getLogger("start")
     enable_slam = config.get("enable_slam", False)
     use_saved_map = config.get("use_saved_map", False)
-    saved_map_path = config.get("saved_map_path", "rl/boundaries")
+    from control.types import resolve_path
+
+    saved_map_path = resolve_path(config.get("saved_map_path", "rl/boundaries"))
     control_mode = config.get("control_mode", "pure_pursuit")
     use_zmq = config.get("use_zmq", False)
     use_zmq_pose = config.get("use_zmq_pose", False)

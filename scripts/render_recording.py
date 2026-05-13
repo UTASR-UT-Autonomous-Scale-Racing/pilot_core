@@ -86,7 +86,9 @@ class Truth:
         import yaml
         from synthetic.closed_loop_generator import ClosedLoopFrameGenerator
 
-        with open(config_path) as f:
+        from control.types import resolve_path
+
+        with open(resolve_path(config_path)) as f:
             cfg = yaml.safe_load(f)
         w, h = cfg.get("resolution", [640, 400])
         self.gen = ClosedLoopFrameGenerator(width=w, height=h, **cfg.get("synthetic_track", {}))

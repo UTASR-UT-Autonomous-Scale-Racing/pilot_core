@@ -43,6 +43,9 @@ except ImportError:
 def read_settings_camera(path: str) -> Optional[dict]:
     """Device id and intrinsics recorded in an ORB-SLAM3 settings file
     written by scripts/gen_orbslam_settings.py (None if unreadable)."""
+    from control.types import resolve_path
+
+    path = resolve_path(path) if path else path
     if not path or not os.path.isfile(path):
         return None
     fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)

@@ -1,0 +1,42 @@
+// pilot_core process / buffer diagram.
+// Render: dot -Tpng -Gdpi=110 docs/pipeline.dot -o docs/images/pipeline.png
+digraph pilot_core {
+    graph [rankdir=LR, bgcolor="#fcfcfb", fontname="Helvetica", nodesep=0.35, ranksep=0.55, pad=0.2];
+    node  [shape=box, style="rounded,filled", fillcolor="#ffffff", color="#b9b8b3",
+           fontname="Helvetica", fontsize=11, fontcolor="#0b0b0b", margin="0.15,0.07"];
+    edge  [color="#52514e", fontname="Helvetica", fontsize=9, fontcolor="#52514e", arrowsize=0.7];
+
+    subgraph cluster_hw_in {
+        label="sensors"; fontsize=10; fontcolor="#52514e"; color="#e6e5e1"; style=rounded;
+        oakd [label="OAK-D\nRGB · depth · IMU", shape=box, fillcolor="#e6e5e1"];
+        ardin [label="Arduino IMU\n(I2C)", fillcolor="#e6e5e1"];
+    }
+
+    cam   [label="CameraWorker"];
+    imu   [label="IMUWorker"];
+    slam  [label="SLAMWorker\nORB-SLAM3, level frame"];
+    state [label="StateWorker\npose EKF, 50 Hz"];
+    mapw  [label="MappingWorker\nboundaries after loop closure"];
+    vis   [label="VisionWorker\ndrivable-track mask"];
+    ctrl  [label="ControlWorker\ncontrol_mode"];
+    act   [label="ActuatorWorker\nsafety supervisor, 50 Hz", color="#2a78d6", penwidth=1.6];
+    rec   [label="recorder\n(--recording)", shape=cylinder, fillcolor="#fcfcfb"];
+    start [label="start.py\nsupervision · operator keys", shape=box, style="rounded,dashed", fillcolor="#fcfcfb"];
+    servo [label="Arduino\nservo + ESC\n(250 ms timeout, RC override)", fillcolor="#e6e5e1"];
+
+    oakd -> cam;
+    ardin -> imu;
+    cam  -> slam  [label="frame_buf"];
+    cam  -> vis   [label="frame_buf"];
+    cam  -> ctrl  [label="frame_buf (depth,\nmap-free modes)"];
+    slam -> state [label="pose_buf"];
+    slam -> mapw  [label="pc_buf · kf_buf"];
+    mapw -> ctrl  [label="boundary_buf"];
+    state -> ctrl [label="state_buf"];
+    state -> act  [label="state_buf (speed)"];
+    ctrl -> act   [label="ctrl_buf"];
+    act  -> servo [label="PWM over I2C\n(silent while disarmed)"];
+    vis  -> rec   [label="seg_buf", style=dashed];
+    imu  -> rec   [label="imu_buf", style=dashed];
+    start -> act  [label="arm / disarm", style=dashed, color="#2a78d6", fontcolor="#2a78d6"];
+}

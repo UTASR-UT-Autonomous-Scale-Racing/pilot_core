@@ -37,14 +37,28 @@ an RC stick always takes over from the Jetson (`firmware/README.md`).
 
 ## How it works
 
+```mermaid
+flowchart LR
+    oakd["OAK-D<br/>RGB · depth · IMU"] --> cam[CameraWorker]
+    ard["Arduino IMU<br/>(I2C)"] --> imu[IMUWorker]
+    cam -- frame_buf --> slam[SLAMWorker<br/>ORB-SLAM3]
+    cam -- frame_buf --> vis[VisionWorker]
+    cam -- "frame_buf (depth)" --> ctrl
+    slam -- pose_buf --> state[StateWorker<br/>EKF]
+    slam -- "pc_buf · kf_buf" --> map[MappingWorker]
+    map -- boundary_buf --> ctrl[ControlWorker]
+    state -- state_buf --> ctrl
+    state -- state_buf --> act
+    ctrl -- ctrl_buf --> act[ActuatorWorker<br/>safety supervisor]
+    act -- "PWM (I2C)" --> servo["Arduino<br/>servo + ESC"]
+    vis -- seg_buf --> rec[(recorder)]
+    imu -- imu_buf --> rec
+    keys["operator keys<br/>a · SPACE · l · q"] -.-> start[start.py] -.->|arm / disarm| act
 ```
- OAK-D ──▶ CameraWorker ──frame_buf──▶ VisionWorker ──seg_buf──▶ (recording / telemetry, optional)
-  RGB, depth,   │
-  IMU           ├──frame_buf──▶ SLAMWorker ──pose_buf──▶ StateWorker ──state_buf──┐
-                │                  │                                             ▼
-                │                  └──pc_buf──▶ MappingWorker ──boundary_buf──▶ ControlWorker ──ctrl_buf──▶ ActuatorWorker ──▶ Arduino (I2C)
-                └──frame_buf (depth) ─────────────────────────────────────────▶ (map-free modes)            safety supervisor
-```
+
+Every box is a separate process; every arrow is a shared-memory ring buffer. Details
+(rates, clocks, supervision, failure handling) are in [docs/architecture.md](docs/architecture.md).
+
 
 - `start.py` reads a config, creates the buffers, spawns the workers, restarts
   crashed workers (up to 3 times, disarming if the worker is on the command path),
@@ -70,12 +84,14 @@ into servo/ESC pulse widths (config section `pwm`).
 
 ## A full run in the dev simulator
 
+![Camera and map over the dev-simulator run](docs/images/demo.gif)
+
 Everything below comes from one run of the real pipeline, with no hardware, on the
 4-core CPU workstation:
 
 ```bash
 python start.py --config config_dev_local.yaml --enable-slam --control-mode pure_pursuit --recording
-python scripts/render_recording.py /tmp/pilot_recordings/<run> --out docs/images --truth config_dev_local.yaml
+python scripts/render_recording.py /tmp/pilot_recordings/<run> --out docs/images --truth config_dev_local.yaml --gif
 ```
 
 The synthetic camera (`synthetic_scene: track`) ray-casts a closed track of textured
@@ -149,6 +165,12 @@ Every command passes a **safety supervisor**. Outputs are neutral while disarmed
 (or a non-finite) command for 150 ms, throttle goes neutral and the car coasts to a stop.
 Speed is capped at 1.5 m/s, reverse throttle is capped, and steering and throttle changes
 are rate-limited. The Arduino adds its own 250 ms timeout on Jetson commands.
+
+The closed-loop bench (`python scripts/sim_bench.py --summary docs/images/controllers.png`)
+runs every controller through the same estimator and safety chain on a bicycle model.
+`depth_ftg` drives map-free at about 0.5 m/s; the track controllers run at 1.3 m/s:
+
+![Controller bench](docs/images/controllers.png)
 
 See [docs/control.md](docs/control.md) for the conventions, tuning, the
 closed-loop bench, training the learned models, and the checklist before driving
@@ -244,6 +266,10 @@ Hardware notes:
 
 ## Development
 
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) (setup, checks, conventions, adding a
+controller / worker) and [docs/architecture.md](docs/architecture.md). Changes on this
+branch are summarised in [CHANGELOG.md](CHANGELOG.md).
+
 ```bash
 PILOT_SYNTHETIC=1 python -m pytest                               # full suite, no hardware
 python scripts/sim_bench.py                                      # controller benchmarks
@@ -268,7 +294,8 @@ orbslam3_wrapper/     pybind11 bindings for ORB-SLAM3
 rl/                   PPO training in AutoDRIVE + ONNX export
 scripts/              launch, deployment, benchmark and training scripts
 tests/                pytest suite
-docs/                 control, vision, SLAM, simulator, deployment, references
+docs/                 architecture, control, vision, SLAM, simulator, deployment, references
+docs/images/          README figures (scripts/render_recording.py, sim_bench.py --summary)
 submodules            ORB_SLAM3, firmware (Arduino)
 ```
 
@@ -281,12 +308,12 @@ submodules            ORB_SLAM3, firmware (Arduino)
 | `scripts/jetson_run.sh` | On the car: performance mode, fast-forward, pinned submodules, launch |
 | `scripts/start.sh` | Jetson Docker deployment ([docs/deployment.md](docs/deployment.md)) |
 | `scripts/gen_orbslam_settings.py` | ORB-SLAM3 camera settings from the OAK-D calibration |
-| `scripts/sim_bench.py` | Closed-loop controller benchmarks |
+| `scripts/sim_bench.py` | Closed-loop controller benchmarks (`--summary PNG` for the chart) |
 | `scripts/train_bc_policy.py`, `train_vae_policy.py` | Train the learned depth controllers |
 | `scripts/train_vision.py` | Train a drivable-track segmentation network |
 | `scripts/vision_bench.py` | Size and latency of the segmentation candidates |
 | `scripts/read_recording.py` | Summarise / iterate a recording |
-| `scripts/render_recording.py` | Figures from a recording: car view, map, track, frames, timeline |
+| `scripts/render_recording.py` | Figures from a recording: car view, map, track, frames, timeline (`--gif` for the demo animation) |
 | `scripts/recording_to_dataset.py` | Recording → BC `.npz` or vision `images/` + `masks/` |
 | `scripts/collect_frames.py` | Save simulator camera frames |
 | `scripts/setup.sh [--with-slam]` | Initialise the submodules (ORB_SLAM3 only with `--with-slam`) |

@@ -145,6 +145,10 @@ The same scenarios run as acceptance tests in `tests/test_control_bench.py` and
 
 MPC matches LQR's accuracy with about half the steering activity.
 
+![Controller bench](images/controllers.png)
+
+Regenerate the chart with `python scripts/sim_bench.py --summary docs/images/controllers.png`.
+
 ## Learned models
 
 ### Behaviour cloning (`bc`) and VAE (`vae`)

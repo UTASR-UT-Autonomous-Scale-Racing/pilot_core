@@ -1,10 +1,6 @@
 # On-car config (Jetson): OAK-D, Arduino actuator over I2C, ORB-SLAM3 mapping.
-#
-#   python start.py --config config.yaml
-#   scripts/run.sh / scripts/start.sh    # native / Docker launch on the Jetson
-#
-# The actuator stays silent on I2C until the car is armed from the terminal,
-# so the RC transmitter drives (e.g. the mapping lap) while disarmed.
+# Actuator is silent until armed from the terminal, so the RC transmitter drives while disarmed.
+#   python start.py --config config.yaml   (or scripts/run.sh / scripts/start.sh)
 
 fps: 30                       # camera, Hz
 resolution: [640, 400]        # [width, height] px
@@ -14,8 +10,7 @@ use_oakd_imu: false           # true = OAK-D IMU through the camera worker, fals
 i2c_address: 0x08             # Arduino address. null -> actuator/IMU run as dummies
 i2c_bus: 1                    # /dev/i2c-<bus>
 
-# vision: drivable-track segmentation (docs/vision.md). Nothing drives off
-# seg_buf yet, so it is off to save CPU.
+# drivable-track segmentation; off: nothing consumes seg_buf yet
 vision:
   enabled: false
   model: ground_plane           # ground_plane | onnx
@@ -23,8 +18,7 @@ vision:
 
 control_mode: "pure_pursuit"  # pure_pursuit | stanley | lqr | mpc | policy | depth_ftg | vae | bc
 
-# servo / ESC pulse widths in us. Below neutral is left / backward,
-# above is right / forward
+# servo / ESC pulse widths, us (below neutral = left / backward)
 pwm:
   steer_min: 1105             # full left
   steer_max: 1825             # full right
@@ -108,8 +102,7 @@ safety:
   command_timeout: 0.150        # s, no fresh command -> neutral throttle
   speed_cap: 1.5                # m/s, forward throttle tapers to 0 as we approach it
   cap_margin: 0.2               # m/s, width of that taper
-  # NB forward throttle is also capped at speed_cap / speed_per_throttle
-  # (track_control.speed.longitudinal), so calibrate that one
+  # forward throttle is also capped at speed_cap / speed_per_throttle
   max_throttle_no_speed: 0.4    # forward cap with no speed estimate
   max_reverse_throttle: 0.4     # reverse cap
   steering_rate: 7.6            # units/s, on the signed [-1, 1] range
@@ -133,9 +126,7 @@ mapping:
 
 recording: false                # dump buffers to disk (or start.py --recording)
 recording_path: /tmp/pilot_recordings   # a timestamped folder per run is created here
-# Read back with scripts/read_recording.py; turn into BC / vision datasets with
-# scripts/recording_to_dataset.py. For steering labels from a hand-driven lap,
-# record the I2C IMU (use_oakd_imu: false): its slot 8 is the RC steering pulse.
+# see scripts/read_recording.py, scripts/recording_to_dataset.py (hand-driven labels need the I2C IMU)
 recording_config:
   sample_k: 1                   # keep every k-th sample, 1 = all
   top_n: 0                      # records per file, 0 = one unbounded file

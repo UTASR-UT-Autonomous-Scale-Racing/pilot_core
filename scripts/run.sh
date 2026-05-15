@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Launch the pipeline from the repo root
-#   scripts/run.sh                          # config.yaml
-#   scripts/run.sh --config config_cpu.yaml # any start.py arguments
+# Launch the pipeline from the repo root.
+#   scripts/run.sh [start.py args]   # e.g. --config config_cpu.yaml
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

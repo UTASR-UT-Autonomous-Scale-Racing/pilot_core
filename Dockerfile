@@ -1,22 +1,6 @@
-# Dockerfile — runtime image for the car (Jetson Orin).
-# Built and run by scripts/start.sh:
-#   docker build -t utasr-image -f Dockerfile .                   # with ORB-SLAM3 (default target)
-#   docker build -t utasr-image -f Dockerfile --target noslam .   # without SLAM (fast build)
-#
-# Base: JetPack 6 / L4T r36 (Ubuntu 22.04, Python 3.10, which pilot_core requires).
-# The container's L4T major version must match the host's, so the Jetson must run
-# JetPack 6.x. The previous base (l4t-ml:r35.2.1, JetPack 5) ships Python 3.8.
-#
-# Stages:
-#   deps        system + Python runtime dependencies (requirements.txt)
-#   noslam      deps + the pilot_core sources; SLAMWorker falls back to its stub
-#   slam-build  deps + Pangolin, ORB_SLAM3 and orbslam3_wrapper, built as in docs/slam.md
-#   runtime     slam-build + the pilot_core sources (default)
-#
-# The SLAM stages need the ORB_SLAM3 submodule checked out in the build context
-# (scripts/setup.sh --with-slam). The first SLAM build takes ~30+ min on the
-# Jetson; it is cached afterwards because only ORB_SLAM3/ and orbslam3_wrapper/
-# are copied into that stage.
+# Car runtime image (Jetson Orin, JetPack 6 / L4T r36 for Python 3.10; host must run JetPack 6.x).
+# Stages: deps -> noslam (SLAM stub) | slam-build (needs scripts/setup.sh --with-slam) -> runtime (default).
+#   docker build -t utasr-image -f Dockerfile [--target noslam] .
 
 ARG L4T_BASE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
 
@@ -32,12 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     i2c-tools \
     && rm -rf /var/lib/apt/lists/*
 
-# Python runtime deps. requirements.txt installs CPU onnxruntime: onnxruntime-gpu
-# has no aarch64 wheel on PyPI, and the controllers (control/policy.py,
-# control/imitation.py) use the CPU execution provider anyway. For GPU inference
-# of vision.model: onnx, pass the Jetson AI Lab wheel index for your JetPack, e.g.
-#   docker build --build-arg ORT_GPU_INDEX=https://pypi.jetson-ai-lab.io/jp6/cu126 ...
-# (check https://pypi.jetson-ai-lab.io for the current URL).
+# CPU onnxruntime (no aarch64 GPU wheel on PyPI); for GPU pass a Jetson AI Lab index, e.g.
+#   --build-arg ORT_GPU_INDEX=https://pypi.jetson-ai-lab.io/jp6/cu126
 ARG ORT_GPU_INDEX=""
 WORKDIR /app/pilot_core
 COPY requirements.txt /tmp/requirements.txt
@@ -57,18 +37,14 @@ FROM deps AS noslam
 
 COPY . /app/pilot_core
 
-# start.py is the entrypoint; container args are forwarded to it, e.g.
-#   docker run ... utasr-image --config config.yaml --recording
+# container args are forwarded to start.py
 ENTRYPOINT ["python3", "start.py"]
 CMD ["--config", "config.yaml"]
 
 # ---------------------------------------------------------------------------
 FROM deps AS slam-build
 
-# Build dependencies from docs/slam.md (Ubuntu 22.04). The -dev packages stay in
-# the image so libORB_SLAM3.so finds the same OpenCV/Boost/GL libraries at runtime
-# (a slimmer copy-only runtime stage would have to list every runtime .so).
-# If your L4T base already ships NVIDIA's OpenCV (e.g. l4t-ml), drop libopencv-dev.
+# Build deps (docs/slam.md); -dev packages stay so libORB_SLAM3.so finds its libs at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git pkg-config ca-certificates \
     libeigen3-dev libepoxy-dev libglew-dev libgl1-mesa-dev libegl1-mesa-dev \
@@ -86,9 +62,7 @@ RUN git clone --depth 1 --branch ${PANGOLIN_REF} https://github.com/stevenlovegr
     && ldconfig \
     && rm -rf /tmp/Pangolin
 
-# ORB_SLAM3: third-party libs, vocabulary, then only the library target (the
-# example executables are not needed). Host build outputs are excluded by
-# .dockerignore, so this always builds against the image's libraries.
+# ORB_SLAM3: third-party libs, vocabulary, library target only (host builds are .dockerignored)
 COPY ORB_SLAM3 /app/pilot_core/ORB_SLAM3
 RUN test -f /app/pilot_core/ORB_SLAM3/CMakeLists.txt \
     || { echo "ORB_SLAM3 submodule is empty: run scripts/setup.sh --with-slam" >&2; exit 1; }
@@ -111,7 +85,7 @@ RUN cmake -S /app/pilot_core/orbslam3_wrapper -B /app/pilot_core/orbslam3_wrappe
 # ---------------------------------------------------------------------------
 FROM slam-build AS runtime
 
-# Adds the sources on top of the SLAM build (COPY merges; the build outputs stay).
+# COPY merges, so the SLAM build outputs stay
 COPY . /app/pilot_core
 
 ENTRYPOINT ["python3", "start.py"]

@@ -1,13 +1,6 @@
-# No hardware at all: synthetic frames/depth/IMU, CPU inference, dummy
-# actuator. This is what the dev-local container runs
-# (Dockerfile.dev-local, .devcontainer/dev-local).
-#
+# No hardware: synthetic camera drives a scripted lap, dummy actuator; press l after a lap to map.
 #   python start.py --config config_dev_local.yaml                  # map-free depth_ftg
-#   python start.py --config config_dev_local.yaml --enable-slam \
-#       --control-mode pure_pursuit --recording                      # full mapping pipeline
-#
-# The synthetic camera drives a scripted lap of a closed track (the stand-in
-# for the hand-driven mapping lap); press l after a lap to extract the map.
+#   python start.py --config config_dev_local.yaml --enable-slam --control-mode pure_pursuit
 
 fps: 10                       # Hz
 resolution: [640, 400]
@@ -26,7 +19,7 @@ use_oakd_imu: false
 i2c_address: null             # dummy actuator/IMU
 i2c_bus: null
 
-# vision: drivable-track segmentation (docs/vision.md)
+# vision: drivable-track segmentation
 vision:
   enabled: true                 # exercised here; the car configs leave it off
   model: ground_plane           # ground_plane | onnx

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Docker deploy on the Jetson. Pulls, checks the config exists, sets perf
-# mode and the OAK-D udev rule, then builds and runs the image (foreground).
+# Docker deploy on the Jetson: pull, perf mode, OAK-D udev rule, build and run (foreground).
 #   scripts/start.sh                              # start.py --config config.yaml
 #   scripts/start.sh --config X.yaml [--enable-slam ...]   # args are passed to start.py
 set -euo pipefail
@@ -56,10 +55,8 @@ sudo docker build -t "$IMAGE_NAME" -f Dockerfile .
 echo "Built Docker image $IMAGE_NAME."
 echo ""
 
-# The container runs in the foreground until start.py exits (q / Ctrl+C).
-# No CPU/RAM/GPU limits. --privileged is for the OAK-D over USB, --device is the
-# I2C bus to the Arduino, --ipc=host gives the shared-memory ring buffers the
-# host's /dev/shm (Docker's default is 64 MB).
+# --privileged: OAK-D over USB; --device: Arduino I2C; --ipc=host: host /dev/shm
+# for the ring buffers (Docker's default is 64 MB).
 echo "Started container utasr-container (logs follow; q or Ctrl+C to stop)."
 exec sudo docker run \
     --runtime nvidia \

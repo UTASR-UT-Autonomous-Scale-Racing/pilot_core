@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Native (no Docker) run on the Jetson. Sets max perf, fast-forwards pilot_core
-# to its remote branch, puts the submodules on the commits pilot_core pins,
-# activates .venv and starts start.py.
+# Native (no Docker) Jetson run: max perf, ff-pull + pinned submodules, then start.py.
+# Refuses to run with uncommitted changes.
 #   scripts/jetson_run.sh [start.py args]   # config.yaml unless --config is given
-# Refuses to run with uncommitted changes in pilot_core (nothing is discarded).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,8 +17,7 @@ if ! git diff --quiet --ignore-submodules || ! git diff --cached --quiet --ignor
 fi
 git pull --ff-only
 
-# submodules -> the commits recorded in pilot_core (not their branch tips).
-# The car needs all of them, ORB_SLAM3 included (build it per docs/slam.md).
+# submodules -> pinned commits; the car needs all of them, ORB_SLAM3 included
 git submodule sync --quiet
 git submodule update --init --recursive
 echo "All repositories are up to date."

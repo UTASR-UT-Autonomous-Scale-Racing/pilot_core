@@ -4,22 +4,18 @@
     "dockerfile": "Dockerfile",
     "context": ".."
   },
-  // Jetson dev container (see .devcontainer/Dockerfile).
-  // Runtime: NVIDIA GPU + privileged USB device access
+  // NVIDIA GPU + privileged device access
   "runArgs": [
     "--runtime=nvidia",
     "--privileged",
     "--network=host",
     "--ipc=host"
   ],
-  // --privileged already exposes /dev (incl. /dev/i2c-1 for the Arduino).
-  // /dev/bus/usb is bind-mounted so the OAK-D stays visible when it re-enumerates
-  // (bootloader -> application) after the container has started.
+  // /dev/bus/usb bind-mount keeps the OAK-D visible when it re-enumerates after start
   "mounts": [
     "type=bind,source=/dev/bus/usb,target=/dev/bus/usb",
     "type=bind,source=/tmp,target=/tmp"
   ],
-  // Container environment
   "containerEnv": {
     "NVIDIA_VISIBLE_DEVICES": "all",
     "NVIDIA_DRIVER_CAPABILITIES": "all",
@@ -27,11 +23,8 @@
     "PYTHONUNBUFFERED": "1",
     "DISPLAY": "${localEnv:DISPLAY}"
   },
-  // Post-create: quick-start submodules (add --with-slam for ORB_SLAM3) + Python environment.
-  // pip is upgraded first: Ubuntu 22.04's pip 22.0 can't do PEP 660 editable installs.
-  // Build ORB-SLAM3 per docs/slam.md (build deps are in the image).
+  // pip upgraded first: Ubuntu 22.04's pip 22.0 can't do PEP 660 editable installs
   "postCreateCommand": "scripts/setup.sh && python3 -m venv --system-site-packages .venv && .venv/bin/python -m pip install --upgrade pip && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install --no-deps -e . && echo 'source /workspaces/pilot_core/.venv/bin/activate' >> ~/.bashrc",
-  // VS Code settings
   "customizations": {
     "vscode": {
       "settings": {
@@ -57,7 +50,6 @@
       ]
     }
   },
-  // Workspace folder inside container
   "workspaceFolder": "/workspaces/pilot_core",
   "remoteUser": "developer"
 }

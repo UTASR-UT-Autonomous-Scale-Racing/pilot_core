@@ -1,9 +1,5 @@
-# .devcontainer/Dockerfile — VS Code dev container for developing on the
-# Jetson Orin. Used by .devcontainer/devcontainer.json.
-# Same base as the production Dockerfile (JetPack 6 / L4T r36, Ubuntu 22.04,
-# Python 3.10); the host must run JetPack 6.x. The base image is large and slow to pull.
-# The workspace is bind-mounted by VS Code, not copied; Python deps are installed
-# into .venv by postCreateCommand (requirements.txt + `pip install -e .`).
+# VS Code dev container for the Jetson Orin (same JetPack 6 base as ../Dockerfile).
+# Workspace is bind-mounted; Python deps go into .venv via postCreateCommand.
 ARG L4T_BASE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
 FROM ${L4T_BASE}
 

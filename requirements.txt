@@ -1,6 +1,5 @@
-# pilot_core Python dependencies:  pip install -r requirements.txt
+# pip install -r requirements.txt  (same as pip install -e ".[test,slam]")
 # Keep the runtime section in sync with [project.dependencies] in pyproject.toml.
-# Equivalent with packaging:  pip install -e ".[test,slam]"
 
 # Runtime
 numpy
@@ -20,8 +19,5 @@ pytest-timeout
 # ORB-SLAM3 Python wrapper build, docs/slam.md  (pyproject extra: [slam])
 pybind11
 
-# Not installed by default (dev machine only); use the pyproject extras:
-#   RL training / policy export (rl/):                  pip install -e ".[rl]"
-#   BC / VAE / vision training (scripts/train_*.py):    pip install -e ".[train]"
-#   CPU-only torch: add --extra-index-url https://download.pytorch.org/whl/cpu
-#   Plots in scripts/sim_bench.py --plot:               pip install -e ".[plot]"
+# Dev-only extras: pip install -e ".[rl]" / ".[train]" / ".[plot]"
+#   (CPU-only torch: --extra-index-url https://download.pytorch.org/whl/cpu)

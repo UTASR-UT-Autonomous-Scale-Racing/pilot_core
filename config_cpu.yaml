@@ -1,11 +1,6 @@
-# Workstation config: real OAK-D, CPU-only inference, nothing sent to an actuator.
-#
-#   python start.py --config config_cpu.yaml                # map-free control
-#   python start.py --config config_cpu.yaml --enable-slam  # + ORB-SLAM3 mapping
-#   scripts/dev_run.sh                                      # same, with --debug
-#
-# I2C is off on purpose. On a laptop/desktop the /dev/i2c-* devices are
-# motherboard buses, not the car's Arduino, so don't ever set one here.
+# Workstation config: real OAK-D, CPU-only inference, no actuator.
+# I2C stays off: on a PC /dev/i2c-* are motherboard buses, not the car's Arduino.
+#   python start.py --config config_cpu.yaml [--enable-slam]
 
 fps: 15                       # OAK-D can do 30, but 15 leaves the CPU some headroom
 resolution: [640, 400]        # [width, height]
@@ -17,19 +12,16 @@ use_oakd_imu: true            # IMU comes through the camera worker
 i2c_address: null             # dummy actuator, no writes
 i2c_bus: null
 
-# vision: drivable-track segmentation (docs/vision.md). Nothing drives off
-# seg_buf yet, so it is off to save CPU.
+# drivable-track segmentation; off: nothing consumes seg_buf yet
 vision:
   enabled: false
   model: ground_plane           # ground_plane | onnx
   onnx_model: track_seg.onnx    # model: onnx — network from scripts/train_vision.py (+ .json sidecar)
 
-# depth_ftg, vae and bc are map-free. pure_pursuit / stanley / lqr / mpc /
-# policy need --enable-slam and a mapped track
+# map-free: depth_ftg | vae | bc; pure_pursuit | stanley | lqr | mpc | policy need SLAM
 control_mode: "depth_ftg"
 
-# PWM pulse widths (µs), same as the car. Below neutral = left/backward,
-# above = right/forward
+# PWM pulse widths, us, same as the car (below neutral = left / backward)
 pwm:
   steer_min: 1105             # full left
   steer_max: 1825             # full right

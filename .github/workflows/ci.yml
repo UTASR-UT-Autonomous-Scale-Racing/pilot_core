@@ -1,6 +1,4 @@
-# CI: lint (pyflakes) + the hardware-free test suite on synthetic sensors.
-# Tests marked `oakd` (camera) or `slam` (ORB-SLAM3 build) are deselected;
-# torch (CPU wheels) is installed so the vision / BC / VAE tests run.
+# CI: pyflakes + hardware-free tests on synthetic sensors (oakd / slam tests deselected).
 name: CI
 
 on:
@@ -30,8 +28,7 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      # opencv-python-headless needs no GUI libs; libgl1/libglib2.0-0 cover any
-      # transitive non-headless OpenCV pulled in by other packages.
+      # libgl1/libglib2.0-0 for any transitive non-headless OpenCV
       - name: System libraries
         run: |
           sudo apt-get update

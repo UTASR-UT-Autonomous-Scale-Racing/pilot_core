@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Initialise the submodules the quick start needs (firmware), at
-# their pinned commits. ORB_SLAM3 (~930 MB) is opt-in.
+# Initialise the pinned submodules the quick start needs (firmware; ORB_SLAM3 ~930 MB opt-in).
 #   scripts/setup.sh               # firmware
 #   scripts/setup.sh --with-slam   # also ORB_SLAM3 (then build it, docs/slam.md)
 set -euo pipefail
@@ -10,7 +9,7 @@ with_slam=0
 for arg in "$@"; do
     case "$arg" in
         --with-slam) with_slam=1 ;;
-        -h|--help) sed -n '2,5p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,4p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $arg" >&2; exit 2 ;;
     esac
 done

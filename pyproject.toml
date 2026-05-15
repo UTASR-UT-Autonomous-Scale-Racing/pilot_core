@@ -1,12 +1,5 @@
-# pilot_core packaging and tool configuration.
-#
-#   pip install -e .                  # runtime (camera, SLAM worker, control, actuator)
-#   pip install -e ".[test]"          # + pytest / pyflakes
-#   pip install -e ".[train]"         # + torch / torchvision / onnx (BC, VAE, vision training)
-#   pip install -e ".[rl]"            # + stable-baselines3 / gymnasium (rl/)
-#   pip install -e ".[slam]"          # + pybind11 (to build orbslam3_wrapper, docs/slam.md)
-#
-# requirements.txt mirrors the runtime dependencies below for `pip install -r`.
+# pilot_core packaging; requirements.txt mirrors the runtime dependencies.
+#   pip install -e ".[test,train,rl,slam,plot]"   # pick the extras you need
 
 [build-system]
 requires = ["setuptools>=64", "wheel"]
@@ -48,8 +41,7 @@ plot = ["matplotlib"]  # scripts/sim_bench.py --plot
 Homepage = "https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_core"
 
 [tool.setuptools]
-# Explicit list: the repo root also holds submodules (ORB_SLAM3, firmware)
-# that must not be picked up by package discovery.
+# explicit list so submodules (ORB_SLAM3, firmware) aren't discovered
 packages = ["control", "vision", "workers", "shared_buffer", "synthetic", "rl"]
 py-modules = ["start"]
 

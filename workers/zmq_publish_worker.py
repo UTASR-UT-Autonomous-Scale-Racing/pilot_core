@@ -1,12 +1,7 @@
 """
-Sends telemetry from the shared buffers back to the simulator (visualisation,
-logging) over a ZMQ PUB socket.
-
-Wire format is one string per message, "<topic> <json>", so subscribers can
-filter on the topic prefix. Topics: telemetry (pose), segmentation (uint8
-mask, 1 = drivable track, 0 = not), map (track boundaries), pointcloud.
-Commands are not echoed here: ActuatorWorker already streams them to the sim
-on the control port (5556).
+Telemetry from the shared buffers to the simulator over ZMQ PUB, one "<topic> <json>"
+string per message. Topics: telemetry (pose), segmentation (uint8, 1 = drivable),
+map (track boundaries), pointcloud. Commands go out via ActuatorWorker (port 5556).
 """
 
 from __future__ import annotations
@@ -38,13 +33,15 @@ except ImportError:
 
 
 class ZMQPublishWorker(BaseWorker):
-    """ZMQ telemetry publisher.
+    """ZMQ telemetry publisher. All buffers optional.
 
-    Binds a PUB socket on ``port`` (5557 by default). Every buffer is
-    optional: pose_buffer, seg_buffer, boundary_buffer, pointcloud_buffer
-    (world-frame XYZ, sent as base64 float32). ``publish`` is a dict of
-    bools picking which of pose / segmentation / boundary / pointcloud
-    actually get sent.
+    Config kwargs:
+      port               PUB port, default 5557
+      pose_buffer        PoseBuffer
+      seg_buffer         SegmentationBuffer
+      boundary_buffer    TrackBoundaryBuffer
+      pointcloud_buffer  PointCloudBuffer (sent as base64 float32)
+      publish            dict of bools: pose / segmentation / boundary / pointcloud
     """
 
     def __init__(self, name: str = "zmq_publish", **kwargs: Any) -> None:
@@ -152,7 +149,6 @@ class ZMQPublishWorker(BaseWorker):
                 return
             self._last_seq['segmentation'] = header.seq_no
 
-            # binary mask (1 = drivable), raw uint8 bytes base64'd. No compression
             if mask.dtype != np.uint8:
                 mask = (mask > 0).astype(np.uint8)
             mask_b64 = base64.b64encode(np.ascontiguousarray(mask).tobytes()).decode('utf-8')

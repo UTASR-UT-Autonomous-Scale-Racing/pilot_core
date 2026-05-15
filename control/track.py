@@ -1,10 +1,6 @@
 """
-TrackModel: centre-line built once from the mapped boundaries, then queried
-every control step.
-
-Gives arc length s, curvature kappa(s), half-width, and a windowed project()
-that carries the index between steps, so a query costs O(window) instead of
-a global search.
+TrackModel: centre-line built once from the mapped boundaries (arc length, curvature,
+half-width), with a windowed project() for per-step queries.
 """
 
 from __future__ import annotations
@@ -49,17 +45,9 @@ def _smooth_closed(pts: np.ndarray, window: int) -> np.ndarray:
 
 
 class TrackModel:
-    """Closed-loop centre-line model.
+    """Closed-loop centre-line model from (N, 2) / (M, 2) BEV boundaries ordered along the track.
 
-    Parameters
-    ----------
-    outer, inner : np.ndarray
-        (N, 2) / (M, 2) boundary points in the BEV plane, each ordered along
-        the track (MappingWorker already gives them in that order).
-    spacing : float
-        Centre-line sample spacing, metres.
-    smooth_window : int
-        Samples in the circular smoothing window, applied before curvature.
+    spacing: centre-line sample spacing (m); smooth_window: smoothing samples, applied before curvature.
     """
 
     def __init__(
@@ -93,8 +81,7 @@ class TrackModel:
         seg = np.linalg.norm(nxt - centre, axis=1)
         self.length = float(seg.sum())
         self.s = np.concatenate([[0.0], np.cumsum(seg[:-1])])
-        # Central differences over roughly a +/-0.25 m stencil. Doing second
-        # differences at the raw sample spacing blows up the resampling kinks.
+        # ~+/-0.25 m stencil; raw-spacing second differences amplify resampling kinks
         k = max(1, int(round(0.25 / max(self.length / n, 1e-6))))
         fwd, back = np.roll(centre, -k, axis=0), np.roll(centre, k, axis=0)
         d1 = (fwd - back) / (2.0 * k)

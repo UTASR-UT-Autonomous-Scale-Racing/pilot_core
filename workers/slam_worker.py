@@ -1,42 +1,9 @@
 """
-SLAMWorker: FrameBuffer -> ORB_SLAM3 RGBD tracking (pybind11 wrapper) ->
-PoseBuffer, plus the map point cloud and the keyframe trajectory.
-
-PoseBuffer gets camera-to-world (Twc), so pose[:3, 3] is the camera position
-in the map frame. ORB-SLAM3 hands back world-to-camera (Tcw) and we invert it
-here. If tracking isn't OK we don't publish at all, since the pose ORB-SLAM3
-returns then is identity or stale.
-
-Timestamps: track_rgbd gets the frame's capture time (header.produced_ts, set
-by CameraWorker from the DepthAI capture timestamp, time.monotonic() clock),
-and the pose / point cloud are written with that same timestamp, so the EKF
-in StateWorker fuses capture-time poses.
-
-Level world frame: ORB-SLAM3's world frame is the camera frame at map
-initialisation, which is pitched down (and maybe rolled), so its X-Z plane is
-tilted against the floor. From the first frames' depth we fit the floor plane
-(RANSAC, vision.segmenters.GroundPlaneSegmenter.fit_plane) and build the
-rotation R_level from that camera frame to a floor-aligned frame with the same
-origin: Y along the floor normal pointing down (so "Y down" still holds and the
-BEV axes [0, 2] still work), Z = camera forward projected onto the floor, X =
-Y x Z. Every published pose is R_level @ Twc and every map point R_level @ p.
-The camera is rigidly mounted, so the same R_level also holds after a map
-reset (the new map's world frame is again a camera frame). Poses are held
-back until the floor has been fitted (level_frames good fits); if that fails
-for level_timeout_frames the worker warns and publishes unlevelled poses.
-
-Map resets: ORB-SLAM3 starts a new map (or re-initialises the active one)
-after tracking is lost for good; the world frame then changes. We watch the
-wrapper's map_info() (map id, first keyframe id). On a change we log a
-warning and set map_reset_event (if given) so MappingWorker drops what it has
-recorded. While mapping, poses resume in the new map. In localization mode
-(the track boundaries live in the old map frame) poses stay withheld until
-ORB-SLAM3 is back in the reference map.
-
-Two phases. While mapping it's TrackRGBD every frame, point cloud + keyframe
-positions published when the map changes (and every N frames), loop closure
-signalled. Once driving we switch to localization mode and only use
-TrackRGBD for the live pose.
+SLAMWorker: FrameBuffer -> ORB_SLAM3 RGBD -> PoseBuffer (Twc, camera-to-world), map points
+and keyframe positions. Poses carry the frame's capture ts (time.monotonic()) and are only
+published while tracking is OK, in a floor-aligned "level" world frame (Y down along the
+floor normal, Z = forward on the floor, so BEV axes [0, 2] hold). A map switch sets
+map_reset_event; in localization mode poses are withheld outside the reference map.
 """
 
 from __future__ import annotations
@@ -116,43 +83,22 @@ def read_settings_intrinsics(path: str) -> Optional[SimpleNamespace]:
 class SLAMWorker(BaseWorker):
     """Visual SLAM worker (ORB_SLAM3 through pybind11).
 
-    Config kwargs
-    -------------
-    input_buffer : FrameBuffer
-        RGB + depth in.
-    output_buffer : PoseBuffer
-        Twc out (level world frame, capture timestamps).
-    pointcloud_buffer : PointCloudBuffer, optional
-        3D map points (level world frame).
-    keyframe_buffer : PointCloudBuffer, optional
-        Keyframe camera positions of the current map in keyframe order (level
-        world frame), published with the point cloud. After a loop closure /
-        global BA these are the corrected trajectory, which MappingWorker
-        prefers over the live poses.
-    vocab_path : str
-        ORBvoc.txt
-    settings_path : str
-        ORB_SLAM3 camera settings YAML (also gives the intrinsics for the
-        floor fit).
-    loop_event : multiprocessing.Event, optional
-        Set when ORB-SLAM3 reports a loop closure / global BA on the current map.
-    localize_event : multiprocessing.Event, optional
-        When set we switch ORB-SLAM3 into localization-only mode.
-    map_reset_event : multiprocessing.Event, optional
-        Set when ORB-SLAM3 switches to a new or re-initialised map (the world
-        frame changed). Cleared by the consumer (MappingWorker).
-    warmup_frames : int
-        Frames to drop at startup while stereo depth settles. Default 15.
-    level_world : bool
-        Publish in the floor-aligned frame (default True).
-    level_frames, level_timeout_frames : int
-        Good floor fits to average (5) and frames to try before giving up (150).
-    floor_height_range : (float, float)
-        Camera height above an accepted floor fit, m (0.03, 1.0). Rejects
-        planes above the camera (ceiling, table top, upside-down camera).
-    synthetic : bool
-        Synthetic run (also PILOT_SYNTHETIC=1). Only then is the identity-pose
-        stub allowed when orbslam3_python is missing; otherwise setup() fails.
+    Config kwargs:
+      input_buffer          FrameBuffer
+      output_buffer         PoseBuffer (Twc, level frame, capture timestamps)
+      pointcloud_buffer     PointCloudBuffer for map points (optional)
+      keyframe_buffer       PointCloudBuffer for keyframe positions, loop-corrected (optional)
+      vocab_path            ORBvoc.txt
+      settings_path         ORB_SLAM3 settings YAML (also the floor-fit intrinsics)
+      loop_event            set on loop closure once global BA has settled
+      localize_event        when set, switch to localization-only mode
+      map_reset_event       set when the world frame changes; cleared by MappingWorker
+      warmup_frames         frames skipped while stereo depth settles, default 15
+      level_world           publish in the floor-aligned frame, default True
+      level_frames          good floor fits to average, default 5
+      level_timeout_frames  give up levelling after this many frames, default 150
+      floor_height_range    accepted camera height above the floor, default (0.03, 1.0) m
+      synthetic             allow the identity-pose stub without orbslam3_python
     """
 
     _PC_PUBLISH_INTERVAL = 30  # also publish point cloud every N frames
@@ -180,7 +126,6 @@ class SLAMWorker(BaseWorker):
         self._level_world = bool(kwargs.get("level_world", True))
         self._level_frames = int(kwargs.get("level_frames", 5))
         self._level_timeout = int(kwargs.get("level_timeout_frames", 150))
-        # accepted camera heights above the fitted floor, m
         self._floor_height_range = tuple(kwargs.get("floor_height_range", (0.03, 1.0)))
         self._K: Optional[SimpleNamespace] = None
         self._plane_fitter = None
@@ -320,7 +265,6 @@ class SLAMWorker(BaseWorker):
         return True
 
     def step(self) -> None:
-        # mapping done -> localization only
         if (
             not self._localization_activated
             and self._localize_event is not None
@@ -353,9 +297,8 @@ class SLAMWorker(BaseWorker):
             self._pose_buf.write(np.eye(4, dtype=np.float32), ts=ts)
             return
 
-        # Drop the warm-up frames for tracking. Right after the OAK-D starts
-        # the stereo depth is sparse, and ORB-SLAM3 would initialise a thin
-        # map, lose it, and keep resetting. They still go into the floor fit.
+        # warm-up frames: sparse early depth makes ORB-SLAM3 init a thin map and
+        # keep resetting; they still feed the floor fit
         if self._R_level is None:
             self._update_level(depth)
         if self._frame_count <= self._warmup_frames:
@@ -399,19 +342,15 @@ class SLAMWorker(BaseWorker):
                 + ("" if level_ok else " (fitting floor, poses held)")
             )
 
-        # Publish on map change and also every N frames, otherwise
-        # MappingWorker has no wall points until a loop is detected.
+        # periodic publish too, otherwise MappingWorker has no points until a loop
         map_changed = self._slam.map_changed()
         if map_changed:
             self._last_map_change = time.monotonic()
             self._loop_pending = True
         publish_pc = map_changed or self._frame_count % self._PC_PUBLISH_INTERVAL == 0
 
-        # A loop closure first corrects the loop, then runs a global bundle
-        # adjustment in ORB-SLAM3's loop-closing thread; only after that are
-        # the map points consistent. So the loop is signalled (and the map
-        # republished) once GBA has finished and the map has been stable for
-        # _LOOP_SETTLE_S, not at the first map change.
+        # map points are only consistent after global BA: signal the loop once
+        # GBA is done and the map has been stable for _LOOP_SETTLE_S
         loop_ready = (
             self._loop_pending
             and not (hasattr(self._slam, "is_running_gba") and self._slam.is_running_gba())

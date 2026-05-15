@@ -1,17 +1,7 @@
 """
-RGB + depth frame pairs.
-
-Payload (contiguous):
-    [4 bytes]  uint32  rgb_height
-    [4 bytes]  uint32  rgb_width
-    [4 bytes]  uint32  depth_height
-    [4 bytes]  uint32  depth_width
-    [H*W*3]    uint8   RGB, row-major, RGB channel order
-    [H*W*4]    float32 depth in metres (what the camera workers write)
-                or
-    [H*W*2]    uint16  raw depth, e.g. mm
-
-Depth dtype isn't stored; the reader works it out from what's left of the payload.
+RGB + depth frame pairs. Payload: uint32 rgb_h, rgb_w, depth_h, depth_w; RGB uint8
+(H, W, 3); depth as float32 metres (camera workers) or uint16. The depth dtype is
+not stored; decode() infers it from the remaining payload size.
 """
 
 from __future__ import annotations

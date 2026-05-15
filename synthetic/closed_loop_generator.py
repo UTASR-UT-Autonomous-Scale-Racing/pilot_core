@@ -1,13 +1,7 @@
-"""Synthetic closed-loop RGBD + IMU sequence, mainly for ORB-SLAM3 tests.
+"""Synthetic closed-loop RGBD + IMU sequence around an elliptical track, mainly for ORB-SLAM3 tests.
 
-Camera drives an ellipse between two concentric elliptical walls, facing
-along the direction of travel. IMU is computed analytically from the path.
-
-Frame conventions: y is down, ground plane at y = 0, camera at
-y = -camera_height. The path is in XZ and heading = atan2(dz, dx) of the
-tangent. Poses are camera-to-world, depth is camera z in metres.
-
-Entry point is ClosedLoopFrameGenerator.generate_all().
+Frames: y down, ground at y = 0, camera at y = -camera_height, path in XZ with
+heading = atan2(dz, dx). Poses are camera-to-world; depth is camera z in metres.
 """
 
 from __future__ import annotations
@@ -24,10 +18,8 @@ from synthetic import SYNTH_FX
 class ClosedLoopFrameGenerator:
     """Closed-loop RGBD + IMU sequence around an elliptical track.
 
-    Geometry: semi-major a = straight_len/2 + turn_radius, semi-minor
-    b = turn_radius. wall_distance is the track half-width (path to each
-    wall). n_frames is frames per lap. camera_pitch_deg tilts the camera
-    down. seed only affects the textures and noise, so runs are repeatable.
+    Semi-axes a = straight_len/2 + turn_radius, b = turn_radius; wall_distance = track
+    half-width (m); n_frames = frames per lap; seed only affects textures and noise.
     """
 
     def __init__(
@@ -79,11 +71,7 @@ class ClosedLoopFrameGenerator:
         self.omega = 2.0 * math.pi * self.fps / self.n_frames
 
     def _ellipse_path(self, theta: float) -> Tuple[float, float, float]:
-        """(x, z, heading) at parameter theta.
-
-        x = a cos(theta), z = b sin(theta), traversed CCW (theta increasing).
-        heading is the tangent angle in radians.
-        """
+        """(x, z, heading rad) at theta: x = a cos(theta), z = b sin(theta), CCW."""
         a = self.semi_major
         b = self.semi_minor
         x = a * math.cos(theta)
@@ -163,11 +151,7 @@ class ClosedLoopFrameGenerator:
         return np.column_stack([x, np.zeros(n_dots), z]).astype(np.float32)
 
     def _make_wall_tile(self) -> np.ndarray:
-        """Wall marker tile (256x256): coloured patches, numbers, markers.
-
-        These are there so ORB-SLAM3 has landmarks to track and relocalize
-        on, mostly in the turns where it was losing tracking otherwise.
-        """
+        """Wall marker tile (256x256): landmarks so ORB-SLAM3 keeps tracking in the turns."""
         tile = np.zeros((256, 256, 3), dtype=np.uint8)
 
         colours = [
@@ -431,15 +415,9 @@ class ClosedLoopFrameGenerator:
         self,
         n_loops: int = 1,
     ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray, float, dict]]:
-        """Render n_loops laps as one continuous sequence.
+        """Render n_loops laps -> [(rgb uint8, depth m, pose_4x4 cam-to-world, timestamp s, imu)].
 
-        Returns a list of (rgb, depth, pose_4x4, timestamp, imu):
-            rgb        uint8 (H, W, 3)
-            depth      float32 (H, W), metres
-            pose_4x4   float32, ground-truth camera-to-world
-            timestamp  seconds
-            imu        {'accel': specific force m/s², 'gyro': rad/s}, both
-                       (3,) in the camera frame
+        imu = {'accel': specific force m/s², 'gyro': rad/s}, (3,) each in the camera frame.
         """
         frames: list = []
         dt = 1.0 / self.fps

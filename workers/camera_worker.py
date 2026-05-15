@@ -1,23 +1,8 @@
 """
-OAK-D camera capture (DepthAI v3). RGB from CAM_A, stereo depth from
-CAM_B/CAM_C, depth aligned to the undistorted RGB and the two synced.
-Writes RGB uint8 + depth float32 (metres) into the FrameBuffer.
-
-Timestamps: each frame is written with its capture time. DepthAI's
-ImgFrame.getTimestamp() is on dai::Clock, which is std::chrono::steady_clock,
-i.e. CLOCK_MONOTONIC on Linux, the same clock as Python's time.monotonic()
-(checked: dai.Clock.now().total_seconds() == time.monotonic()). So the
-FrameBuffer header's produced_ts is the capture time on the pipeline clock.
-
-Robustness: after max_step_errors consecutive step() exceptions, or no frame
-for frame_timeout_s, the pipeline is stopped and re-opened with back-off
-(_open_pipeline). After max_reopen_attempts failed re-opens in a row the
-worker stops itself and raises, so the process exits and the orchestrator
-restarts it.
-
-If an imu_buffer is passed, the on-board IMU goes into the same pipeline. It
-has to live here and not in IMUWorker because only one process can open a
-DepthAI device. See _setup_imu for which sensors are used.
+OAK-D capture (DepthAI v3): RGB uint8 + aligned depth float32 (metres) -> FrameBuffer.
+produced_ts is the capture time: DepthAI timestamps use steady_clock, i.e. time.monotonic().
+The on-board IMU is streamed from here (optional imu_buffer) because only one
+process can open a DepthAI device.
 """
 
 from __future__ import annotations
@@ -79,23 +64,25 @@ def intrinsics_mismatch(settings: dict, K, tol: float = 0.02) -> list[str]:
 
 
 class CameraWorker(BaseWorker):
-    """OAK-D RGB + depth capture.
+    """OAK-D RGB + depth capture; synthetic frames if depthai is missing,
+    synthetic=True, or PILOT_SYNTHETIC=1.
 
-    Switches to synthetic FPV frames if depthai isn't installed, if
-    synthetic=True, or if PILOT_SYNTHETIC=1.
-
-    Config kwargs: output_buffer (FrameBuffer), fps (default 30),
-    resolution [w, h] for both RGB and depth (default [640, 400]),
-    synthetic, imu_buffer (stream the on-board IMU into it if given),
-    imu_rate_hz (default 100), max_exposure_us (auto-exposure time limit,
-    default 4000, less motion blur; 0 = DepthAI default), settings_path
-    (ORB-SLAM3 settings to check against the live calibration, default
-    orbslam_oakd_rgbd.yaml), extended_disparity (default True; closer
-    minimum depth, disables sub-pixel), frame_timeout_s (1.0),
-    max_step_errors (5), max_reopen_attempts (3), startup_timeout_s (5.0).
-    Synthetic only: synthetic_scene ("corridor", a flat-shaded stand-in, or
-    "track", the ray-cast closed track from synthetic.closed_loop_generator)
-    and synthetic_track (ClosedLoopFrameGenerator overrides).
+    Config kwargs:
+      output_buffer        FrameBuffer
+      fps                  default 30
+      resolution           [w, h] for RGB and depth, default [640, 400]
+      synthetic            force synthetic frames
+      imu_buffer           stream the on-board IMU into it if given
+      imu_rate_hz          default 100
+      max_exposure_us      auto-exposure limit, default 4000 (0 = DepthAI default)
+      settings_path        ORB-SLAM3 settings to check against, default orbslam_oakd_rgbd.yaml
+      extended_disparity   default True (closer min depth, no sub-pixel)
+      frame_timeout_s      re-open after no frame this long, default 1.0
+      startup_timeout_s    same for the first frame after (re)opening, default 5.0
+      max_step_errors      consecutive step errors before re-opening, default 5
+      max_reopen_attempts  failed re-opens before exiting, default 3
+      synthetic_scene      "corridor" or "track" (ray-cast closed track)
+      synthetic_track      ClosedLoopFrameGenerator overrides
     """
 
     def __init__(self, name: str = "camera", **kwargs: Any) -> None:
@@ -130,7 +117,6 @@ class CameraWorker(BaseWorker):
         self._frame_buf = self.config["output_buffer"]
         self._imu_buf = self.config.get("imu_buffer")
         self._frame_timeout = float(self.config.get("frame_timeout_s", 1.0))
-        # the first frame after (re)opening takes longer: device boot + pipeline start
         self._startup_timeout = float(self.config.get("startup_timeout_s", 5.0))
         self._max_step_errors = int(self.config.get("max_step_errors", 5))
         self._max_reopen = int(self.config.get("max_reopen_attempts", 3))
@@ -170,10 +156,7 @@ class CameraWorker(BaseWorker):
         stereo.setLeftRightCheck(True)
         stereo.setRectification(True)
         if self.config.get("extended_disparity", True):
-            # doubles the disparity search range (0-95 -> 0-190 px), which
-            # roughly halves the minimum depth. DepthAI documents it as
-            # incompatible with sub-pixel disparity, so that goes off (less
-            # precise depth far away, fine at RC-track distances).
+            # halves the minimum depth; DepthAI says it's incompatible with sub-pixel
             stereo.setSubpixel(False)
             stereo.setExtendedDisparity(True)
 
@@ -314,14 +297,9 @@ class CameraWorker(BaseWorker):
         self._imu_q = imu.out.createOutputQueue(maxSize=50, blocking=False)
 
     def _drain_imu(self) -> None:
-        """Push every pending IMU packet into the IMU buffer.
-
-        Same layout as the I2C IMU: [qw, qx, qy, qz, ax, ay, az, gx, gy],
-        accel m/s^2, gyro rad/s, stamped with the accelerometer's capture
-        time. On the I2C path the last two slots are throttle/steering
-        feedback; the OAK-D doesn't have that so we put gyro x/y there
-        instead. Without a rotation vector (BMI270) the quaternion is NaN.
-        """
+        """Push pending IMU packets as [qw, qx, qy, qz, ax, ay, az, gx, gy] (gyro x/y
+        where the I2C path has throttle/steering feedback), stamped with the
+        accelerometer capture time. Quaternion is NaN without a rotation vector."""
         for imu_data in self._imu_q.tryGetAll():
             for packet in imu_data.packets:
                 acc = packet.acceleroMeter
@@ -399,7 +377,6 @@ class CameraWorker(BaseWorker):
         self._synthetic = True
         self._synth_scene = self.config.get("synthetic_scene", "corridor")
         if self._synth_scene == "track":
-            # ray-cast closed elliptical track (synthetic.closed_loop_generator):
             # true projection, so SLAM, mapping and the depth modes all work on it
             from synthetic.closed_loop_generator import ClosedLoopFrameGenerator
 

@@ -1,20 +1,8 @@
 """
 LQR lateral controller on the kinematic path-error model.
 
-J. M. Snider, "Automatic Steering Methods for Autonomous
-Automobile Path Tracking", CMU-RI-TR-09-08, 2009 (Sec. on LQR / optimal
-control); error dynamics after R. Rajamani, "Vehicle Dynamics and Control",
-Springer, 2012.
-
-Error state is x = [e, e_psi]: e is lateral error (+ = left of path), e_psi
-is yaw - path_heading. Input u = delta - delta_ff, where the curvature
-feed-forward is delta_ff = atan(L * kappa).
-
-    e_dot     = v * e_psi
-    e_psi_dot = (v / L) * u
-
-Discretised at the control period, solved via the discrete ARE. Gains are
-scheduled on speed and cached per 0.1 m/s.
+Ref: J. M. Snider, "Automatic Steering Methods for Autonomous Automobile Path Tracking", CMU-RI-TR-09-08, 2009.
+State [e (+ = left of path), yaw - path_heading]; input delta - atan(L * kappa). Gains cached per 0.1 m/s.
 """
 
 from __future__ import annotations

@@ -1,18 +1,8 @@
 """
-Common bits for the learned map-free depth controllers (vae, bc): depth
-preprocessing, demo collection on the bench, ONNX export, and the on-car
-follower that runs the exported model.
+Shared parts of the learned depth controllers (vae, bc): preprocessing, DART demos, ONNX export, on-car follower.
 
-Demos come from an LQR expert driving random bench tracks off the true state
-while we render depth. Correlated steering noise goes into the command that
-actually gets executed, so the data includes recoveries, but the label is
-always the expert's clean command (DART: M. Laskey et al., "DART: Noise
-Injection for Robust Imitation Learning", CoRL 2017). Frames are also
-mirrored with steering negated to balance left/right turns.
-
-Model contract: ONNX input "depth" (N, 1, INPUT_H, INPUT_W) in [0, 1],
-output "steering" (N, 1) in [-1, 1], +1 = left. Needs a <model>.json sidecar
-next to it with at least max_range.
+Ref: M. Laskey et al., "DART: Noise Injection for Robust Imitation Learning", CoRL 2017.
+ONNX contract: "depth" (N, 1, INPUT_H, INPUT_W) in [0, 1] -> "steering" (N, 1), +1 = left; sidecar needs max_range.
 """
 
 from __future__ import annotations
@@ -54,11 +44,7 @@ def bench_intrinsics(settings: str = "orbslam_oakd_rgbd.yaml"):
 def collect_depth_demos(params, K, n_tracks: int, seconds: float, speed: float, max_range: float,
                         seed: int = 0, noise_std: float = 0.3, dt: float = 0.01, rate: float = 15.0,
                         verbose: bool = True):
-    """LQR expert demos with DART noise.
-
-    Returns x (N, 1, INPUT_H, INPUT_W) float32 and y (N, 1). Mirrored copies
-    are already included.
-    """
+    """LQR expert demos with DART noise -> x (N, 1, INPUT_H, INPUT_W) float32, y (N, 1), mirrors included."""
     from .controllers import build_track_follower
     from .sim import BicyclePlant, PlantConfig, random_track, render_depth
     from .track import TrackModel

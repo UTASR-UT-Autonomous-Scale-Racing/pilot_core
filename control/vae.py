@@ -1,18 +1,7 @@
 """
-VAE control model. A variational autoencoder squeezes each depth frame into a
-small latent, and a separate head maps latent -> steering. This is the
-"World Models" V + C split.
+VAE control model: depth frame -> VAE latent -> steering head ("World Models" V + C).
 
-D. Ha, J. Schmidhuber, "World Models", arXiv:1803.10122, 2018;
-D. P. Kingma, M. Welling, "Auto-Encoding Variational Bayes", ICLR 2014
-(beta-weighted KL from I. Higgins et al., "β-VAE", ICLR 2017). Head is trained
-by behaviour cloning on noise-injected demos, see M. Laskey et al., "DART:
-Noise Injection for Robust Imitation Learning", CoRL 2017.
-
-On the car, the exported ONNX graph (encoder mean -> head) runs through
-control.imitation.DepthPolicyFollower, same as BC. So torch is only needed
-for training (scripts/train_vae_policy.py). Preprocessing, demos and the
-follower all live in control.imitation.
+Ref: D. Ha, J. Schmidhuber, "World Models", arXiv:1803.10122, 2018.
 """
 
 from __future__ import annotations

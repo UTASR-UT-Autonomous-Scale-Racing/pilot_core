@@ -1,7 +1,5 @@
 """
-Track-following controllers. Lateral laws (Pure Pursuit, Stanley, LQR, MPC)
-get paired with the curvature speed planner inside TrackFollower.
-
+Track-following controllers: lateral laws (Pure Pursuit, Stanley, LQR, MPC) plus the speed planner.
 Output is a signed Command, steering +1 = left.
 """
 
@@ -28,11 +26,7 @@ class LateralController(Protocol):
 class PurePursuit:
     """Pure pursuit: chase a look-ahead point on the centre-line.
 
-    R. C. Coulter, "Implementation of the Pure Pursuit Path
-    Tracking Algorithm", CMU-RI-TR-92-01, 1992.
-
-    ``L_d = clip(k_v * v + lookahead_min, lookahead_min, lookahead_max)``,
-    ``delta = atan(2 L sin(alpha) / L_d)``.
+    Ref: R. C. Coulter, "Implementation of the Pure Pursuit Path Tracking Algorithm", CMU-RI-TR-92-01, 1992.
     """
 
     params: VehicleParams
@@ -57,15 +51,9 @@ class PurePursuit:
 
 @dataclass
 class Stanley:
-    """Stanley law (heading error + cross-track error at the front axle).
+    """Stanley law: heading error - atan(k * e / (k_soft + v)) at the front axle (pose is rear axle).
 
-    See S. Thrun et al., "Stanley: The Robot that Won the DARPA Grand
-    Challenge", J. Field Robotics 23(9), 2006; G. Hoffmann et al.,
-    "Autonomous Automobile Trajectory Tracking for Off-Road Driving",
-    ACC 2007.
-
-    delta = heading_error - atan(k * e / (k_soft + v)), evaluated at the
-    front axle. Our pose reference is the rear axle, so we shift forward by L.
+    Ref: S. Thrun et al., "Stanley: The Robot that Won the DARPA Grand Challenge", J. Field Robotics, 2006.
     """
 
     params: VehicleParams
@@ -88,8 +76,7 @@ class Stanley:
 
 @dataclass
 class SpeedConfig:
-    # m/s, leave some margin under the safety cap (1.5)
-    v_max: float = 1.3
+    v_max: float = 1.3            # m/s, margin under the safety cap
     lat_accel_fraction: float = 0.6   # use this fraction of friction_coeff * g for corners
     accel: float = 1.5            # m/s² used by the profile (well below the car's limit)
     decel: float = 1.0            # m/s^2: coasting plus a little backward input
@@ -132,8 +119,7 @@ class TrackFollower:
         self._v_cmd = None
 
     def v_ref(self, proj: Projection, v: float, dt: float) -> float:
-        # Profile speed a little ahead, ramped at `accel` so the reference
-        # can't run away from the car (from standstill especially).
+        # profile speed a little ahead, ramped at `accel` so the ref can't run away from the car
         s_preview = proj.s + max(abs(v), 0.3) * self.speed.preview
         target = float(self.v_profile[self.track.index_at(s_preview)])
         prev = self._v_cmd if self._v_cmd is not None else max(v, 0.0)

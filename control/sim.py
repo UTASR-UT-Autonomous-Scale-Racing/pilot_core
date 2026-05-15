@@ -1,14 +1,8 @@
 """
-Closed-loop bench. Kinematic bicycle plant and a fake SLAM pose sensor,
-driving the same estimator -> controller -> safety chain we run on the car.
-The pytest benchmarks and scripts/sim_bench.py both use it.
+Closed-loop bench: rear-axle kinematic bicycle plant + fake SLAM pose sensor driving the on-car
+estimator -> controller -> safety chain. No brake: throttle 0 coasts at coast_decel.
 
-Plant is from R. Rajamani, "Vehicle Dynamics and Control", Springer, 2012,
-and J. Kong et al., IEEE IV 2015. Kinematic bicycle referenced at the rear
-axle, params from vehicle_params.yaml. Steering is a rate-limited servo
-(max_steering_vel) behind a transport delay. No brake: throttle u != 0 pulls
-speed toward u * speed_per_throttle with time constant tau (negative u =
-backward), and u == 0 coasts down at coast_decel.
+Ref: R. Rajamani, "Vehicle Dynamics and Control", Springer, 2012.
 """
 
 from __future__ import annotations
@@ -252,14 +246,9 @@ def render_depth(x, y, yaw, walls, K, width, height, cam_height=0.12, wall_heigh
 def run_depth_closed_loop(follower, outer, inner, params, duration=40.0, plant=None,
                           safety=None, width=160, height=100, camera_rate=15.0, dt=0.005,
                           K=None, camera_height=None):
-    """Like run_closed_loop but for depth-image controllers
-    (follower.step(depth) -> Command, e.g. DepthGapFollower or
-    VAEPolicyFollower). Only rendered depth goes in, no pose and no map; the
-    true track is used just for scoring.
+    """Like run_closed_loop for depth controllers (follower.step(depth) -> Command); true track only scores.
 
-    K and camera_height default to follower.K / follower.cfg.camera_height if
-    it has them (DepthGapFollower does). Learned followers don't, so pass
-    them in.
+    K / camera_height default to follower.K / follower.cfg.camera_height; pass them for learned followers.
     """
     K = K if K is not None else getattr(follower, "K", None)
     if camera_height is None:

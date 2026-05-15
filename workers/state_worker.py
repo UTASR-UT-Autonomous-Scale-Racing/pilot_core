@@ -1,11 +1,7 @@
 """
-StateWorker: runs PoseBuffer poses through control.PoseEKF and publishes the
-state to StateBuffer at a fixed rate.
-
-If poses stop coming in (SLAM lost tracking, say) the estimate goes stale
-after ``stale_after`` seconds and we stop publishing. The controller then has
-nothing to act on, stops sending commands, and the actuator watchdog takes
-the car to neutral.
+StateWorker: PoseBuffer poses -> control.PoseEKF -> StateBuffer at a fixed rate.
+A stale estimate (no poses for ``stale_after`` s) is not published, so the actuator
+watchdog takes the car to neutral.
 """
 
 from __future__ import annotations
@@ -27,8 +23,7 @@ class StateWorker(BaseWorker):
       output_buffer   StateBuffer
       bev_axes, forward_axis   passed to workers.bev.pose_to_bev
       rate_hz         publish rate, default 50
-      use_pose_speed  also fuse PoseBuffer's speed field. Only the simulator
-                      fills it in (SLAM has no speed), hence off by default.
+      use_pose_speed  also fuse PoseBuffer's speed (sim only; SLAM has none), default off
       estimator       dict of EstimatorConfig overrides
     """
 

@@ -1,51 +1,9 @@
 """
-Fixed-slot ring buffer on top of multiprocessing.shared_memory. One producer,
-any number of consumers.
-
-Readers on the same box get the data without pickling. Writes never block,
-the oldest slot just gets overwritten. read_latest() returns the newest slot;
-read_since(seq) returns every slot still in the ring that is newer than seq
-(for consumers such as the recorder that must not drop samples). Every slot
-carries produced_ts and read_ts so we can measure lag end to end.
-
-Slot layout (slot_size is rounded up to 64 bytes so every slot, and therefore
-every 8-byte seq field, stays 8-byte aligned):
-
-    [64 bytes]            SlotHeader (schema.py), seq_no in the first 8 bytes
-    [slot_payload_size]   payload (padded to a multiple of 8)
-    [8 bytes]             uint64 trailing copy of seq_no
-
-Seqlock protocol. Only one writer per buffer is supported.
-
-  writer:  1. header with seq_no = 0 (readers skip zeroed slots), trailer = 0
-           2. payload
-           3. trailing seq_no          (separate 8-byte struct.pack_into)
-           4. header seq_no            (separate 8-byte struct.pack_into, last)
-  reader:  1. copy the header, seq_before = its seq_no (skip if 0)
-           2. copy the payload
-           3. read the trailing seq_no, then re-read the header seq_no
-           4. accept only if seq_before == trailing == seq_after
-
-On weakly ordered CPUs (the Jetson's ARM cores) stores from one memcpy can
-become visible out of order; that is why seq_no is never published in the
-same memcpy as the rest of the header and why the trailer, written after the
-payload, is compared too. Python cannot emit a DMB directly, so between the
-steps both sides also take and release a process-local lock (_fence), whose
-atomic instructions order the surrounding loads/stores in practice. This is
-best effort, not a formal C11 guarantee; tests/test_ring_buffer_consistency.py
-checks that readers never get a torn record.
-
-Readers only write into shared memory when they ask for it: read_latest(
-stamp=True) / read_since(..., stamp=True) store read_ts as a single aligned
-8-byte float64 (atomic on x86 and ARM64). Plain polls never touch the block.
-
-The write counter is an mp.Value('Q', lock=False) created by whoever created
-the buffer and inherited by the producer process (also by a producer that
-start.py restarts after a crash). No lock is needed: there is exactly one live
-writer at a time, because start.py restarts a worker only after the previous
-process has exited. A lock would be actively harmful here: a producer killed
-while holding it would leave it locked and the restarted producer would block
-forever in write().
+Fixed-slot shared-memory ring buffer: one writer, any number of readers, writes
+never block (oldest slot is overwritten). Slot = 64-byte header | payload | uint64
+trailing seq_no. Seqlock: the writer zeroes seq_no, writes payload, then trailer,
+then header seq_no, each as a separate store with a _fence() between (ARM can
+reorder one memcpy); readers accept only if header seq == trailer == re-read seq.
 """
 
 from __future__ import annotations
@@ -130,7 +88,8 @@ class SharedRingBuffer:
             self._shm = shared_memory.SharedMemory(
                 name=name, create=True, size=self._total_size
             )
-            # cross-process write counter; single live writer, see docstring
+            # no lock: start.py restarts a writer only after the old one exited,
+            # and a lock held by a killed writer would block the restart forever
             self._seq = mp.Value("Q", 0, lock=False)  # uint64
         else:
             self._shm = shared_memory.SharedMemory(name=name, create=False)

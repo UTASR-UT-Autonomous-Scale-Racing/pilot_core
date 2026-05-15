@@ -1,34 +1,8 @@
 """
-MappingWorker: records the driven BEV trajectory and the wall points, and
-turns them into outer/inner track boundaries once ``loop_event`` fires.
-
-While mapping, poses from PoseBuffer become an (x, y, heading) trajectory and
-PointCloudBuffer gives the wall points (LidarProjectionWorker in sim, SLAM map
-points on the car, in SLAMWorker's floor-aligned frame). Each cloud is the
-whole accumulated map, so we just keep the newest one. If a keyframe buffer is
-given, SLAMWorker also publishes the keyframe positions; after a loop closure
-/ global BA those are the corrected trajectory, so they replace the live poses
-at extraction time. This goes on until loop_event is set, either by the
-operator pressing [l] or by a SLAM loop closure.
-
-Extraction (extract_track_boundaries):
-  1. trajectory: drop stationary samples, trim to one lap (first return to
-     the start after min_lap_length), resample densely;
-  2. lap direction from the sign of the shoelace area (CCW > 0 seen from above);
-  3. wall points: keep a height band above the floor plane fitted to the map
-     itself (floor_heights; falls back to trajectory height - camera_height)
-     and a lateral gate (distance to the trajectory < max_track_half_width);
-  4. side from the sign of the cross product (path tangent) x (path -> point);
-     per side and arc-length bin the wall sits at the nearest dense layer of
-     points (_wall_offset: ignores strays in front of the wall and what's
-     behind it); thin bins get the offset interpolated along the lap, and the
-     offset is smoothed, so the boundary follows the path through gaps;
-  5. CCW lap: right side = outer, left = inner; CW: the other way round.
-The result goes to TrackBoundaryBuffer (optionally saved to
-boundary_save_path), then mapping_done_event is set.
-
-If map_reset_event is set (SLAM switched to a new map, so the world frame
-changed) everything recorded so far is dropped and recording starts again.
+MappingWorker: records the driven BEV trajectory (PoseBuffer, or SLAM keyframes if
+given) and the newest wall point cloud, and on ``loop_event`` extracts outer/inner
+track boundaries (extract_track_boundaries) into TrackBoundaryBuffer, then sets
+mapping_done_event. map_reset_event (SLAM world frame changed) drops everything recorded.
 """
 
 from __future__ import annotations
@@ -55,31 +29,14 @@ def split_walls_by_trajectory(
     bev_wall_pts: np.ndarray,
     trajectory_xyh: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Split wall points into left / right relative to the driven trajectory.
-
-    Nearest trajectory pose per wall point comes from a KD-tree. The sign of
-    the cross product (heading at that pose) x (pose -> wall point) picks the
-    side: positive is left, negative is right. Each side is then sorted by arc
-    length along the trajectory so it comes out as an ordered polyline. No
-    filtering; extract_track_boundaries is the full pipeline.
-
-    Parameters
-    ----------
-    bev_wall_pts : np.ndarray
-        (N, 2) BEV wall points.
-    trajectory_xyh : np.ndarray
-        (T, 3) driven path, columns [x, y, heading_rad].
-
-    Returns
-    -------
-    (left_pts, right_pts), each (M, 2) float32, ordered by arc length.
-    """
+    """(N, 2) BEV wall points + (T, 3) [x, y, heading] path -> (left, right), each
+    (M, 2) float32 ordered by arc length; side from the sign of heading x (pose -> point).
+    No filtering; extract_track_boundaries is the full pipeline."""
     from scipy.spatial import KDTree
 
     traj_pos = trajectory_xyh[:, :2]   # (T, 2)
     traj_hdg = trajectory_xyh[:, 2]    # (T,)
 
-    # cumulative arc length, only used for ordering
     arc = np.concatenate([[0.0], np.cumsum(
         np.linalg.norm(np.diff(traj_pos, axis=0), axis=1)
     )])  # (T,)
@@ -93,8 +50,7 @@ def split_walls_by_trajectory(
 
     v = bev_wall_pts - traj_pos[nearest_idx]  # (N, 2)
 
-    # z of fwd x v: > 0 means the wall is on the left (ROS y > 0),
-    # < 0 on the right
+    # > 0: wall on the left
     cross = fwd_x * v[:, 1] - fwd_y * v[:, 0]  # (N,)
     left_mask = cross > 0
 
@@ -150,15 +106,9 @@ def clean_trajectory(
 def floor_heights(
     points: np.ndarray, floor_guess: float, tol: float = 0.1, iterations: int = 200, seed: int = 0,
 ) -> Optional[np.ndarray]:
-    """Height of each point above the floor plane fitted to the map itself.
-
-    points is (N, 3) [bev0, bev1, up] with the third column pointing up;
-    floor_guess is the expected floor level on that axis. The floor is the
-    dominant near-horizontal plane among points within tol of the guess
-    (RANSAC, then a least-squares refit). Measuring from it absorbs a small
-    residual tilt or height offset of the SLAM frame, which a threshold on
-    the raw vertical coordinate does not. Returns None if no floor is found.
-    """
+    """Height of each (N, 3) [bev0, bev1, up] point above the dominant near-horizontal
+    plane within tol of floor_guess (RANSAC + least squares), which absorbs residual
+    SLAM tilt. None if no floor is found."""
     cand = points[np.abs(points[:, 2] - floor_guess) < tol].astype(np.float64)
     if len(cand) < 50:
         return None
@@ -211,15 +161,9 @@ def _smooth(pts: np.ndarray, window: int, closed: bool) -> np.ndarray:
 
 
 def _wall_offset(offsets: np.ndarray, layer: float = 0.10, dense: float = 0.7) -> tuple[float, int]:
-    """Lateral distance of the wall from one bin's point offsets (m).
-
-    Offsets are histogrammed in layer-wide cells; the wall is the nearest cell
-    holding at least `dense` times as many points as the fullest one, refined to the
-    median of the points in it and its neighbours. Sparse strays between the
-    car and the wall and points behind it (a room beyond a low barrier) are
-    ignored; the nearest single point, or the median of all points, is not
-    robust to both. Returns (offset, number of points in the chosen cell).
-    """
+    """Wall distance from one bin's lateral offsets: the nearest layer-wide cell with
+    at least `dense` x the fullest cell's count (ignores strays in front and points
+    behind the wall). Returns (offset m, points in that cell)."""
     cells = np.floor(offsets / layer).astype(np.int64)
     ids, counts = np.unique(cells, return_counts=True)
     k = np.flatnonzero(counts >= dense * counts.max())[0]
@@ -237,15 +181,11 @@ def extract_track_boundaries(
     smooth_window: int = 5,
     min_bin_points: int = 3,
 ) -> tuple[np.ndarray, np.ndarray, bool]:
-    """Wall points -> (outer, inner, ccw) polylines, ordered along the lap.
+    """Wall points -> (outer, inner, ccw) polylines ordered along the lap.
 
-    wall_bev (N, 2) BEV wall points; wall_height (N,) their height above the
-    floor in metres (None: no height filter); traj_bev (T, 2) the cleaned
-    one-lap trajectory (see clean_trajectory); closed: it is a full lap.
-    Per bin (bin_size of arc length) and side, the wall is placed at the
-    nearest dense layer of the bin's points (_wall_offset); bins with fewer than
-    min_bin_points points (fewer for sparse maps) get the offset interpolated
-    along the lap, then the offset is smoothed over smooth_window bins.
+    wall_height (N,) is height above the floor (None: no filter); traj_bev is the
+    cleaned trajectory (clean_trajectory). Per arc-length bin and side the wall is
+    at _wall_offset; thin bins are interpolated, then smoothed. CCW: right = outer.
     """
     from scipy.spatial import KDTree
 
@@ -277,17 +217,12 @@ def extract_track_boundaries(
     n_bins = int(np.floor(s[-1] / bin_size)) + 1
     centre_idx = np.minimum(np.round((np.arange(n_bins) + 0.5) * bin_size / ds).astype(int), len(path) - 1)
 
-    # Sparse maps (a voxel-filtered LiDAR map has ~1 point per bin) can't afford
-    # the minimum, so it scales with the map's typical count per bin (both
-    # walls together: one sparsely seen wall must not lower its own bar).
+    # sparse maps: scale the per-bin minimum with the typical count (both walls
+    # together, so one sparsely seen wall can't lower its own bar)
     counts = np.unique(bins * 2 + (cross > 0), return_counts=True)[1]
     need = int(np.clip(0.25 * np.median(counts), 1, min_bin_points)) if len(counts) else 1
 
     def _side(mask: np.ndarray, sign: float) -> np.ndarray:
-        # Per bin, the wall is the nearest dense layer of points (see
-        # _wall_offset). Bins with too few points get the offset interpolated
-        # along the lap, and the offset is smoothed, so the boundary follows the
-        # driven path's curvature through gaps instead of cutting corners.
         if not np.any(mask):
             return np.empty((0, 2), np.float32)
         have, offset = [], []
@@ -324,48 +259,25 @@ def extract_track_boundaries(
 class MappingWorker(BaseWorker):
     """Accumulates BEV data and extracts the track boundaries.
 
-    Config kwargs
-    -------------
-    pose_buffer : PoseBuffer
-    pointcloud_buffer : PointCloudBuffer
-        3D wall points (LidarProjectionWorker or SLAM).
-    keyframe_buffer : PointCloudBuffer, optional
-        SLAM keyframe positions (in order); used as the trajectory at
-        extraction when it has at least 10 points.
-    boundary_buffer : TrackBoundaryBuffer
-        Where the outer/inner boundaries end up.
-    loop_event : mp.Event
-        Loop closure (operator [l] or SLAM), kicks off extraction.
-    mapping_done_event : mp.Event
-        We set this once boundaries are written.
-    map_reset_event : mp.Event, optional
-        SLAM changed maps: drop everything and start over (we clear it).
-    boundary_min_points : int
-        Don't try extracting with fewer wall points than this (default 50).
-    boundary_save_path : str | None
-        Directory for outer_line.npy / inner_line.npy, if given.
-    bev_axes : list[int]
-        The two horizontal axes. Sim is Z-up so [0, 1]; SLAM (level frame) is
-        Y-down so [0, 2]. The remaining axis is the vertical one.
-    forward_axis : int
-        Body axis along the direction of travel, see workers.bev.pose_to_bev.
-        0 in the sim, 2 for the SLAM camera.
-    up_sign : int
-        +1 if the vertical axis points up, -1 if down. Default: -1 when the
-        vertical axis is 1 (SLAM, Y down), else +1.
-    camera_height : float
-        Height of the pose origin (camera / vehicle) above the floor, m (0.15).
-    wall_height_band : [min, max]
-        Wall points kept between these heights above the floor plane, m ([0.05, 1.0]).
-    max_track_half_width : float
-        Lateral gate: wall points further than this from the trajectory are
-        dropped, m (1.5).
-    boundary_bin_size : float
-        Arc-length bin for the nearest-point filter, m (0.10).
-    boundary_smooth_window : int
-        Moving-average window in bins (5).
-    lap_close_radius, min_lap_length : float
-        Lap trimming, see clean_trajectory (0.5 m, 3.0 m).
+    Config kwargs:
+      pose_buffer             PoseBuffer
+      pointcloud_buffer       PointCloudBuffer, 3D wall points
+      keyframe_buffer         SLAM keyframe positions, used as trajectory if >= 10 (optional)
+      boundary_buffer         TrackBoundaryBuffer
+      loop_event              starts extraction (operator [l] or SLAM loop)
+      mapping_done_event      set once boundaries are written
+      map_reset_event         drop everything and start over; cleared here (optional)
+      boundary_min_points     min wall points to extract, default 50
+      boundary_save_path      directory for outer_line.npy / inner_line.npy (optional)
+      bev_axes                horizontal axes: sim [0, 1], SLAM level frame [0, 2] (default)
+      forward_axis            body travel axis: sim 0, SLAM 2 (default)
+      up_sign                 +1 if the vertical axis points up; default -1 if it is axis 1
+      camera_height           pose origin height above the floor, default 0.15 m
+      wall_height_band        kept wall heights above the floor, default [0.05, 1.0] m
+      max_track_half_width    lateral gate from the trajectory, default 1.5 m
+      boundary_bin_size       arc-length bin, default 0.10 m
+      boundary_smooth_window  moving-average window in bins, default 5
+      lap_close_radius, min_lap_length   lap trimming (clean_trajectory), default 0.5 / 3.0 m
     """
 
     def __init__(self, name: str = "mapping", **kwargs: Any) -> None:
@@ -382,10 +294,9 @@ class MappingWorker(BaseWorker):
         self._bev_axes: tuple = (0, 2)
         self._save_path: Optional[str] = None
 
-        # trajectory: one (x, y, heading_rad, vertical) row per pose
         self._bev_wall_pts: list[np.ndarray] = []
         self._wall_vertical: Optional[np.ndarray] = None
-        self._bev_trajectory: list[np.ndarray] = []
+        self._bev_trajectory: list[np.ndarray] = []  # (x, y, heading_rad, vertical) rows
         self._kf_traj: Optional[np.ndarray] = None   # (K, 3) 3D keyframe positions
         self._last_pose_seq = 0
         self._last_pc_seq = 0
@@ -512,8 +423,6 @@ class MappingWorker(BaseWorker):
 
         wall_height = None
         if self._wall_vertical is not None and len(self._wall_vertical) == len(all_wall):
-            # heights above the floor plane fitted to the map; if no floor is
-            # found, above camera_height below the driven path
             up = self._up_sign * self._wall_vertical
             cam_up = self._up_sign * float(np.median(traj[:, 2]))
             wall_height = floor_heights(np.column_stack([all_wall, up]), cam_up - self._camera_height)

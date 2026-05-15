@@ -1,17 +1,8 @@
 """
-Actuator output. Takes the newest command from the ControlBuffer, runs it
-through the safety supervisor, maps it to PWM (control.pwm.PWMMapper) and
-writes it to the Arduino over I2C, and/or publishes it to the sim over ZMQ.
-
-ControlBuffer values are [0, 1] with 0.5 = neutral: steering 0 is full
-left, 1 full right; throttle below 0.5 is reverse, above is forward.
-Internally and on the ZMQ wire we use signed [-1, 1] with steering +1 =
-left (AutoDRIVE convention), so watch the flip.
-
-I2C is silent while disarmed: the Arduino then passes the RC receiver
-through, so the car can be hand-driven (mapping lap). Once armed, commands
-are written at least every 100 ms; the Arduino falls back to RC / neutral if
-they stop for longer than its timeout (firmware/README.md).
+ControlBuffer ([0, 1], 0.5 = neutral) -> SafetySupervisor -> PWM over I2C to the
+Arduino and/or signed [-1, 1] (steering +1 = left) over ZMQ to the sim.
+I2C is silent while disarmed so the Arduino passes the RC receiver through; once
+armed, commands go out at least every 100 ms (Arduino times out to RC / neutral).
 """
 
 from __future__ import annotations
@@ -47,20 +38,15 @@ class ActuatorWorker(BaseWorker):
       i2c_bus        I2C bus number
       zmq_enabled    publish to the simulator (default False)
       zmq_port       PUB bind port (default 5556)
-      armed_event    output stays neutral (and I2C silent) unless set. None
-                     means always armed, which is only for tests / RL
-                     training; start.py always passes one.
-      state_buffer   vehicle state for the speed cap. Without it the
-                     supervisor falls back to a plain throttle cap.
+      armed_event    neutral (I2C silent) unless set; None = always armed (tests only)
+      state_buffer   vehicle state for the speed cap (else a plain throttle cap)
       safety         SafetyConfig overrides
       pwm            PWMConfig overrides (pulse widths)
-      reset_event    if set, the next ZMQ message carries reset: true and the
-                     event is cleared
+      reset_event    if set, the next ZMQ message carries reset: true
       rate_hz        output loop rate, default 50
 
-    Every tick goes through control.SafetySupervisor (arming, watchdog,
-    speed cap, slew limits, in that order) and whatever comes out is sent.
-    That way a stalled controller still ends with the car at neutral.
+    Every tick is sent through SafetySupervisor, so a stalled controller
+    still ends with the car at neutral.
     """
 
     def __init__(self, name: str = "actuator", **kwargs: Any) -> None:
@@ -128,7 +114,6 @@ class ActuatorWorker(BaseWorker):
                     if self._zmq_context:
                         self._zmq_context.term()
 
-        # pulse widths come from the ``pwm`` config section
         from control.pwm import PWMConfig, PWMMapper
         self._pwm = PWMMapper(PWMConfig(**self.config.get("pwm", {})))
 
@@ -178,7 +163,6 @@ class ActuatorWorker(BaseWorker):
 
         steering_norm, throttle_norm = signed_to_unit(out.steering, out.throttle)
 
-        # sim: AutoDRIVE wants signed [-1, 1], steering +1 = left
         if self._zmq_enabled:
             reset = False
             if self._reset_event is not None and self._reset_event.is_set():
@@ -236,12 +220,8 @@ class ActuatorWorker(BaseWorker):
         self._last_status = key
 
     def _write_i2c(self, steering: int, throttle: int) -> None:
-        """SMBus block write to register 0.
-
-        The Arduino expects ASCII: steering pulse width in us, then throttle,
-        concatenated with no separator (e.g. "14611397"). Both are 4 digits
-        with the default PWM config.
-        """
+        """SMBus block write to register 0: ASCII steering then throttle pulse
+        widths in us, no separator (e.g. "14611397")."""
         data_str = str(steering) + str(throttle)
         data_bytes = bytearray(data_str, encoding="utf-8")
         try:

@@ -1,18 +1,8 @@
 """
-Shared-memory ring buffers used to pass data between the worker processes.
+Shared-memory ring buffers passing data between worker processes (one writer each).
 
-One writer per buffer, seqlock-protected slots (details in ring_buffer.py).
-read_latest() returns the newest entry; read_since(seq) returns every entry
-newer than seq that is still in the ring. Each typed wrapper describes its
-payload byte layout at the top of its own module and exposes a
-decode(payload) staticmethod, so raw payloads (e.g. from recordings) decode
-exactly like read_latest().
-
-Buffer names: the typed buffers take a ``name`` (the POSIX shm block name,
-visible under /dev/shm). To run two pipelines side by side, or to keep a
-crashed run's blocks from colliding with a new one, give every buffer of a
-run the same prefix via buffer_name(prefix, base), e.g.
-``FrameBuffer(name=buffer_name("run42", "frame_buf"))`` -> "run42_frame_buf".
+Each typed wrapper documents its payload layout and has a decode(payload)
+staticmethod matching read_latest(). buffer_name(prefix, base) namespaces shm blocks.
 """
 
 from typing import Dict, Optional, Type

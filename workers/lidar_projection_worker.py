@@ -1,17 +1,7 @@
 """
-Accumulates a world-frame point cloud from 2D LIDAR scans plus the sim's
-ground-truth pose (PoseBuffer). Simulator only. World frame is Z-up
-(ROS / AutoDRIVE); vehicle frame is x-forward, y-left.
-
-AutoDRIVE's scan is Hokuyo UST-10LX-like: 1080 rays over 270 deg
-(angle_min=-2.35619449 rad, increment=0.00436332 rad), range 0.06-10.0 m,
-mounted at [0.2733, 0.0, 0.096] in the vehicle frame with no rotation.
-
-Each new scan gets turned into vehicle-frame points, shifted by the mount
-offset, transformed by the pose (4x4 Twv, world-from-vehicle), and dropped
-into a voxel_size grid. The whole accumulated (N, 3) float32 cloud is then
-rewritten to the PointCloudBuffer. We only project once the car has moved
-move_threshold metres in the ground plane since the last one.
+Simulator only: 2D LIDAR scans + ground-truth pose (4x4 Twv, world-from-vehicle,
+Z-up world, x-forward/y-left vehicle) -> voxel-deduplicated world-frame (N, 3)
+float32 cloud, rewritten in full to the PointCloudBuffer.
 """
 
 from __future__ import annotations
@@ -41,15 +31,13 @@ _LIDAR_OFFSET = np.array([0.2733, 0.0, 0.096], dtype=np.float32)
 class LidarProjectionWorker(BaseWorker):
     """2D LIDAR scans + GT pose -> world-frame 3D point cloud.
 
-    Config kwargs
-    -------------
-    lidar_buffer : LidarBuffer, 1080-ray range scans
-    pose_buffer : PoseBuffer, GT pose (4x4 Twv, world-from-vehicle)
-    output_buffer : PointCloudBuffer, gets the accumulated (N, 3) float32 cloud
-    range_min, range_max : rays outside this are dropped (0.1 / 9.5 m).
-        (a bit inside the sensor spec of 0.06-10 m)
-    voxel_size : dedup cell size, m (0.10)
-    move_threshold : min ground-plane movement between projections, m (0.05)
+    Config kwargs:
+      lidar_buffer          LidarBuffer, 1080-ray range scans
+      pose_buffer           PoseBuffer, GT pose (Twv)
+      output_buffer         PointCloudBuffer
+      range_min, range_max  rays outside are dropped, default 0.1 / 9.5 m
+      voxel_size            dedup cell size, default 0.10 m
+      move_threshold        min ground-plane movement between projections, default 0.05 m
     """
 
     def __init__(self, name: str = "lidar_proj", **kwargs: Any) -> None:
@@ -83,7 +71,6 @@ class LidarProjectionWorker(BaseWorker):
         self._range_max = float(self.config.get("range_max", 9.5))
         self._voxel_size = float(self.config.get("voxel_size", 0.10))
         self._move_threshold = float(self.config.get("move_threshold", 0.05))
-        # PointCloudBuffer has no public capacity accessor, 50k is its default
         self._pc_capacity = self._pc_buf.max_points
         self.logger.info(
             f"LidarProjectionWorker ready "
@@ -111,7 +98,6 @@ class LidarProjectionWorker(BaseWorker):
             return
         pose = pose_result[1]  # 4x4 float32 Twv (world-from-vehicle)
 
-        # skip until we've moved move_threshold in x/y
         current_pos = pose[:2, 3]
         if self._last_proj_pos is not None:
             if float(np.linalg.norm(current_pos - self._last_proj_pos)) < self._move_threshold:
@@ -172,7 +158,6 @@ class LidarProjectionWorker(BaseWorker):
         cos_a = self._ray_cos[valid]
         sin_a = self._ray_sin[valid]
 
-        # polar -> cartesian, LIDAR frame (x fwd, y left, z up)
         x_lidar = r * cos_a
         y_lidar = r * sin_a
         z_lidar = np.zeros(len(r), dtype=np.float32)

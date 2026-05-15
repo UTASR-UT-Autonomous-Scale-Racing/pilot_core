@@ -1,11 +1,7 @@
 """
-Common base for the typed ring-buffer wrappers.
-
-Each subclass implements ``encode``-side logic in ``write()`` and a
-``decode(payload)`` staticmethod that turns raw payload bytes (from shared
-memory or from a recording) into the values read_latest() returns after the
-header. ``_MULTI`` says whether decode returns a tuple of several values
-(spread into the result tuple) or a single value.
+Common base for the typed ring-buffer wrappers: subclasses encode in write() and
+provide a decode(payload) staticmethod; _MULTI means decode returns a tuple that
+is spread into read_latest()'s result.
 """
 
 from __future__ import annotations

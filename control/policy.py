@@ -1,22 +1,8 @@
 """
-Runs a PPO policy exported to ONNX (by rl/export_onnx.py) on the CPU through
-onnxruntime.
+Runs a PPO policy exported to ONNX (by rl/export_onnx.py) on the CPU through onnxruntime.
 
-PPO: J. Schulman et al., "Proximal Policy Optimization Algorithms",
-arXiv:1707.06347, 2017.
-
-Observation has to match training (rl/track_env.py) exactly; both build it
-with control/boundary.py. Boundaries are smoothed and resampled (as closed
-loops) with the training settings, then we take the closest
-point plus n_ahead more from each boundary, in the vehicle frame (+x
-forward, +y left), and append the speed. VecNormalize and action clipping
-are baked into the graph by the exporter, so raw observations go in here.
-
-Action is [steering, throttle]. Steering +1 = left, throttle in [0, 1]
-(forward only, that's how it was trained).
-
-The sidecar also records the policy rate (policy_hz) and the SafetyConfig
-the training env ran with; the caller should step the policy at policy_hz.
+Observation must match training exactly (both use control/boundary.py); VecNormalize and
+action clipping are baked into the graph. Action: steering +1 = left, throttle in [0, 1].
 """
 
 from __future__ import annotations
@@ -39,11 +25,8 @@ class PolicyMeta:
     boundary_spacing: float
     boundary_smooth_window: int
     obs_dim: int
-    # rate the policy was trained at (env steps per second); None for
-    # sidecars exported before it was recorded
-    policy_hz: Optional[float] = None
-    # SafetyConfig fields the training env ran with (None if not recorded)
-    safety: Optional[dict] = field(default=None)
+    policy_hz: Optional[float] = None   # training rate, Hz (None in old sidecars)
+    safety: Optional[dict] = field(default=None)   # training SafetyConfig fields, if recorded
 
     @classmethod
     def load(cls, onnx_path: str) -> "PolicyMeta":

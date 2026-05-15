@@ -1,19 +1,8 @@
 """
-Candidate networks for drivable-track segmentation.
+Candidate drivable-track networks: normalised RGB ``(N, 3, H, W)`` -> logits ``(N, 1, H, W)``, + = track.
 
-Every model maps a normalised RGB batch ``(N, 3, H, W)`` to one channel of
-logits ``(N, 1, H, W)``: positive = drivable track, negative = not track.
-Build one with :func:`build_model`.
-
-| name        | Reference |
-| ----------- | --------- |
-| ``unet``    | O. Ronneberger, P. Fischer, T. Brox, "U-Net: Convolutional Networks for Biomedical Image Segmentation", MICCAI 2015 |
-| ``fast_scnn`` | R. P. K. Poudel, S. Liwicki, R. Cipolla, "Fast-SCNN: Fast Semantic Segmentation Network", BMVC 2019 |
-| ``lraspp``  | A. Howard et al., "Searching for MobileNetV3" (LR-ASPP head), ICCV 2019 |
-| ``deeplabv3`` | L.-C. Chen et al., "Rethinking Atrous Convolution for Semantic Image Segmentation", arXiv:1706.05587, 2017 (MobileNetV3 backbone) |
-
-``lraspp`` and ``deeplabv3`` come from torchvision and can start from an
-ImageNet-pretrained backbone (``pretrained_backbone=True`` downloads it).
+Refs: U-Net (Ronneberger et al., MICCAI 2015), Fast-SCNN (Poudel et al., BMVC 2019),
+LR-ASPP (Howard et al., ICCV 2019), DeepLabV3 (Chen et al., arXiv:1706.05587).
 """
 
 from __future__ import annotations
@@ -99,8 +88,7 @@ class _PyramidPooling(nn.Module):
         h, w = int(x.shape[-2]), int(x.shape[-1])
         feats = [x]
         for stage, b in zip(self.stages, self.bins):
-            # Fixed-kernel average pooling (≈ b×b bins).  Unlike adaptive pooling it
-            # exports to ONNX for any feature-map size; the result is upsampled anyway.
+            # fixed-kernel pooling (≈ b×b bins): unlike adaptive pooling it exports to ONNX at any size
             k = (max(1, h // b), max(1, w // b))
             pooled = F.avg_pool2d(x, kernel_size=k, stride=k)
             feats.append(F.interpolate(stage(pooled), size=(h, w), mode="bilinear", align_corners=False))

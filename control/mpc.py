@@ -1,23 +1,7 @@
 """
-LTV MPC for lateral control. Kinematic model, solved with OSQP.
+LTV MPC for lateral control on the control.lqr path-error model with curvature preview, solved with OSQP.
 
-J. Kong, M. Pfeiffer, G. Schildbach, F. Borrelli, "Kinematic and
-Dynamic Vehicle Models for Autonomous Driving Control Design", IEEE IV 2015;
-P. Falcone et al., "Predictive Active Steering Control for Autonomous
-Vehicle Systems", IEEE TCST 15(3), 2007. Solver is from B. Stellato et al.,
-"OSQP: an operator splitting solver for quadratic programs", Math. Prog.
-Comp., 2020.
-
-Over N steps the path-error model (same one as control.lqr) gets driven by
-the previewed track curvature:
-
-    x_{k+1} = A x_k + B delta_k + c_k,   c_k = [0, -v kappa_k dt]
-
-cost  sum_k  x_k' Q x_k + r (delta_k - delta_ff,k)^2 + r_d (delta_k - delta_{k-1})^2
-s.t.  |delta_k| <= delta_max,   |delta_k - delta_{k-1}| <= steer_rate * dt
-
-Before solving, the initial state is pushed forward over the actuation delay
-using the last command. QP is condensed onto the N steering inputs.
+Ref: J. Kong et al., "Kinematic and Dynamic Vehicle Models for Autonomous Driving Control Design", IEEE IV 2015.
 """
 
 from __future__ import annotations

@@ -1,16 +1,7 @@
 """
-Closed track boundaries: smoothing, uniform resampling and the boundary
-observation used by the RL policy. This is the single implementation shared
-by training (rl/track_env.py), deployment (control/policy.py) and the RViz
-tools, so observations match between them.
-
-Boundaries are ordered (N, 2) polylines that describe a closed loop; the
-segment from the last point back to the first is part of the track. A
-trailing point that repeats the first one is tolerated and dropped.
-
-    outer = prepare_boundary(outer_raw, smooth_window=30, spacing=0.5)
-    inner = prepare_boundary(inner_raw, smooth_window=30, spacing=0.5)
-    obs = track_observation(pos, heading, speed, outer, inner, n_ahead=20)
+Closed track boundaries: smoothing, uniform resampling and the RL boundary observation.
+Single implementation shared by training, deployment and RViz so observations match.
+Boundaries are closed (N, 2) loops; a trailing copy of the first point is dropped.
 """
 
 from __future__ import annotations
@@ -29,11 +20,8 @@ def _open_loop(points: np.ndarray) -> np.ndarray:
 def smooth_boundary(points: np.ndarray, window: int = 15) -> np.ndarray:
     """Circular moving average over a closed (N, 2) boundary, `window` points wide.
 
-    Takes out the zigzag of clustered LiDAR wall points. The loop is padded
-    by wrapping around, so the points near the start/end are averaged with
-    their real neighbours across the seam (zero padding would drag them
-    towards the origin). Even windows are rounded up to the next odd size so
-    the average stays centred.
+    Wrap-padded so points near the seam average with their real neighbours;
+    even windows are rounded up to odd so the average stays centred.
     """
     pts = _open_loop(points)
     if window <= 1 or len(pts) < window:
@@ -48,12 +36,9 @@ def smooth_boundary(points: np.ndarray, window: int = 15) -> np.ndarray:
 
 
 def resample_uniform(points: np.ndarray, spacing: float) -> np.ndarray:
-    """Resample a closed (N, 2) boundary to uniform arc-length spacing.
+    """Resample a closed (N, 2) boundary to uniform arc-length spacing -> (M, 2) float32.
 
-    The closing segment (last -> first point) is included, and the spacing is
-    adjusted slightly (total_length / round(total_length / spacing)) so the
-    gap across the seam is the same as every other gap. Returns (M, 2)
-    float32 starting at the first input point.
+    Spacing becomes total / round(total / spacing) so the seam gap matches the others.
     """
     pts = _open_loop(points)
     if len(pts) < 2:

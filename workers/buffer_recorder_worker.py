@@ -1,57 +1,9 @@
 """
-Records one or more shared-memory buffers to disk as raw bytes plus a small
-binary header, one file (or series of files) per buffer. A single recorder
-process can record every buffer of the pipeline.
-
-Everything is little-endian. Each recorded slot becomes a fixed-size record
-header followed by the payload:
-
-    [8  bytes]  uint64   seq_no
-    [8  bytes]  float64  produced_ts  (time.monotonic() of the sample)
-    [8  bytes]  float64  read_ts      (time.monotonic() when the recorder read it)
-    [4  bytes]  uint32   payload_size
-    [2  bytes]  uint16   schema_version
-    [2  bytes]  uint16   dtype_tag
-    [payload_size bytes]  raw payload bytes  (identical to the shm slot payload;
-                          decode with the typed buffer's decode(), see
-                          shared_buffer.buffer_class_for and scripts/read_recording.py)
-
-Files are named <buffer_name>_<session_id>_<part>.bin, session_id being the
-recorder's start time in epoch milliseconds and part 0000, 0001, ...
-and start with a 64-byte header:
-
-    [8  bytes]  magic         b"PLTREC\\x00\\x01"
-    [2  bytes]  uint16        schema_version
-    [2  bytes]  uint16        dtype_tag
-    [4  bytes]  uint32        sample_k  (configured decimation)
-    [4  bytes]  uint32        top_n     (max records per file, 0 = unlimited)
-    [8  bytes]  float64       session_start_ts (wall clock, time.time())
-    [4  bytes]  uint32        part      (file index within the session)
-    [8  bytes]  float64       session_start_mono (time.monotonic(), same clock
-                              as produced_ts)
-    [16 bytes]  ascii         buffer name, NUL padded (first 16 bytes)
-    [8  bytes]  reserved      (zero-filled)
-
-Files written before schema version 2 have zeros in part / mono / name.
-
-Sampling: the recorder reads every slot newer than the last one it saw
-(SharedRingBuffer.read_since), so it doesn't miss samples when the producer is
-faster than the poll loop. sample_k decimates by count of samples actually
-received: every k-th received sample is written. Samples overwritten in the
-ring before the recorder got to them are counted as dropped and logged.
-
-File size policy (never overwrites in place, every file is valid and
-chronological):
-  top_n = 0          one file per buffer, no limit
-  top_n > 0          at most top_n records per file, then on_full decides:
-    on_full="rotate" (default) close the file and start the next part; with
-                     keep_files = K > 0 only the newest K parts are kept (older
-                     parts are deleted), keep_files = 0 keeps every part
-    on_full="stop"   stop recording that buffer
-
-Files are flushed every flush_interval seconds (default 1.0) and on teardown,
-so a crash loses at most about a second of data; a partially written last
-record is ignored by read_record().
+Records shared-memory buffers to disk, one file series <name>_<session_ms>_<part>.bin
+per buffer. Each file: 64-byte header (FILE_HEADER_FMT), then records of a 32-byte
+header (RECORD_HEADER_FMT; timestamps on time.monotonic()) + the raw slot payload,
+decodable with shared_buffer.buffer_class_for(...).decode. Little-endian; files are
+never overwritten and a truncated last record is ignored by read_record().
 """
 
 from __future__ import annotations
@@ -67,9 +19,9 @@ from .base_worker import BaseWorker
 from shared_buffer.ring_buffer import SharedRingBuffer
 from shared_buffer.schema import SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS, SlotHeader
 
-FILE_MAGIC = b"PLTREC\x00\x01"             # 8 bytes
+FILE_MAGIC = b"PLTREC\x00\x01"
 # magic(8) schema(2) dtype(2) sample_k(4) top_n(4) session_ts(8) part(4)
-# session_mono(8) name(16) reserved(8) = 64 bytes
+# session_mono(8) name(16) reserved(8) = 64 bytes; pre-v2 files have zero part/mono/name
 FILE_HEADER_FMT = "<8sHHIIdId16s8s"
 FILE_HEADER_SIZE = 64
 assert struct.calcsize(FILE_HEADER_FMT) == FILE_HEADER_SIZE
@@ -109,7 +61,6 @@ class _Stream:
 
 
 def _ring_of(buf) -> SharedRingBuffer:
-    # typed wrappers keep the ring buffer in ._rb
     return buf._rb if hasattr(buf, "_rb") else buf
 
 
@@ -126,8 +77,8 @@ class BufferRecorderWorker(BaseWorker):
       output_dir      where the .bin files go (default /tmp/pilot_recordings)
       sample_k        default: record every k-th received sample (1 = all)
       top_n           default: records per file, 0 = unlimited
-      on_full         default: "rotate" or "stop" (see module docstring)
-      keep_files      default: parts kept with on_full="rotate", 0 = all (default 2)
+      on_full         when top_n is hit: "rotate" to a new part (default) or "stop"
+      keep_files      newest parts kept with on_full="rotate", 0 = all (default 2)
       flush_interval  seconds between flushes (default 1.0)
       dtype_tag       single-buffer form only: override the DTypeTag in the file header
     """

@@ -1,18 +1,7 @@
 """
-Runtime drivable-track segmenters used by VisionWorker.
+Runtime drivable-track segmenters: ``get_mask(depth, rgb) -> uint8 (H, W)``, 1 = track, at frame resolution.
 
-All segmenters implement ``get_mask(depth, rgb) -> uint8 (H, W)`` with
-1 = drivable track and 0 = everything else, at the camera frame's resolution.
-
-* :class:`OnnxTrackSegmenter` runs a network trained with
-  ``scripts/train_vision.py`` (any of ``vision.models.MODELS``) through
-  onnxruntime, so the car does not need torch.
-* :class:`GroundPlaneSegmenter` needs no training: it fits the ground plane to
-  the depth point cloud with RANSAC (M. A. Fischler, R. C. Bolles, "Random
-  Sample Consensus", Comm. ACM 24(6), 1981) and marks as drivable the floor
-  pixels between the car and the first obstacle in each image column, the
-  free-space idea of the Stixel World (H. Badino, U. Franke, D. Pfeiffer,
-  "The Stixel World", DAGM 2009).
+Ref: M. A. Fischler, R. C. Bolles, "Random Sample Consensus", Comm. ACM 24(6), 1981.
 """
 
 from __future__ import annotations
@@ -63,9 +52,7 @@ class GroundPlaneConfig:
     obstacle_height: float = 0.04     # m above the plane that counts as an obstacle
     ransac_iterations: int = 60
     min_floor_fraction: float = 0.05  # of sampled pixels; below this no plane is trusted
-    # camera height above an accepted floor, m. Rejects planes above the camera
-    # (ceiling, table top) and an upside-down camera
-    camera_height_range: tuple = (0.03, 1.0)
+    camera_height_range: tuple = (0.03, 1.0)   # m, accepted camera height above the floor
 
 
 class GroundPlaneSegmenter:

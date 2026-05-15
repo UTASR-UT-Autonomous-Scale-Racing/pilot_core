@@ -1,14 +1,6 @@
 """
-Segmentation masks.
-
-Payload:
-    [4 bytes]  uint32  height
-    [4 bytes]  uint32  width
-    [H*W]      uint8   mask data (row-major)
-
-Masks are class ids / 0-1 track masks, so they are stored as uint8 (values
-are clipped to 0..255, fractional values truncated). Recordings made with
-schema version 1 stored float32 masks; decode() recognises those by size.
+Segmentation masks. Payload: uint32 height, uint32 width, H*W uint8 (row-major,
+values clipped to 0..255). decode() also reads schema-v1 float32 masks (by size).
 read_latest() -> (header, (H, W) uint8); decode(payload) -> (H, W) uint8.
 """
 

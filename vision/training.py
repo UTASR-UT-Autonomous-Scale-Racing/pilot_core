@@ -1,10 +1,4 @@
-"""
-Training loop and ONNX export for the drivable-track networks.
-
-:class:`TrackSegNet` wraps a :func:`vision.models.build_model` network with
-ImageNet normalisation, so training and the exported graph both take RGB
-in ``[0, 1]``.  ``scripts/train_vision.py`` is the command-line front end.
-"""
+"""Training loop and ONNX export for the drivable-track networks (RGB input in ``[0, 1]``)."""
 
 from __future__ import annotations
 
@@ -62,10 +56,7 @@ def evaluate(model: TrackSegNet, pairs: List[Tuple[str, str]], size, threshold: 
 
 def train(model: TrackSegNet, train_pairs, val_pairs, size, epochs: int = 40, batch_size: int = 8,
           lr: float = 1e-3, seed: int = 0, log=print) -> TrackSegNet:
-    """Train with BCE + Dice, AdamW and a cosine learning-rate schedule.
-
-    Keeps the weights with the best validation IoU.
-    """
+    """Train with BCE + Dice, AdamW and cosine LR; keeps the best-validation-IoU weights."""
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)

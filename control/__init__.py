@@ -1,10 +1,4 @@
-"""Vehicle control library. Pure Python, nothing in here should import the
-workers or the IPC buffers.
-
-Rough map: types (params/state/command), track (centre-line model),
-controllers + speed (lateral laws and the speed planner), estimator (pose EKF),
-safety (arming, watchdog, caps), sim (closed-loop bicycle bench).
-"""
+"""Vehicle control library. Pure Python; must not import the workers or the IPC buffers."""
 
 from .controllers import PurePursuit, Stanley, TrackFollower, build_track_follower
 from .estimator import EstimatorConfig, PoseEKF

@@ -1,12 +1,8 @@
 """
-EKF on a unicycle model, state [x, y, yaw, v, yaw_rate]. Fed by SLAM poses
-(~15 Hz) and a direct speed measurement when we have one (sim ground truth).
+EKF on a unicycle model, state [x, y, yaw, v, yaw_rate], fed by SLAM poses (~15 Hz)
+and optional direct speed. No wheel encoders, so speed otherwise comes from poses.
 
-Thrun, Burgard, Fox, "Probabilistic Robotics", MIT Press 2005, ch. 3.
-
-No wheel encoders on the car, so speed only comes from successive poses. The
-filter smooths that out, and predict_to() lets the controllers ask for the
-state between pose updates.
+Ref: S. Thrun, W. Burgard, D. Fox, "Probabilistic Robotics", MIT Press, 2005, ch. 3.
 """
 
 from __future__ import annotations
@@ -25,8 +21,7 @@ class EstimatorConfig:
     speed_std: float = 0.05        # m/s, direct speed measurement noise
     accel_std: float = 2.0         # m/s^2, process noise on v
     yaw_accel_std: float = 4.0     # rad/s², process noise on yaw rate
-    # s without a pose before the estimate is treated as invalid
-    stale_after: float = 0.5
+    stale_after: float = 0.5       # s without a pose before the estimate is invalid
 
 
 class PoseEKF:

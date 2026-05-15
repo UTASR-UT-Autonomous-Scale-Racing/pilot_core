@@ -1,14 +1,7 @@
 """
-Base class for the pipeline workers.
-
-start.py spawns each one as multiprocessing.Process(target=worker.run).
-Inside the child, setup() runs once, then step() in a tight loop until
-stop() is called (or SIGTERM / SIGHUP arrives, or the parent process dies),
-then teardown().
-
-Exit codes: 0 after a normal stop, 1 if setup() failed, step() raised
-FatalWorkerError, or step() kept failing (max_step_failures in a row), so
-the orchestrator can restart it.
+Base class for pipeline workers: in the child process setup() once, step() until
+stopped (stop(), SIGTERM/SIGHUP, or parent death), then teardown(). Exit code 1
+(setup failure, FatalWorkerError, max_step_failures) lets the orchestrator restart it.
 """
 
 from __future__ import annotations
@@ -59,7 +52,6 @@ class BaseWorker:
 
     def run(self) -> None:
         """Process entry point. Subclasses shouldn't normally override this."""
-        # per-process logger
         self._logger = logging.getLogger(f"worker.{self.name}")
         self._logger.setLevel(logging.DEBUG)
         handler = logging.StreamHandler()

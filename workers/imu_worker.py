@@ -1,16 +1,7 @@
 """
-Reads the Arduino IMU over I2C (or a synthetic generator) and writes 9-float
-vectors into an IMUBuffer:
-
-    [qw, qx, qy, qz, ax, ay, az, throttle, steering]
-
-i.e. orientation quaternion, accel in m/s², then the Arduino's raw
-throttle/steering feedback. The Arduino's 60-byte frame (see I2C_FRAME) also
-has gyro, magnetometer and its own timestamp; those are not published.
-Samples are stamped with the host time.monotonic() of the read.
-
-The OAK-D's own IMU isn't read here. Only one process can open a DepthAI
-device, so CameraWorker streams it (use_oakd_imu: true, wired up in start.py).
+Arduino IMU over I2C (or synthetic) -> IMUBuffer vectors
+[qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw], accel in m/s^2,
+stamped with host time.monotonic() at the read. The OAK-D IMU is streamed by CameraWorker.
 """
 
 from __future__ import annotations
@@ -31,14 +22,8 @@ except ImportError:
 
 G = 9.80665  # m/s^2 per g
 
-# What the Arduino sends per request (firmware/firmware/jetson_i2c.cpp,
-# jetson_request_event), little-endian, 60 bytes:
-#   quat w, x, y, z            4 x float32
-#   accel x, y, z (g)          3 x float32 (already divided by 1000 on the Arduino)
-#   gyro x, y, z               3 x float32
-#   mag x, y, z                3 x float32
-#   timestamp (Arduino ms)     uint32
-#   throttle, steering (raw)   2 x uint16
+# Arduino frame (firmware jetson_i2c.cpp): quat wxyz, accel xyz (g), gyro xyz, mag xyz
+# (float32 each), Arduino ms (uint32), throttle, steering raw (uint16)
 I2C_FRAME = struct.Struct("<4f3f3f3fIHH")
 I2C_FRAME_SIZE = I2C_FRAME.size  # 60
 
@@ -67,15 +52,16 @@ def parse_i2c_frame(raw: bytes) -> np.ndarray | None:
 
 
 class IMUWorker(BaseWorker):
-    """IMU worker. kwargs: output_buffer, i2c_address, i2c_bus, synthetic,
-    poll_hz (I2C polling rate, default 100).
-
-    I2C errors (OSError) are logged and retried with a growing back-off
-    (up to 1 s); they never crash the worker.
-
-    With no synthetic flag and no complete I2C address/bus it just idles and
-    publishes nothing. Deliberately does not fall back to fake data when a
+    """IMU worker. I2C errors are retried with back-off (up to 1 s), never fatal.
+    Without synthetic or a full I2C address/bus it idles: no fake data when a
     real sensor is expected.
+
+    Config kwargs:
+      output_buffer   IMUBuffer
+      i2c_address     Arduino I2C address
+      i2c_bus         I2C bus number
+      synthetic       use the synthetic generator
+      poll_hz         I2C polling rate, default 100
     """
 
     def __init__(self, name: str = "imu", **kwargs: Any) -> None:
@@ -129,7 +115,6 @@ class IMUWorker(BaseWorker):
         )
 
     def _step_i2c(self) -> None:
-        # rate limit: one read per period
         now = time.monotonic()
         if now < self._next_poll:
             time.sleep(self._next_poll - now)

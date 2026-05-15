@@ -22,25 +22,13 @@ class DTypeTag(IntEnum):
     BOUNDARY = 9       # outer + inner track polylines
 
 
-# header layout, 64 bytes total
-#
-#   Offset  Size  Type      Field
-#   0       8     uint64    seq_no           (monotonically increasing write counter)
-#   8       8     float64   produced_ts      (time.monotonic() of the sample)
-#   16      8     float64   read_ts          (time.monotonic() at read, only stamped by readers
-#                                             that ask for it: read_latest(stamp=True))
-#   24      4     uint32    payload_size     (actual bytes written in payload area)
-#   28      2     uint16    schema_version
-#   30      2     uint16    dtype_tag        (DTypeTag value)
-#   32      32    bytes     _reserved        (padding to 64 bytes)
-#
+# seq_no, produced_ts, read_ts, payload_size, schema_version, dtype_tag, reserved.
+# Timestamps are time.monotonic(); read_ts sits at offset 16 and is only stamped on request.
 HEADER_FORMAT = "<QddIHH32s"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)  # 64 bytes
 HEADER_STRUCT = struct.Struct(HEADER_FORMAT)
 
-# 2: slot ends with a trailing seq_no copy (see ring_buffer.py), segmentation
-#    masks stored as uint8, POINTCLOUD / BOUNDARY tags. The recording file format
-#    is unchanged apart from these payload details; version 1 files still read.
+# 2: trailing seq_no, uint8 segmentation masks, POINTCLOUD / BOUNDARY tags; v1 files still read
 SCHEMA_VERSION = 2
 SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 

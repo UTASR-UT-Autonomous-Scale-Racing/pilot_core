@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
 """
-Entry point for the pilot_core pipeline. Reads config.yaml plus CLI flags,
-creates the shared-memory ring buffers in this (parent) process, spawns one
-multiprocessing.Process per worker, restarts workers that crash, and cleans
-up on SIGINT / SIGTERM / SIGHUP.
+pilot_core entry point: creates the shared buffers, spawns one process per worker,
+restarts crashed workers and cleans up on SIGINT / SIGTERM / SIGHUP.
 
-Usage (the config is required, so the car never runs a profile by accident):
-    python start.py --config config.yaml       # Jetson on the car
-    python start.py --config config_cpu.yaml   # workstation + OAK-D (map-free depth_ftg)
-    python start.py --config config.yaml --enable-slam   # SLAM + mapping + track control
-    python start.py --config config.yaml --recording     # record the buffers
-    python start.py --config config.yaml --debug         # verbose logging
+Usage: python start.py --config config.yaml [--enable-slam] [--recording] [--debug]
 """
 
 from __future__ import annotations
@@ -156,12 +149,8 @@ def _shutdown(signum=None, frame=None) -> None:
 
 
 class KeyboardControl:
-    """Non-blocking single-key terminal input for the operator.
-
-    On a TTY we switch to cbreak so keys act without Enter; close() puts the
-    terminal back. With piped stdin each line counts as one key. EOF is
-    ignored and the car just stays in whatever state it's in.
-    """
+    """Non-blocking single-key operator input (cbreak on a TTY, one key per line
+    when piped). EOF is ignored: the car stays in its current state."""
 
     def __init__(self) -> None:
         self._fd = None
@@ -395,9 +384,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         )
         logger.info(f"ZMQ sensor mode enabled (host={zmq_host}, port={zmq_sensor_port})")
     else:
-        # Hardware. Only one process can open the OAK-D, so if we're using its
-        # IMU the camera worker streams it. Otherwise a separate IMU worker
-        # reads I2C (or synthetic data).
+        # only one process can open the OAK-D, so the camera worker streams its IMU
         oakd_imu_via_camera = use_oakd_imu and not use_synthetic
         workers.append(
             CameraWorker(
@@ -426,8 +413,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 )
             )
 
-    # Drivable-track segmentation. Nothing consumes seg_buf yet (it is recorded
-    # and published as telemetry), so it is off unless vision.enabled is set.
+    # segmentation: nothing consumes seg_buf yet, so off unless vision.enabled
     if vision_cfg.get("enabled", False):
         workers.append(
             VisionWorker(
@@ -442,13 +428,11 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             )
         )
 
-    # Safety supervisor. Unless it's set explicitly, the steady-state throttle
-    # bound uses the same drivetrain gain as the speed controller.
+    # throttle bound defaults to the speed controller's drivetrain gain
     safety_cfg = dict(config.get("safety", {}))
     safety_cfg.setdefault("speed_per_throttle", speed_per_throttle)
 
-    # Control. The track modes need a pose source (SLAM or sim ground truth);
-    # depth_ftg / vae / bc only need frame_buf.
+    # control: track modes need a pose source; depth_ftg / vae / bc only frame_buf
     armed_event = mp.Event()
     if control_mode in TRACK_MODES and has_pose_source:
         workers.append(
@@ -505,8 +489,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             )
         )
 
-    # actuator: I2C to the hardware and/or ZMQ control out to the sim.
-    # Stays neutral until the operator arms from the terminal
+    # actuator stays neutral until the operator arms from the terminal
     workers.append(
         ActuatorWorker(
             name="actuator",
@@ -585,9 +568,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         )
 
     if config.get("recording", False):
-        # One recorder process, one file series per buffer, in a per-run folder.
-        # recording_config.<buffer>.{sample_k, top_n, on_full, keep_files}
-        # override the defaults per buffer.
+        # recording_config.<buffer>.{sample_k, top_n, on_full, keep_files} override per buffer
         rec_cfg = config.get("recording_config", {})
         rec_dir = os.path.join(config.get("recording_path", "/tmp/pilot_recordings"), time.strftime("%Y%m%d_%H%M%S"))
         candidates = {
@@ -637,8 +618,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
 def main() -> None:
     args = parse_args()
 
-    # spawn everywhere, so Event/Value/Process all share one context and the
-    # semaphores/locks actually get shared with the children
+    # spawn everywhere so Event/Value/Process share one context with the children
     mp.set_start_method("spawn", force=True)
 
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -652,8 +632,7 @@ def main() -> None:
     config = load_config(args.config)
     logger.info(f"Loaded config from {args.config}")
 
-    # Every worker is its own process. If each one spins up a full BLAS/OpenMP
-    # thread pool, small CPUs get badly oversubscribed. Children inherit this env.
+    # cap BLAS/OpenMP threads per worker process (inherited by the children)
     threads = str(config.get("threads_per_worker", 1))
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
         os.environ.setdefault(var, threads)

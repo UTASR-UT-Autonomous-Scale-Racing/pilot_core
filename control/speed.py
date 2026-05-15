@@ -1,13 +1,8 @@
 """
-Longitudinal control. Curvature-based speed profile plus a throttle
-controller for a drivetrain with no brake: neutral just coasts, and backward
-input actively decelerates (and will reverse once stopped, so be careful).
+Longitudinal control: curvature-based speed profile plus a PI throttle controller.
+No brake: neutral coasts, backward input decelerates (and reverses once stopped).
 
-Speed profile with forward/backward passes follows N. R. Kapania,
-J. Subosits, J. C. Gerdes, "A Sequential Two-Step Algorithm for Fast
-Generation of Vehicle Racing Trajectories", J. Dyn. Sys., Meas., Control
-138(9), 2016. For the PI part see K. J. Åström, R. M. Murray, "Feedback Systems",
-Princeton University Press, 2008.
+Ref: N. R. Kapania et al., "A Sequential Two-Step Algorithm for Fast Generation of Vehicle Racing Trajectories", 2016.
 """
 
 from __future__ import annotations
@@ -28,12 +23,8 @@ def speed_profile(
     a_accel: float,
     a_decel: float,
 ) -> np.ndarray:
-    """Max speed at each centre-line sample.
-
-    Starts from v <= sqrt(a_lat_max / |kappa|), capped at v_max, then does
-    forward (accel) and backward (decel) passes around the loop so the
-    profile is actually reachable under those limits.
-    """
+    """Max speed at each centre-line sample: v <= sqrt(a_lat_max / |kappa|), capped at
+    v_max, then forward/backward passes so the profile is reachable under the accel limits."""
     kappa = np.abs(track.curvature)
     v = np.minimum(v_max, np.sqrt(a_lat_max / np.maximum(kappa, 1e-6)))
     ds = np.diff(np.concatenate([track.s, [track.length]]))
@@ -51,8 +42,7 @@ def speed_profile(
 
 @dataclass
 class LongitudinalConfig:
-    # steady-state m/s per unit throttle. calibrate this on the car
-    speed_per_throttle: float = 3.0
+    speed_per_throttle: float = 3.0   # steady-state m/s per unit throttle (calibrate)
     kp: float = 0.25                  # throttle per m/s of speed error
     ki: float = 0.15
     integral_limit: float = 0.15      # anti-windup clamp on I, in throttle units

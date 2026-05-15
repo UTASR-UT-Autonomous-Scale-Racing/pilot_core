@@ -1,20 +1,7 @@
 """
-Behaviour cloning. End-to-end CNN from a depth frame straight to steering,
-trained by plain supervised regression on expert demos.
+Behaviour cloning: end-to-end PilotNet-style CNN, depth frame -> steering.
 
-Refs: M. Bojarski et al., "End to End Learning for Self-Driving Cars"
-(PilotNet), arXiv:1604.07316, 2016; D. A. Pomerleau, "ALVINN: An
-Autonomous Land Vehicle in a Neural Network", NIPS 1989. Demos
-are collected with DART noise injection (M. Laskey et al., CoRL 2017), see
-control.imitation.
-
-Layout is PilotNet's (strided 5x5 convs, then 3x3 convs, then a narrowing FC
-stack), shrunk for the 40x64 depth input. No separate latent like the VAE
-model has; the whole thing is trained on the steering loss.
-
-On the car the exported ONNX graph runs through
-:class:`control.imitation.DepthPolicyFollower` (``control_mode: bc``).
-Train with ``scripts/train_bc_policy.py``.
+Ref: M. Bojarski et al., "End to End Learning for Self-Driving Cars", arXiv:1604.07316, 2016.
 """
 
 from __future__ import annotations

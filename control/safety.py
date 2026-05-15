@@ -1,22 +1,6 @@
 """
-SafetySupervisor sits between whatever controller is running and the
-actuators. Each output tick it takes the newest command and decides what
-actually gets sent. Checks run in this order:
-
-- arming: while disarmed, neutral throttle and centred steering
-- watchdog: newest command older than command_timeout, stamped in the
-  future, or not finite -> neutral throttle, steering held, car coasts to a
-  stop
-- speed cap: forward throttle tapers linearly to zero over the last
-  cap_margin m/s below speed_cap, zero above it (coasts). The taper is there
-  to soak up lag in the pose-derived speed estimate. With no speed estimate
-  at all, forward throttle is limited to max_throttle_no_speed.
-  Separately, forward throttle never goes above speed_cap /
-  speed_per_throttle (the steady-state throttle for the cap), so estimator
-  lag can't let the car settle above the cap. Only works if
-  speed_per_throttle is actually calibrated. Reverse throttle is capped at
-  max_reverse_throttle. A non-finite speed counts as no speed estimate.
-- slew limits on steering and throttle
+SafetySupervisor between the controller and the actuators: arming, command watchdog,
+speed cap (tapered, plus a speed_cap / speed_per_throttle bound) and slew limits.
 
 Signed units throughout: steering +1 = left, throttle 0 = neutral.
 """
@@ -36,8 +20,7 @@ class SafetyConfig:
     command_timeout: float = 0.150   # s
     speed_cap: float = 1.5           # m/s
     cap_margin: float = 0.2          # m/s band over which forward throttle tapers to 0
-    # m/s per unit throttle, calibrate on the car. None turns the bound off
-    speed_per_throttle: Optional[float] = 3.0
+    speed_per_throttle: Optional[float] = 3.0   # m/s per unit throttle; None disables the bound
     max_throttle: float = 1.0        # forward throttle cap
     max_throttle_no_speed: float = 0.4
     max_reverse_throttle: float = 0.4

@@ -1,14 +1,6 @@
 """
-Fake camera/depth/IMU data so the stack runs without hardware: tests,
-PILOT_SYNTHETIC=1, and the dev Docker container.
-
-SyntheticFrameGenerator fakes an FPV camera driving straight down a corridor
-between two walls. next_fast() returns (rgb uint8 HxWx3, depth
-float32 HxW in metres). SyntheticIMUGenerator.next() returns a (9,) float32
-vector in the IMUBuffer layout.
-
-For SLAM tests you probably want closed_loop_generator instead; it has a
-closed elliptical track with ground-truth poses.
+Fake camera/depth/IMU data so the stack runs without hardware (tests, PILOT_SYNTHETIC=1, dev container).
+For SLAM tests use closed_loop_generator (ground-truth poses).
 """
 
 from __future__ import annotations
@@ -24,11 +16,9 @@ SYNTH_FX = 456.99
 
 
 class SyntheticFrameGenerator:
-    """Straight corridor seen from an FPV camera: dark grey floor, lighter
-    walls either side, and a depth map that roughly matches.
+    """Straight corridor seen from an FPV camera, with a roughly matching depth map.
 
-    wall_distance and corridor_length are in metres. speed (m/s) only
-    affects how fast the wall texture scrolls.
+    wall_distance, corridor_length in m; speed (m/s) only sets the texture scroll rate.
     """
 
     def __init__(
@@ -57,11 +47,7 @@ class SyntheticFrameGenerator:
         self._t0 = time.monotonic()
 
     def next_fast(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Next (rgb, depth) pair. The depth is a rough model, not a real
-        projection: floor depth falls off with row, wall depth with column,
-        and anything above the vanishing point is corridor_length. The RGB
-        is flat-shaded with a scrolling dashed centre line.
-        """
+        """Next (rgb uint8 HxWx3, depth float32 HxW m); depth is a rough model, not a true projection."""
         self._frame_idx += 1
         t = time.monotonic() - self._t0
 
@@ -122,12 +108,10 @@ class SyntheticFrameGenerator:
 
 
 class SyntheticIMUGenerator:
-    """IMU for straight-line driving, in the IMUBuffer layout
-    [qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw].
+    """IMU for straight-line driving, IMUBuffer layout
+    [qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw] (pulse widths in µs).
 
-    Quaternion is ~identity, accel is gravity on z plus Gaussian noise
-    (accel_noise, m/s^2 std), and throttle/steering are held constant. The
-    steering default of 1461 is the neutral pulse width in µs.
+    accel_noise is the m/s^2 std on gravity-on-z accel; throttle/steering are held constant.
     """
 
     def __init__(

@@ -1,21 +1,7 @@
 """
-ZMQSensorWorker subscribes to autodrive_bridge's JSON sensor feed and fills
-the frame, IMU, pose and LIDAR buffers. In simulator mode it stands in for
-CameraWorker + IMUWorker.
-
-frame_buf gets RGB uint8 and depth as float32 metres. 8-bit depth images are
-scaled linearly, 0 = near and 255 = depth_max_meters. Raw uint16 depth is
-only accepted with an explicit depth_raw_scale (metres per unit). Without a
-frame_buffer (the RL env) camera/depth decoding is skipped entirely.
-
-The sim reports commands as signed [-1, 1] with +1 steer = left. They're
-remapped to [0, 1] (0.5 neutral, steering 0 = full left) and stored in the
-last two slots of the IMU vector.
-
-Ground-truth vehicle-to-world pose (ROS, Z-up; quaternion arrives as
-[x, y, z, w]) goes to PoseBuffer along with the speed, and optionally to a
-StateBuffer as a VehicleState (x, y, yaw on the ground plane, v = sim speed),
-which gives the actuator's speed cap a speed source without a StateWorker.
+Simulator stand-in for CameraWorker + IMUWorker: autodrive_bridge's JSON feed ->
+frame (RGB uint8, depth float32 m), IMU (sim commands remapped to [0, 1] in the last
+two slots), ground-truth pose (Z-up, vehicle-to-world), optional StateBuffer, LIDAR.
 """
 
 from __future__ import annotations
@@ -47,30 +33,17 @@ except ImportError:
 class ZMQSensorWorker(BaseWorker):
     """Sim sensor feed -> shared buffers.
 
-    Config kwargs
-    -------------
-    host, port : str, int
-        Where autodrive_bridge publishes (localhost:5555 by default).
-    frame_buffer : FrameBuffer, optional
-        RGB + depth. None skips all image decoding.
-    imu_buffer : IMUBuffer, optional
-    pose_buffer : PoseBuffer, optional
-        Simulator ground-truth poses.
-    state_buffer : StateBuffer, optional
-        VehicleState from the ground-truth pose + sim speed (ground plane =
-        world X, Y; the sim is Z-up).
-    lidar_buffer : LidarBuffer, optional
-        1080-ray 2D scan.
-    depth_max_meters : float
-        What pixel value 255 means for 8-bit depth images. Default 15.0,
-        the sim depth camera's far clip.
-    depth_raw_scale : float, optional
-        Metres per unit for raw uint16 depth. Required if the bridge sends
-        raw depth; without it raw depth frames get zero depth and an error.
-    no_message_warn_s : float
-        Warn when nothing arrives for this long (default 1.0 s).
-    collision_counter, lap_counter, checkpoint_counter : mp.Value, optional
-        Mirrors of the sim's counters, read by the gym env.
+    Config kwargs:
+      host, port          autodrive_bridge publisher, default localhost:5555
+      frame_buffer        FrameBuffer; None skips all image decoding
+      imu_buffer          IMUBuffer
+      pose_buffer         PoseBuffer (ground truth)
+      state_buffer        StateBuffer, VehicleState from GT pose + sim speed
+      lidar_buffer        LidarBuffer, 1080-ray scan
+      depth_max_meters    metres at pixel 255 for 8-bit depth, default 15.0 (sim far clip)
+      depth_raw_scale     metres per unit for raw uint16 depth (else zero depth + error)
+      no_message_warn_s   warn after this long without messages, default 1.0
+      collision_counter, lap_counter, checkpoint_counter   mp.Values for the gym env
     """
 
     def __init__(self, name: str = "zmq_sensor", **kwargs: Any) -> None:
@@ -213,13 +186,10 @@ class ZMQSensorWorker(BaseWorker):
                     depth_encoding = depth_cam.get('encoding', 'raw')
 
                     if depth_encoding in ('jpeg', 'png'):
-                        # 8-bit grey -> metres, linear, 0 = near and 255 = far
-                        # clip. NB depth_max_meters has to match the sim
-                        # camera's far clip or all depths are scaled wrong.
+                        # linear 0..255 -> 0..depth_max_meters (must match the sim far clip)
                         nparr = np.frombuffer(depth_bytes, dtype=np.uint8)
                         depth = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE).astype(np.float32)
                         depth = depth / 255.0 * self._depth_max_meters
-                        # log the mapping once, on the first frame
                         if not self._depth_logged:
                             raw_u8 = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
                             self.logger.debug(
@@ -288,7 +258,6 @@ class ZMQSensorWorker(BaseWorker):
             throttle_norm = np.clip(throttle_norm, 0.0, 1.0)
             steering_norm = np.clip(steering_norm, 0.0, 1.0)
 
-            # layout: [w, x, y, z, ax, ay, az, throttle, steering]
             imu_vector = np.concatenate([
                 quat,
                 lin_acc,

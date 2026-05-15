@@ -1,11 +1,8 @@
 """
 Types shared by the controllers, estimator, safety supervisor and sim.
 
-Conventions, same as README "Buffer contracts":
-BEV plane (x, y) is whichever two world ground-plane axes bev_axes picks, and
-headings are CCW from +x. Commands are signed. Steering +1 is full left (CCW,
-matches ROS REP-103). Throttle +1 full forward, -1 full backward, 0 neutral.
-Neutral means the car coasts and slows down; there's no separate brake.
+Headings are CCW from +x in the BEV plane (axes from bev_axes). Commands are signed:
+steering +1 = full left (REP-103); throttle +1 forward, -1 backward, 0 neutral (coasts, no brake).
 """
 
 from __future__ import annotations
@@ -20,9 +17,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def resolve_path(path: str) -> str:
-    """A config / model / settings path as given if it exists (absolute, or
-    relative to the working directory), otherwise relative to the repo root,
-    where the shipped files live. Lets everything run from any directory."""
+    """`path` as given if it exists, otherwise relative to the repo root."""
     if os.path.isabs(path) or os.path.exists(path):
         return path
     return os.path.join(_REPO_ROOT, path)

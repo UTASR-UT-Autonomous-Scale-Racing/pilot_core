@@ -1,23 +1,8 @@
 """
-Runs whichever control mode is configured and writes steering/throttle to
-the ControlBuffer.
-
-The track-following modes (pure_pursuit, the default, plus stanley, lqr,
-mpc and policy; see control/) drive off the state estimate and the mapped
-boundaries, and can optionally drop to depth_ftg while the state estimate
-is stale. depth_ftg, vae and bc are map-free and work straight from depth
-frames (vae is the learned VAE control model, bc the behaviour-cloning
-CNN).
-
-Controllers are reset while the car is disarmed so integrators don't wind
-up before the car is allowed to move.
-
-Output contract, since everything downstream depends on it: ControlBuffer
-values are [0, 1] with 0.5 = neutral on both channels. That's what
-PWMMapper (linear over each channel's PWM [min, max]) and the sim bridge
-expect: steering 0 = full left, 1 = full right, throttle < 0.5 backward,
-> 0.5 forward. The controllers themselves work in signed [-1, 1] with
-+steering = LEFT, and get converted by signed_to_unit() below.
+Runs the configured control mode (track modes off state + map, or map-free depth modes)
+and writes steering/throttle to the ControlBuffer.
+Output contract: [0, 1] with 0.5 = neutral; steering 0 = full left, 1 = full right,
+throttle < 0.5 reverse. Controllers use signed [-1, 1] (+steering = left), see signed_to_unit().
 """
 
 from __future__ import annotations
@@ -33,14 +18,8 @@ from shared_buffer import ControlBuffer
 
 
 def signed_to_unit(steering: float, throttle: float) -> tuple[float, float]:
-    """Signed controller output -> ControlBuffer [0, 1].
-
-    All the track controllers and RL policies use steering +1 = full left
-    (ROS / REP-103, CCW positive) and throttle +1 = full forward, -1 = full
-    reverse. ControlBuffer follows the car's PWM instead, where going
-    above neutral steers right (0 = full left, 1 = full right), hence the
-    sign flip on steering. 0 maps to 0.5 on both channels.
-    """
+    """Signed controller output (steering +1 = full left, REP-103) -> ControlBuffer
+    [0, 1], where the car's PWM steers right above neutral, hence the steering flip."""
     steer_unit = float(np.clip((1.0 - steering) / 2.0, 0.0, 1.0))
     throttle_unit = float(np.clip((throttle + 1.0) / 2.0, 0.0, 1.0))
     return steer_unit, throttle_unit
@@ -58,15 +37,16 @@ def unit_to_signed(steering: float, throttle: float) -> tuple[float, float]:
 class ControlWorker(BaseWorker):
     """Vehicle control worker. Which kwargs matter depends on the mode.
 
-    always: mode, output_buffer (ControlBuffer), armed_event (optional;
-        controllers are reset while it is clear)
-    track modes: state_buffer, boundary_buffer, mapping_done_event,
-        track_config (the track_control config section), vehicle_params,
-        safety (runtime safety settings, compared with a policy's),
-        plus frame_buffer / camera_settings / depth_ftg_config if the
-        fallback is on
-    depth_ftg: frame_buffer, camera_settings, depth_ftg_config
-    vae / bc: frame_buffer, vae_config or bc_config
+    Config kwargs:
+      mode                one of TRACK_MODES, depth_ftg, vae, bc (default pure_pursuit)
+      output_buffer       ControlBuffer
+      armed_event         optional; controllers are reset on arming so nothing winds up
+      state_buffer, boundary_buffer, mapping_done_event   track modes
+      track_config        track_control config section (fallback: depth_ftg)
+      vehicle_params      vehicle params YAML
+      safety              runtime safety settings, compared with a policy's
+      frame_buffer, camera_settings, depth_ftg_config     depth_ftg / fallback
+      vae_config, bc_config                               vae / bc
     """
 
     def __init__(self, name: str = "control", **kwargs: Any) -> None:
@@ -123,7 +103,6 @@ class ControlWorker(BaseWorker):
         self._last_state_seq = 0
         self._last_state_time = time.monotonic()
         self._next_policy_step = 0.0
-        # optional map-free fallback for when the state estimate goes stale
         if self._track_cfg.get("fallback") == "depth_ftg":
             self._fallback = self._make_depth_follower()
             self._fallback_after = float(self._track_cfg.get("fallback_after", 0.3))

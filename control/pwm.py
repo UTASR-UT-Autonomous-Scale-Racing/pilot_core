@@ -1,11 +1,8 @@
 """
 PWM mapping for the steering servo and the ESC.
 
-ControlBuffer values in [0, 1] map linearly onto each channel's [min, max]
-pulse width in us. Below neutral is left / backward, above is right /
-forward. Widths come from the `pwm` config section; defaults are calibrated
-for our car. Throttle 0.5 lands exactly on neutral. Steering neutral is a bit
-off the midpoint, and that's intentional.
+ControlBuffer values in [0, 1] map linearly onto each channel's [min, max] pulse
+width in us; below neutral is left / backward. Steering neutral is off-midpoint on purpose.
 """
 
 from __future__ import annotations

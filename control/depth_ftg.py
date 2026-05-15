@@ -1,30 +1,8 @@
 """
-Map-free reactive control off the depth image. We fake a laser scan from the
-depth camera and run Follow-the-Gap on it.
+Map-free reactive control: virtual laser scan from the depth image, then Follow-the-Gap.
 
-V. Sezer, M. Gokasan, "A novel obstacle avoidance algorithm:
-'Follow the Gap Method'", Robotics and Autonomous Systems 60(9), 2012.
-
-How it works: depth pixels are back-projected with the pinhole intrinsics
-into the camera frame (x right, y down, z forward), and only points inside an
-obstacle height band are kept, which drops the floor and anything overhead.
-Each bearing bin (+ = left) then gets the nearest obstacle range.
-
-Follow the Gap puts a safety bubble around the nearest obstacle, picks the
-best free gap (largest visible free area) and turns that into a heading. Like
-the paper, the gap-centre angle is blended with a goal angle weighted by the
-nearest-obstacle distance:
-
-    phi = (alpha/d_min * phi_gap + beta * phi_goal) / (alpha/d_min + beta)
-
-Goal is straight ahead; beta = 0 is pure gap-centre steering.
-
-Steering toward phi uses the pure-pursuit curvature law over a short aim
-distance. Speed drops with steering, and we stop when something is close or
-when too little of the depth image is valid to trust the scan.
-
-The camera sits camera_height above the ground, facing forward, pitched down
-by camera_pitch.
+Ref: V. Sezer, M. Gokasan, "A novel obstacle avoidance algorithm: 'Follow the Gap Method'", RAS 60(9), 2012.
+Camera frame x right, y down, z forward; bearings + = left.
 """
 
 from __future__ import annotations
@@ -68,8 +46,7 @@ class DepthFTGConfig:
     num_bins: int = 64                # bearing bins across the FOV
     pixel_step: int = 4               # subsample the depth image
     smooth_window: int = 3
-    # m; car half-width plus margin, applied around the nearest obstacle
-    bubble_radius: float = 0.25
+    bubble_radius: float = 0.25       # m, car half-width plus margin
     min_gap_range: float = 0.6        # m, bins closer than this aren't "free"
     alpha: float = 1.0                # gap-angle weight (scaled by 1/d_min)
     beta: float = 0.0                 # goal-angle weight (goal = straight ahead)
@@ -77,18 +54,16 @@ class DepthFTGConfig:
     cruise_speed: float = 0.6         # m/s
     stop_distance: float = 0.35       # m, anything this close ahead -> neutral
     min_valid_fraction: float = 0.2   # below this share of valid depth pixels -> neutral
-    # m/s per unit throttle, same calibration as the track controllers
-    speed_per_throttle: float = 3.0
+    speed_per_throttle: float = 3.0   # m/s per unit throttle
 
 
 def depth_to_scan(
     depth: np.ndarray, K: Intrinsics, cfg: DepthFTGConfig
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Virtual scan from a depth image.
+    """Virtual scan from a depth image -> (bearings, ranges).
 
-    Returns (bearings, ranges). bearings: num_bins angles in rad, + = left,
-    ascending, spanning the horizontal FOV. ranges: nearest obstacle per bin,
-    or max_range if nothing's there.
+    bearings: num_bins ascending angles (rad, + = left) across the FOV;
+    ranges: nearest obstacle per bin (m), max_range if none.
     """
     h, w = depth.shape
     step = cfg.pixel_step
@@ -116,8 +91,7 @@ def depth_to_scan(
     if mask.any():
         np.minimum.at(ranges, to_bin(x[mask], z[mask]), np.hypot(x[mask], z[mask]))
 
-    # Bins with no valid pixel at all (sparse image, bad depth) tell us
-    # nothing. Interpolate them instead of calling them free.
+    # bins with no valid pixel tell us nothing: interpolate rather than call them free
     valid = z > 0.05
     covered = np.zeros(cfg.num_bins, dtype=bool)
     covered[to_bin(x[valid], z[valid])] = True
@@ -165,8 +139,7 @@ class DepthGapFollower:
             r[max(0, nearest - bubble): nearest + bubble + 1] = 0.0
         free = r >= c.min_gap_range
 
-        # Best gap is the largest visible free area (sum of ranges), not the
-        # widest run. Otherwise a nearby obstacle face can beat real open space.
+        # best gap = largest free area (sum of ranges), not widest run, so a near wall can't win
         best_start, best_len, best_score, start = 0, 0, 0.0, None
         for i, f in enumerate(np.append(free, False)):
             if f and start is None:

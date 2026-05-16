@@ -1,9 +1,4 @@
-"""
-Checkpoint lookup for rl/checkpoints/PPO_N run directories, shared by
-rl/train.py and rl/export_onnx.py.
-
-Files per run: ppo_track_<step>_steps.zip + vec_normalize_<step>.pkl from the
-periodic callbacks, ppo_track_final.zip + vec_normalize.pkl at the end.
+"""Checkpoint lookup for rl/checkpoints/PPO_N run dirs (shared by train.py and export_onnx.py).
 """
 
 from __future__ import annotations

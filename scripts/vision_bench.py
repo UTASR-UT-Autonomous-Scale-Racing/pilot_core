@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""
-Compare the drivable-track segmentation candidates on size and CPU latency.
+"""Compare the drivable-track segmentation candidates on size and CPU latency.
 
-Each network is exported to ONNX (untrained weights — latency does not depend
-on training) and timed with onnxruntime, the way VisionWorker runs it.  The
-training-free ground_plane segmenter is timed on a depth frame of a flat
-floor.  Accuracy needs labelled data: see scripts/train_vision.py.
+Needs torch and torchvision; run from the repo root.
 
-Usage (needs torch and torchvision; run from the repo root):
     python scripts/vision_bench.py
     python scripts/vision_bench.py --size 360 640 --threads 4
 """

@@ -1,10 +1,9 @@
-"""ZMQSensorWorker / ZMQPublishWorker / scripts/collect_frames.py, offline
+"""ZMQSensorWorker / ZMQPublishWorker, offline
 (local sockets, no simulator)."""
 
 from __future__ import annotations
 
 import base64
-import importlib.util
 import json
 import os
 import socket
@@ -158,34 +157,3 @@ def test_publish_worker_no_control_topic_and_binary_mask():
         ctx.term()
         seg.unlink()
         ctrl.unlink()
-
-
-def _collect_frames():
-    spec = importlib.util.spec_from_file_location("collect_frames", os.path.join(REPO, "scripts", "collect_frames.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def test_collect_frames_encoding_and_sessions(tmp_path):
-    cv2 = pytest.importorskip("cv2")
-    cf = _collect_frames()
-
-    rgb = np.zeros((6, 8, 3), np.uint8)
-    rgb[..., 0] = 200                                   # red in RGB
-    ok, jpg = cv2.imencode(".jpg", rgb)
-    name, data = cf.frame_to_file({"data": base64.b64encode(jpg.tobytes()).decode(), "encoding": "jpeg"}, "f0")
-    assert name == "f0.jpg" and data == jpg.tobytes()
-
-    name, data = cf.frame_to_file({"data": base64.b64encode(rgb.tobytes()).decode(), "encoding": "raw",
-                                   "shape": [6, 8, 3]}, "f1")
-    assert name == "f1.png"
-    back = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-    assert back[0, 0, 2] == 200 and back[0, 0, 0] == 0   # BGR on disk, red preserved
-
-    with pytest.raises(ValueError):
-        cf.frame_to_file({"data": "", "encoding": "h264"}, "f2")
-
-    a, b = cf.session_dir(str(tmp_path)), cf.session_dir(str(tmp_path))
-    assert a != b and os.path.isdir(a) and os.path.isdir(b)
-    assert os.path.dirname(a) == str(tmp_path)

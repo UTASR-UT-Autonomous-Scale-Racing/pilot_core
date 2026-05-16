@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
-"""
-Train a drivable-track segmentation network and export it to ONNX for
-VisionWorker (``vision.model: onnx``).
+"""Train a drivable-track segmentation network and export ONNX for VisionWorker.
 
-The dataset is a folder of camera frames with binary masks (see vision/data.py):
+Data: <data>/images/*.png|jpg and <data>/masks/*.png (non-zero = track). Needs torch, torchvision.
 
-    <data>/images/<name>.png|.jpg
-    <data>/masks/<name>.png          non-zero = drivable track
-
-Usage (needs torch and torchvision; run from the repo root):
     python scripts/train_vision.py --data datasets/track --model fast_scnn
     python scripts/train_vision.py --data datasets/track --model lraspp --pretrained --epochs 60
-    python scripts/train_vision.py --data datasets/track --model unet --size 192 320 --out unet.onnx
-
-A fraction of the images (--val) is held out; the weights with the best
-validation IoU are exported.
 """
 
 from __future__ import annotations

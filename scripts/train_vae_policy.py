@@ -1,22 +1,10 @@
 #!/usr/bin/env python3
-"""
-Train the VAE control model (control/vae.py) on the closed-loop bench, export
-to ONNX for control_mode: vae.
+"""Train the VAE control model (control/vae.py) and export ONNX for control_mode: vae.
 
-Steps:
-  - demos with DART noise from control/imitation.py, or a cached --data file
-    (shared format with train_bc_policy.py)
-  - VAE trained unsupervised on the frames
-  - controller head trained by behaviour cloning on the frozen latent means
-  - export encoder mean -> head as one ONNX graph, plus JSON sidecar
-  - closed-loop eval, map-free, on the held-out oval + twisty tracks
+Needs torch and onnxruntime. Bench-trained models have only seen rendered depth.
 
-Needs torch and onnxruntime:
     python scripts/train_vae_policy.py                    # -> vae_policy.onnx
     python scripts/train_vae_policy.py --tracks 24 --epochs 40 --out models/vae.onnx
-
-This only ever sees rendered depth. To use it on the car, run the same
-pipeline on recorded real depth frames with expert labels.
 """
 
 from __future__ import annotations

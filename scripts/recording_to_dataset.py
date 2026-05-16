@@ -1,39 +1,9 @@
 #!/usr/bin/env python3
 """Turn a recording (start.py --recording) into training datasets.
 
-Frames from the `frame` buffer are paired with the label sample nearest in
-time (produced_ts, time.monotonic() clock) within --tolerance seconds; frames
-without a label that close are dropped.
-
---bc OUT.npz   behaviour-cloning set for scripts/train_bc_policy.py and
-               scripts/train_vae_policy.py (--data OUT.npz):
-                 x (N, 1, 40, 64) float32  depth preprocessed with
-                                           control.imitation.preprocess_depth
-                 y (N, 1) float32          signed steering, +1 = full LEFT
-               plus t (N,) frame timestamps (ignored by the trainers).
-               --label-source picks where steering comes from:
-                 imu      the steering pulse width the Arduino reports in IMU
-                          slot 8 (I2C IMU path, IMUWorker). USE THIS FOR
-                          HAND-DRIVEN LAPS: when you drive with the RC
-                          transmitter nothing goes through ctrl_buf, so the
-                          control buffer holds no driver commands. Pulse
-                          widths map through the `pwm` config section:
-                          unit = (pw - steer_min) / (steer_max - steer_min),
-                          signed = 1 - 2 * unit. Needs the I2C IMU (not the
-                          OAK-D IMU, whose slot 8 is a gyro rate).
-                 control  ctrl_buf values in [0, 1] converted with
-                          workers.control_worker.unit_to_signed, i.e. what the
-                          on-board controller commanded (autonomous runs).
-               Mirrored copies (depth flipped left-right, steering negated)
-               are added unless --no-mirror, like the synthetic demos.
-
---vision DIR   images/ (+ masks/) layout for scripts/train_vision.py
-               (vision/data.py). Masks are not recorded. --bootstrap-masks
-               writes masks from the training-free GroundPlaneSegmenter
-               (RANSAC floor + free space, needs the intrinsics from
-               --camera-settings). THESE ARE AUTO-LABELS: review and fix them
-               before training; DIR/auto_labels.json lists every mask that
-               was generated rather than hand-labelled.
+--bc OUT.npz: x (N,1,40,64) depth, y (N,1) steering (+1 = full left); use
+--label-source imu for hand-driven laps, control for autonomous runs.
+--vision DIR: images/ (+ masks/); --bootstrap-masks writes auto-labels to review.
 
     python scripts/recording_to_dataset.py /tmp/pilot_recordings --bc laps.npz --label-source imu
     python scripts/recording_to_dataset.py /tmp/pilot_recordings --vision track_ds --stride 5 \\

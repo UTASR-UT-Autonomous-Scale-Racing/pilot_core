@@ -1,19 +1,10 @@
 #!/usr/bin/env python3
-"""
-Train the behaviour-cloning model (control/bc.py) on the bench and export it
-to ONNX for control_mode: bc.
+"""Train the behaviour-cloning model (control/bc.py) and export ONNX for control_mode: bc.
 
-Collects expert demos with DART noise via control/imitation.py (or loads a
-cached --data file, same format train_vae_policy.py uses), trains the
-PilotNet-style CNN on the steering labels, exports ONNX + a JSON sidecar, then
-runs closed loop, map-free, on the held-out oval and twisty tracks.
+Needs torch and onnxruntime. Bench-trained models have only seen rendered depth.
 
-Needs torch and onnxruntime.
     python scripts/train_bc_policy.py                          # -> bc_policy.onnx
     python scripts/train_bc_policy.py --data demos.npz --epochs 40
-
-NB: a bench-trained model has only ever seen rendered depth. For the car it
-needs retraining on recorded real depth frames with expert labels.
 """
 
 from __future__ import annotations

@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
 """Read recordings written by BufferRecorderWorker (start.py --recording).
 
-A recording is a directory of <buffer>_<session>_<part>.bin files (see
-workers/buffer_recorder_worker.py for the format). This module iterates their
-records in chronological order, decoded with the typed buffer's decode(), and
-prints a summary: record counts, time span and rates per buffer.
-
     python scripts/read_recording.py /tmp/pilot_recordings
     python scripts/read_recording.py /tmp/pilot_recordings --buffer imu --dump 5
-    python scripts/read_recording.py /tmp/pilot_recordings/frame_1727000000000_0000.bin
-
-As a library:
-
     from scripts.read_recording import iter_records, load_buffer
-    for rec in iter_records("/tmp/pilot_recordings", buffer="control"):
-        steering, throttle = rec.value
 """
 
 from __future__ import annotations

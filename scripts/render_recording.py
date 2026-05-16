@@ -1,25 +1,8 @@
 #!/usr/bin/env python3
-"""
-Render the figures that show what a pipeline run did, straight from a
-recording (start.py --recording). Used for the README images; works the same
-on a recording from the car.
+"""Render README figures (car_view, frames, map, track, timeline, demo.gif) from a recording.
 
     python scripts/render_recording.py /tmp/pilot_recordings/<run> --out docs/images
     python scripts/render_recording.py <run> --out docs/images --truth config_dev_local.yaml
-
-Figures (PNG):
-  car_view.png     one frame: RGB, depth, drivable-track mask, depth Follow-the-Gap scan
-  frames.png       frames sampled across the run (every --stride-th frame)
-  map.png          bird's-eye view: SLAM map points, trajectory, extracted boundaries
-  track.png        the mapped track as the controllers see it (centre line, speed
-                   profile) and a simulated pure-pursuit drive on it
-  timeline.png     commands and speed estimate over the run
-  demo.gif         (--gif) the camera next to the map filling in, over the run
-
---truth <config> (synthetic runs only) reads the synthetic_track section of a
-config, aligns the ground truth to the SLAM frame (each pose is matched to its
-frame by capture timestamp) and adds it to map.png / track.png with error
-numbers. It also prints a Markdown summary for the README.
 """
 
 from __future__ import annotations

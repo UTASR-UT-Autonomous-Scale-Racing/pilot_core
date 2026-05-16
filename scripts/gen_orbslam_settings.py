@@ -1,25 +1,8 @@
 #!/usr/bin/env python3
-"""
-Write an ORB-SLAM3 RGB-D settings file from the attached OAK-D's factory
-calibration, set up to match what CameraWorker actually publishes.
+"""Write an ORB-SLAM3 RGB-D settings file from the attached OAK-D's factory calibration.
 
-The intrinsics are those of the actual CAM_A output CameraWorker requests
-(requestOutput(resolution, enableUndistortion=True)): the script runs that
-output for one frame and reads the frame's ImgTransformation intrinsic
-matrix, which includes the Camera node's resize and crop (default
-ImgResizeMode.CROP: scale to cover, centre crop) and the undistortion. If the
-frame has no valid transformation it falls back to
-calib.getCameraIntrinsics(CAM_A, w, h), whose default keepAspectRatio=True
-does the same scale-to-cover + centre crop, and warns if the two disagree.
-Zero distortion (CameraWorker publishes undistorted frames), RGB order since
-CameraWorker converts from DepthAI's BGR, and DepthMapFactor 1.0 because depth
-is already in metres (CameraWorker divides by 1000). The device id is written
-as Pilot.deviceId; CameraWorker checks it and the intrinsics at startup.
+Intrinsics match CameraWorker's undistorted CAM_A output; rerun if the camera is swapped.
 
-Calibration is per unit, so rerun this if the camera gets swapped. The OAK-D
-has to be plugged in. --config and --output are relative to the repo root.
-
-Usage:
     python scripts/gen_orbslam_settings.py                       # uses config.yaml
     python scripts/gen_orbslam_settings.py --config config_cpu.yaml
     python scripts/gen_orbslam_settings.py -o my_settings.yaml

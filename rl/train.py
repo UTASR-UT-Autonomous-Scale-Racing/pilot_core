@@ -1,33 +1,8 @@
-"""
-PPO training on the AutoDRIVE track env.
+"""PPO training on the AutoDRIVE track env (needs stable-baselines3, autodrive_bridge, sim running).
 
     python rl/train.py                            # new run, auto-numbered PPO_N
-    python rl/train.py --resume PPO_1             # continue from latest checkpoint
     python rl/train.py --resume PPO_1 --step 50000
-    tensorboard --logdir rl/logs/PPO_1            # shows every resume of the run
-
-Merge mode starts a new run using the policy net (plus its VecNormalize stats)
-from one run and the value net from another. --policy-from and --value-from
-have to be given together; the -step flags are optional:
-
-    python rl/train.py --policy-from PPO_5 --value-from PPO_3
-    python rl/train.py --policy-from PPO_5 --policy-step 75000 \
-                       --value-from PPO_3 --value-step 50000
-
-Merge and resume both keep counting timesteps (reset_num_timesteps=False).
---vis-port 5558 streams the observed boundary points to rl/vis_obs_ros2.py.
-The actuator in the env runs the same SafetySupervisor limits as the car,
-read from --pilot-config (default config_zmq.yaml; defaults if missing).
-
-Checkpoints (zips, VecNormalize pkls, config.json) land in
-rl/checkpoints/PPO_N/, logs in rl/logs/PPO_N/run_K/. Use rl/export_onnx.py to
-get something the car can run.
-
-Needs `pip install stable-baselines3 tensorboard`, plus: autodrive_bridge
-up in Docker (sensors :5555, control :5556), the sim open with the vehicle in
-Autonomous mode, and BOUNDARY_PATH/{outer,inner}_line.npy. Those come from a
-mapping run with config_zmq.yaml (see mapping.boundary_save_path);
-default path is rl/boundaries_easy.
+    python rl/train.py --policy-from PPO_5 --value-from PPO_3   # merge nets
 """
 
 import argparse
@@ -69,8 +44,6 @@ ENV_KWARGS = dict(
     policy_hz              = 20.0,
 )
 
-# To try the 1D CNN: `from rl.extractors import TrackCNNExtractor` and add
-# features_extractor_class=TrackCNNExtractor, features_extractor_kwargs=dict(n_ahead=...)
 POLICY_KWARGS = dict(
     net_arch=dict(
         pi=[256, 256],        # this is what gets exported to ONNX
@@ -211,8 +184,8 @@ def safety_from_pilot_config(path: str | None) -> dict:
 
 
 def resolve_env_kwargs(base: dict[str, Any], safety: dict) -> dict[str, Any]:
-    """Env kwargs to build (and save) the env with: vis port stripped (it's a
-    runtime flag), safety filled in if the saved config predates it."""
+    """Env kwargs to build (and save) the env with, safety filled in if the
+    saved config predates it (older runs also saved a vis_zmq_port)."""
     kwargs = {k: v for k, v in base.items() if k != "vis_zmq_port"}
     if kwargs.get("safety") is None:
         kwargs["safety"] = dict(safety)
@@ -298,10 +271,10 @@ def load_resumed_model(model_path: str, env, tensorboard_log: str | None = None)
     return model
 
 
-def make_env(env_kwargs: dict[str, Any], vis_port: int | None = None):
+def make_env(env_kwargs: dict[str, Any]):
     from rl.track_env import TrackEnv
 
-    env = TrackEnv(**env_kwargs, vis_zmq_port=vis_port)
+    env = TrackEnv(**env_kwargs)
     env.start()
     env.load_boundaries_from_path(BOUNDARY_PATH)
     return env
@@ -321,8 +294,6 @@ def main() -> None:
                         help="Run to take value network weights from, e.g. PPO_2")
     parser.add_argument("--value-step",  metavar="N", type=int, dest="value_step",  default=None,
                         help="Step to use from --value-from (default: latest)")
-    parser.add_argument("--vis-port", type=int, default=None, dest="vis_port",
-                        help="Stream observed boundary points for rl/vis_obs_ros2.py on this port (e.g. 5558)")
     parser.add_argument("--pilot-config", default=os.path.join(REPO_ROOT, "config_zmq.yaml"),
                         dest="pilot_config",
                         help="pilot config whose `safety` section the env's actuator uses (default: config_zmq.yaml)")
@@ -371,7 +342,7 @@ def main() -> None:
         print(f"  value  weights : {args.value_from}  / {os.path.basename(val_model_path)}")
 
         print("Starting environment...")
-        raw_env = Monitor(make_env(env_kwargs_to_use, args.vis_port), filename=os.path.join(log_path, "monitor"))
+        raw_env = Monitor(make_env(env_kwargs_to_use), filename=os.path.join(log_path, "monitor"))
         env = DummyVecEnv([lambda: raw_env])
         # VecNormalize comes from the policy side, obs stats belong with the policy
         env = VecNormalize.load(pol_vec_path, env)
@@ -409,7 +380,7 @@ def main() -> None:
         os.makedirs(log_path, exist_ok=True)
 
         print("Starting environment...")
-        raw_env = Monitor(make_env(env_kwargs_to_use, args.vis_port), filename=os.path.join(log_path, "monitor"))
+        raw_env = Monitor(make_env(env_kwargs_to_use), filename=os.path.join(log_path, "monitor"))
         env = DummyVecEnv([lambda: raw_env])
         env = VecNormalize.load(vec_path, env)
         env.training   = True
@@ -434,7 +405,7 @@ def main() -> None:
         print(f"Starting new run: {run_name}")
 
         print("Starting environment...")
-        raw_env = Monitor(make_env(env_kwargs_to_use, args.vis_port), filename=os.path.join(log_path, "monitor"))
+        raw_env = Monitor(make_env(env_kwargs_to_use), filename=os.path.join(log_path, "monitor"))
         env = DummyVecEnv([lambda: raw_env])
         env = VecNormalize(
             env,

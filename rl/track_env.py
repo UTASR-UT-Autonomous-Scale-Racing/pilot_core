@@ -1,39 +1,11 @@
-"""
-Gymnasium env for RL training against the AutoDRIVE simulator.
+"""Gymnasium env for RL training against the AutoDRIVE simulator.
 
-Usage: construct TrackEnv (this creates the shared buffers but doesn't start
-any workers), call env.start() to spawn ZMQSensorWorker + ActuatorWorker,
-then load_boundaries_from_path("rl/boundaries") or load_boundaries(outer,
-inner). After that it's a normal reset()/step() loop. close() stops the
-workers and frees the shared memory. The multiprocessing start method is the
-caller's business (rl/train.py sets "spawn").
-
-Observation, (n_ahead+1)*4 + 1 floats in the vehicle-local frame, built by
-control/boundary.py exactly like control/policy.py does on the car:
-    outer[0..n_ahead] (x, y)   closest point + n_ahead ahead
-    inner[0..n_ahead] (x, y)
-    speed (m/s)
-
-Action is [steering in -1..1, throttle in 0..1]. It goes through the same
-ActuatorWorker + SafetySupervisor as on the car (same SafetyConfig, and a
-StateBuffer fed with the sim's speed so the speed-cap taper is active).
-
-Reward per step:
-    +0.5 * speed
-    +2 per checkpoint, +2 on finishing a lap
-    -20 on collision or getting stuck
-    -0.1 / max(d_wall, 0.05), d_wall = distance to the nearest boundary (m)
-
-Episode ends (terminated) on a wall hit, a completed lap, or being stuck
-(< 0.1 m/s for 10 steps in a row, not counted during the first stuck_grace_s
-after a reset). The collision counter comes from the sim over ZMQ.
-Truncation happens at max_steps (scaled by policy_hz / 10), or when the pose
-stream stalls for longer than stale_timeout (info["stale_pose"] = True).
+TrackEnv() -> env.start() -> load_boundaries_from_path(...) -> reset()/step(); close() frees shm.
+Obs: (n_ahead+1)*4 outer/inner boundary points (vehicle frame) + speed. Action: [steer -1..1, throttle 0..1].
 """
 
 from __future__ import annotations
 
-import json
 import multiprocessing as mp
 import os
 import time
@@ -48,7 +20,7 @@ try:
 except ImportError:
     raise ImportError("gymnasium is required: pip install gymnasium")
 
-from control.boundary import boundary_window, obs_dim, prepare_boundary, track_observation
+from control.boundary import obs_dim, prepare_boundary, track_observation
 from control.safety import SafetyConfig
 from shared_buffer import ControlBuffer, PoseBuffer, StateBuffer
 from workers import ActuatorWorker, ZMQSensorWorker
@@ -62,40 +34,14 @@ _BEV_A0, _BEV_A1 = 0, 1
 class TrackEnv(gym.Env):
     """AutoDRIVE sim over ZMQ, as a Gymnasium env.
 
-    Parameters
-    ----------
-    zmq_host, zmq_sensor_port, zmq_control_port
-        Where the autodrive_bridge is. Sensor data comes in on 5555,
-        controls go out on 5556 by default.
-    boundary_spacing : float
-        Resample spacing along the boundary polylines, metres.
-    boundary_smooth_window : int
-        Moving-average window (in points) applied before resampling.
-    n_ahead : int
-        Boundary points ahead of the closest one to put in the obs, so each
-        side contributes n_ahead + 1 points.
-    max_steps : int
-        Episode length in 10 Hz steps. The real limit is
-        max_steps * policy_hz / 10, which keeps episode duration in seconds
-        the same whatever policy_hz is.
-    policy_hz : float
-        After each action the env sleeps 1/policy_hz and then waits for a
-        pose newer than the last one.
-    vis_zmq_port : int or None
-        PUSH socket streaming the observed boundary points to
-        rl/vis_obs_ros2.py. None (default) turns it off.
-    safety : dict or None
-        SafetyConfig overrides for the actuator, same as the car's
-        ``safety`` config section. None = SafetyConfig defaults.
-    shm_prefix : str or None
-        Prefix for this env's shared-memory names; a random one by default
-        so several envs (or a crashed run's leftovers) don't collide.
-    stale_timeout : float
-        Seconds without a new pose before step() truncates the episode.
-    reset_timeout : float
-        Seconds reset() waits for the reset to be sent and a fresh pose.
-    stuck_grace_s : float
-        Seconds after reset during which low speed doesn't count as stuck.
+    zmq_host/zmq_sensor_port/zmq_control_port: autodrive_bridge (5555 in, 5556 out).
+    boundary_spacing (m), boundary_smooth_window (points): boundary resampling.
+    n_ahead: boundary points ahead of the closest one per side in the obs.
+    max_steps: episode length in 10 Hz steps (scaled by policy_hz / 10).
+    policy_hz: action rate; step() sleeps 1/policy_hz then waits for a new pose.
+    safety: SafetyConfig overrides (car's ``safety`` section), None = defaults.
+    shm_prefix: shared-memory name prefix, random by default.
+    stale_timeout / reset_timeout / stuck_grace_s: seconds.
     """
 
     metadata = {"render_modes": []}
@@ -110,7 +56,6 @@ class TrackEnv(gym.Env):
         n_ahead: int = 10,
         max_steps: int = 2000,
         policy_hz: float = 10.0,
-        vis_zmq_port: Optional[int] = None,
         safety: Optional[dict] = None,
         shm_prefix: Optional[str] = None,
         stale_timeout: float = 0.5,
@@ -130,15 +75,6 @@ class TrackEnv(gym.Env):
         self._stuck_grace = int(round(stuck_grace_s * policy_hz))
         # full SafetyConfig, so it can be recorded next to the model
         self.safety = asdict(SafetyConfig(**(safety or {})))
-
-        # optional: stream obs to RViz
-        self._vis_sock = None
-        if vis_zmq_port is not None:
-            import zmq
-            self._vis_sock = zmq.Context.instance().socket(zmq.PUSH)
-            self._vis_sock.setsockopt(zmq.SNDHWM, 1)
-            self._vis_sock.setsockopt(zmq.LINGER, 0)
-            self._vis_sock.bind(f"tcp://*:{vis_zmq_port}")
 
         # buffers are created here, the workers attach to them
         prefix = shm_prefix or f"rl_{uuid.uuid4().hex[:8]}"
@@ -368,9 +304,6 @@ class TrackEnv(gym.Env):
                 p.terminate()
                 p.join(timeout=1.0)
         self._processes.clear()
-        if self._vis_sock is not None:
-            self._vis_sock.close(linger=0)
-            self._vis_sock = None
         for buf in self._buffers:
             try:
                 buf.unlink()
@@ -405,18 +338,6 @@ class TrackEnv(gym.Env):
 
     def _build_obs(self, pos: np.ndarray, heading: float, speed: float) -> np.ndarray:
         assert self._outer is not None and self._inner is not None
-
-        if self._vis_sock is not None:
-            import zmq
-            msg = json.dumps({
-                "pos": pos.tolist(),
-                "outer": boundary_window(self._outer, pos, self._n_ahead).tolist(),
-                "inner": boundary_window(self._inner, pos, self._n_ahead).tolist(),
-            })
-            try:
-                self._vis_sock.send_string(msg, flags=zmq.NOBLOCK)
-            except zmq.Again:
-                pass  # nobody listening yet, drop it
 
         obs = track_observation(pos, heading, speed, self._outer, self._inner, self._n_ahead)
         self._last_obs = obs

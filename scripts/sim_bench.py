@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""
-Closed-loop controller bench, no hardware needed. Runs the track controllers
-on a kinematic bicycle through the same estimator -> controller -> safety chain
-as the car and prints lap / tracking numbers.
+"""Closed-loop controller bench on a kinematic bicycle, no hardware needed.
 
-Usage:
     python scripts/sim_bench.py                          # all controllers, both tracks
-    python scripts/sim_bench.py --summary docs/images/controllers.png   # comparison chart
     python scripts/sim_bench.py --mode stanley --track twisty --duration 90
-    python scripts/sim_bench.py --v-max 1.2 --plot bench.png
-    python scripts/sim_bench.py --mode depth_ftg            # map-free, depth only
+    python scripts/sim_bench.py --summary docs/images/controllers.png
 """
 
 from __future__ import annotations

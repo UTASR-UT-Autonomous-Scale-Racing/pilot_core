@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
-"""
-Export a PPO policy from rl/train.py to ONNX for running on the car
-(control_mode: policy, see control/policy.py).
+"""Export a PPO policy from rl/train.py to ONNX (VecNormalize baked in) plus a JSON sidecar.
 
-The graph bakes in the VecNormalize step, so it's the full deterministic path:
-raw obs -> (obs - mean) / sqrt(var + eps), clipped -> mean action -> clip to
-the action space. A <out>.json sidecar next to it records the obs settings
-(n_ahead, boundary spacing/smoothing), the policy rate (policy_hz) and the
-SafetyConfig the training env's actuator ran with.
-
-Usage:
     python rl/export_onnx.py --run PPO_3   # latest checkpoint of that run
     python rl/export_onnx.py --model path/model.zip --vecnormalize path/vec.pkl \\
         --config path/config.json --out policy.onnx
@@ -97,9 +88,6 @@ def main() -> int:
     ap.add_argument("--out", default="policy.onnx", help="output ONNX path (default: policy.onnx)")
     args = ap.parse_args()
 
-    # registers TrackCNNExtractor for the unpickler, without importing train.py
-    import importlib
-    importlib.import_module("rl.extractors")
     from rl.checkpoints import find_checkpoint
 
     if args.run:

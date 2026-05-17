@@ -1,15 +1,10 @@
 # SLAM (ORB-SLAM3)
 
-`SLAMWorker` runs ORB-SLAM3 in RGB-D mode through the pybind11 bindings in
-`orbslam3_wrapper/`. It publishes camera-to-world poses to `pose_buf` while tracking
-is good, and the map's point cloud for `MappingWorker`. Enable it with `--enable-slam`
-(or `enable_slam: true`).
+`SLAMWorker` runs ORB-SLAM3 RGB-D through `orbslam3_wrapper/` (`--enable-slam`).
 
 ## Build
 
-Allow about 30 minutes on a 4-core CPU. The build outputs (`ORB_SLAM3/lib/`,
-`orbslam3_python*.so`) are git-ignored and must be built on each machine.
-
+About 30 minutes on 4 cores; outputs are git-ignored and built per machine.
 System packages (Ubuntu 22.04):
 
 ```bash
@@ -40,75 +35,28 @@ cd ../../orbslam3_wrapper && mkdir -p build && cd build
 cmake .. -Dpybind11_DIR=$(pybind11-config --cmakedir) -DCMAKE_BUILD_TYPE=Release && make -j3
 ```
 
-Check it:
-
-```bash
-python -c "import orbslam3_python; print('ok')"
-```
-
-The wrapper is built with an RPATH to `ORB_SLAM3/lib` and its third-party libraries, so
-`LD_LIBRARY_PATH` is not needed (`scripts/run.sh` still sets it, which does no harm).
-Without the build, `SLAMWorker` refuses to start unless the run is synthetic, where it
-falls back to a stub that publishes identity poses.
-
-```bash
-scripts/run.sh --config config_cpu.yaml --enable-slam
-```
+Check with `python -c "import orbslam3_python"`. The wrapper has an RPATH to the
+ORB-SLAM3 libraries, so `LD_LIBRARY_PATH` isn't needed. Without the build SLAM only
+runs as an identity-pose stub in synthetic runs.
 
 ## Camera settings
 
-ORB-SLAM3 needs the camera intrinsics at the resolution `CameraWorker` publishes.
-`orbslam_oakd_rgbd.yaml` is generated from the connected OAK-D's factory calibration.
-Calibration is per unit, so regenerate it whenever the camera is changed:
+`orbslam_oakd_rgbd.yaml` holds the intrinsics of one OAK-D unit; regenerate it when
+the camera changes. `CameraWorker` warns if the connected camera doesn't match.
 
 ```bash
 python scripts/gen_orbslam_settings.py --config config.yaml
 ```
 
-The generated file matches what `CameraWorker` sends: undistorted RGB frames, RGB channel
-order, depth in metres (`DepthMapFactor: 1.0`). It records the camera's device id
-(`Pilot.deviceId`); `CameraWorker` warns at startup if the connected camera or its
-intrinsics differ from the file by more than 2%.
-
-## World frame and timestamps
-
-ORB-SLAM3's world frame is the first camera frame, which is pitched toward the floor.
-During the first frames `SLAMWorker` fits the floor plane in the depth image (keep the
-car still on the floor while it starts) and from then on publishes poses and map points
-in a levelled frame: same origin, Y down, the floor parallel to the BEV plane. It logs
-the fitted pitch, roll and camera height. Set the measured height in
-`depth_ftg.camera_height`, which mapping uses too.
-
-Poses carry the capture time of the frame they came from, so the state estimator
-works with the true measurement time.
-
-If ORB-SLAM3 loses the map and starts a new one, `SLAMWorker` signals a map reset.
-While mapping, `MappingWorker` drops everything recorded and the lap has to be driven
-again; in localization mode, poses are withheld until SLAM relocalises in the mapped map.
-
 ## Mapping lap
 
-1. Start with `--enable-slam` and drive one lap of the track by hand.
-2. Press `l` in the terminal when the lap is complete (or wait for ORB-SLAM3 to detect
-   the loop closure).
-3. `MappingWorker` takes the loop-corrected keyframe trajectory and trims it to one lap.
-   It keeps map points in a height band above the floor plane, which it fits to the
-   map itself, and within `mapping.max_track_half_width` of the driven line. It works
-   out the lap direction from the trajectory, so clockwise laps work too. Along the lap
-   it places each wall at the nearest dense layer of points, which ignores stray points
-   in front of the wall and anything behind it, then publishes the boundaries. SLAM
-   switches to localization-only mode, and you can arm with `a`.
+1. Start with `--enable-slam` and keep the car still on the floor for a second:
+   SLAM fits the floor plane and publishes in a levelled frame (it logs the camera
+   pitch and height; put the height in `depth_ftg.camera_height`).
+2. Drive one lap by hand (disarmed, RC transmitter).
+3. ORB-SLAM3 closes the loop (or press `l`). After its global bundle adjustment,
+   `MappingWorker` extracts the boundaries, SLAM switches to localization and you can
+   arm with `a`.
 
-A loop is signalled once ORB-SLAM3's global bundle adjustment after the loop closure
-has finished, so the boundaries come from the optimised map. On the dev simulator the
-extracted walls are within 1.2 cm (median) of the true walls
-([README](../README.md#a-full-run-in-the-dev-simulator)).
-
-## Tips
-
-- The first frames after the camera starts have sparse depth, so `SLAMWorker` skips
-  `slam.warmup_frames` (default 15) before initialising.
-- Tracking needs texture. A blank wall or a close, featureless scene makes ORB-SLAM3
-  lose tracking and re-initialise repeatedly.
-- While tracking is lost no poses are published, so the state estimate goes stale and
-  the watchdog brings the car to neutral (or the `depth_ftg` fallback takes over, if enabled).
+If SLAM starts a new map mid-lap, mapping starts over. Tracking needs texture; while
+it is lost no poses are published and the watchdog stops the car.

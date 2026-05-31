@@ -113,6 +113,7 @@ class SLAMWorker(BaseWorker):
         self._slam = None
         self._last_seq = 0
         self._frame_count = 0
+        self._track_ms: list = []    # track_rgbd time since the last status line
         self._loop_event: Optional[mp.Event] = None
         self._localize_event: Optional[mp.Event] = None
         self._map_reset_event: Optional[mp.Event] = None
@@ -314,7 +315,9 @@ class SLAMWorker(BaseWorker):
                 f"nonzero_pct={100*len(nonzero)/(depth.size):.1f}%"
             )
 
+        t0 = time.perf_counter()
         Tcw = self._slam.track_rgbd(rgb, depth, ts)
+        self._track_ms.append(1e3 * (time.perf_counter() - t0))
         state = self._slam.get_tracking_state()
         tracking_ok = state == _TRACKING_OK
         if tracking_ok != self._tracking_ok:
@@ -338,9 +341,11 @@ class SLAMWorker(BaseWorker):
                 f"SLAM state={_STATE_NAMES.get(state, state)} "
                 f"pos=({tx:.3f},{ty:.3f},{tz:.3f}) "
                 f"dist={math.sqrt(tx * tx + ty * ty + tz * tz):.3f}m "
-                f"map={self._map_key} frames={self._frame_count}"
+                f"map={self._map_key} frames={self._frame_count} "
+                f"track={np.mean(self._track_ms):.1f}ms"
                 + ("" if level_ok else " (fitting floor, poses held)")
             )
+            self._track_ms.clear()
 
         # periodic publish too, otherwise MappingWorker has no points until a loop
         map_changed = self._slam.map_changed()

@@ -35,6 +35,20 @@ cd ../../orbslam3_wrapper && mkdir -p build && cd build
 cmake .. -Dpybind11_DIR=$(pybind11-config --cmakedir) -DCMAKE_BUILD_TYPE=Release && make -j3
 ```
 
+On a machine with an NVIDIA GPU, build ORB-SLAM3 with CUDA (the `feature/cuda-orb-extraction-stereo` branch of the
+ORB_SLAM3 fork; see its README): pyramid, ORB extraction and stereo matching run on the GPU.
+
+```bash
+cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+         -DCMAKE_CUDA_ARCHITECTURES=87      # Jetson Orin; 89 for an RTX 40xx
+```
+
+It is used automatically; `ORB_SLAM3_CUDA=0` switches back to the CPU. `SLAMWorker` logs
+the mean tracking time every 30 frames, and `scripts/slam_replay.py` replays a TUM RGB-D
+sequence through it (tracking time and ATE). On an RTX 4080 / i7-13700, RGB-D tracking
+takes 8.0-8.7 ms per frame with CUDA vs 12.3-13.1 ms on the CPU at the same accuracy
+(TUM fr1_xyz / fr1_desk), and the dev-simulator pipeline's SLAM 9.3 ms vs 14.0 ms.
+
 Check with `python -c "import orbslam3_python"`. The wrapper has an RPATH to the
 ORB-SLAM3 libraries, so `LD_LIBRARY_PATH` isn't needed. Without the build SLAM only
 runs as an identity-pose stub in synthetic runs.

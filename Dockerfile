@@ -73,6 +73,7 @@ RUN cd /app/pilot_core/ORB_SLAM3 \
     && cmake --build Thirdparty/g2o/build -j3 \
     && (cd Vocabulary && tar xf ORBvoc.txt.tar.gz) \
     && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+         -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=87 \
     && cmake --build build -j3 --target ORB_SLAM3
 
 # pybind11 wrapper; writes orbslam3_python*.so to /app/pilot_core (repo root)

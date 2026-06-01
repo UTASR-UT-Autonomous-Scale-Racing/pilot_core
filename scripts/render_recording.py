@@ -3,6 +3,7 @@
 
     python scripts/render_recording.py /tmp/pilot_recordings/<run> --out docs/images
     python scripts/render_recording.py <run> --out docs/images --truth config_dev_local.yaml
+    python scripts/render_recording.py <run> --out out --config config_autodrive.yaml   # sim (Z-up) axes
 """
 
 from __future__ import annotations
@@ -41,9 +42,16 @@ plt.rcParams.update({
 })
 
 
+# ground-plane axes of the pose / map frame and the body's forward axis: ORB-SLAM3's
+# camera frame by default (x right, y down, z forward); --config reads mapping.bev_axes /
+# forward_axis (the AutoDRIVE sim is Z-up: [0, 1], forward 0)
+BEV_AXES = [0, 2]
+FORWARD_AXIS = 2
+
+
 def _bev(points3d: np.ndarray) -> np.ndarray:
-    """Camera/world (x right, y down, z forward) -> BEV (x, z)."""
-    return np.asarray(points3d)[:, [0, 2]]
+    """Map / world points -> BEV (BEV_AXES)."""
+    return np.asarray(points3d)[:, BEV_AXES]
 
 
 def _save(fig, out_dir: str, name: str) -> None:
@@ -214,7 +222,7 @@ def map_figure(poses, clouds, boundaries, truth, out_dir):
             c = np.vstack([wall, wall[:1]])
             ax.plot(c[:, 0], c[:, 1], color=INK2, lw=1, ls=(0, (4, 3)))
         ax.plot([], [], color=INK2, lw=1, ls=(0, (4, 3)), label="true walls")
-    traj = np.array([r.value[0][[0, 2], 3] for r in poses]) if poses else np.zeros((0, 2))
+    traj = np.array([r.value[0][BEV_AXES, 3] for r in poses]) if poses else np.zeros((0, 2))
     if len(traj):
         ax.plot(traj[:, 0], traj[:, 1], color=AQUA, lw=2, label="SLAM trajectory")
         ax.text(traj[0, 0] + 0.1, traj[0, 1] - 0.25, "start", color=INK, fontsize=8)
@@ -226,7 +234,7 @@ def map_figure(poses, clouds, boundaries, truth, out_dir):
             ax.plot(c[:, 0], c[:, 1], color=color, lw=2.2, label=f"extracted {name}")
     ax.set_aspect("equal")
     ax.set_xlabel("x (m)")
-    ax.set_ylabel("z (m), forward at start")
+    ax.set_ylabel("z (m), forward at start" if BEV_AXES == [0, 2] else "y (m)")
     title = "Track mapping: ORB-SLAM3 map, driven lap and extracted boundaries"
     if truth is not None and boundaries:
         eo, ei = truth.wall_error(*boundaries[-1].value)
@@ -329,8 +337,8 @@ def demo_gif(frames, poses, clouds, boundaries, controls, out_dir, t0, n=60, fps
     from workers.control_worker import unit_to_signed
 
     pose_ts = np.array([r.produced_ts for r in poses])
-    traj = np.array([r.value[0][[0, 2], 3] for r in poses])
-    fwd = np.array([r.value[0][[0, 2], 2] for r in poses])
+    traj = np.array([r.value[0][BEV_AXES, 3] for r in poses])
+    fwd = np.array([r.value[0][BEV_AXES, FORWARD_AXIS] for r in poses])
     cloud_ts = np.array([r.produced_ts for r in clouds]) if clouds else np.array([])
     bnd_t = boundaries[-1].produced_ts if boundaries else np.inf
     ctrl_ts = np.array([r.produced_ts for r in controls]) if controls else np.array([])
@@ -393,7 +401,18 @@ def main() -> int:
                     help="frame sampling for frames.png (default: 8 frames spread over the run)")
     ap.add_argument("--frame", type=int, help="index of the frame for car_view.png (default: middle)")
     ap.add_argument("--gif", action="store_true", help="also write demo.gif (camera + map, animated)")
+    ap.add_argument("--config", help="pilot config of the run: mapping.bev_axes / forward_axis for the BEV")
     args = ap.parse_args()
+    if args.config:
+        import yaml
+
+        from control.types import resolve_path
+
+        with open(resolve_path(args.config)) as f:
+            mapping = (yaml.safe_load(f) or {}).get("mapping", {})
+        BEV_AXES[:] = list(mapping.get("bev_axes", BEV_AXES))
+        global FORWARD_AXIS
+        FORWARD_AXIS = int(mapping.get("forward_axis", FORWARD_AXIS))
     os.makedirs(args.out, exist_ok=True)
 
     load = lambda name: load_buffer(args.recording, name) if _has(args.recording, name) else []

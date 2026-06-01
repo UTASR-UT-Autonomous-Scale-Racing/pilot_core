@@ -115,6 +115,71 @@ class RunResult:
         )
 
 
+def score_trajectory(
+    poses: np.ndarray,
+    outer: np.ndarray,
+    inner: np.ndarray,
+    params: VehicleParams,
+    steering: Optional[np.ndarray] = None,
+    throttle: Optional[np.ndarray] = None,
+    track=None,
+) -> RunResult:
+    """Score a driven trajectory against the true track.
+
+    poses: (N, 3+) rows of t (s), x, y and optionally v (m/s); without v the speed is
+    differenced from the positions. steering / throttle: (N,) signed commands applied at
+    those times (steer-rate RMS; 0 if not given). track: a TrackModel of outer/inner to
+    reuse. Laps count arc length driven along the track direction, so the start can be
+    anywhere on it."""
+    from .track import TrackModel
+
+    poses = np.asarray(poses, dtype=np.float64)
+    t, x, y = poses[:, 0], poses[:, 1], poses[:, 2]
+    if poses.shape[1] > 3:
+        v = poses[:, 3]
+    else:
+        v = np.zeros_like(t)
+        if len(t) > 1:
+            v[1:] = np.hypot(np.diff(x), np.diff(y)) / np.maximum(np.diff(t), 1e-6)
+    track = track if track is not None else TrackModel(outer, inner)
+    steering = np.zeros_like(t) if steering is None else np.asarray(steering, dtype=np.float64)
+    throttle = np.zeros_like(t) if throttle is None else np.asarray(throttle, dtype=np.float64)
+
+    e = np.empty_like(t)
+    half = np.empty_like(t)
+    hint = None
+    s_prev = None
+    s_total = 0.0
+    lap_start = t[0] if len(t) else 0.0
+    lap_times: List[float] = []
+    for k in range(len(t)):
+        pr = track.project(x[k], y[k], hint=hint)
+        hint = pr.idx
+        if s_prev is not None:
+            ds = (pr.s - s_prev + track.length / 2) % track.length - track.length / 2
+            s_total += ds
+            if s_total >= track.length * (len(lap_times) + 1):
+                lap_times.append(t[k] - lap_start)
+                lap_start = t[k]
+        s_prev = pr.s
+        e[k] = pr.lateral_error
+        half[k] = track.half_width[pr.idx]
+
+    steer_rate = np.diff(steering) / np.maximum(np.diff(t), 1e-9) if len(t) > 1 else np.zeros(1)
+    log = np.column_stack([t, x, y, v, steering, throttle, e])
+    return RunResult(
+        laps=s_total / track.length,
+        lap_times=lap_times,
+        xtrack_rms=float(np.sqrt(np.mean(e ** 2))),
+        xtrack_max=float(np.max(np.abs(e))),
+        off_track_fraction=float(np.mean(np.abs(e) > half - params.width / 2)),
+        mean_speed=float(np.mean(v)),
+        max_speed=float(np.max(v)),
+        steer_rate_rms=float(np.sqrt(np.mean(steer_rate ** 2))),
+        log=log,
+    )
+
+
 def run_closed_loop(
     make_follower: Callable[[np.ndarray, np.ndarray], TrackFollower],
     outer: np.ndarray,
@@ -146,11 +211,6 @@ def run_closed_loop(
     cmd_t: Optional[float] = None
     out = Command()
     rows = []
-    hint = None
-    s_prev = None
-    s_total = 0.0
-    lap_start = 0.0
-    lap_times: List[float] = []
 
     t = 0.0
     while t < duration:
@@ -174,35 +234,12 @@ def run_closed_loop(
         est = ekf.predict_to(t)
         out = sup.step(t, cmd, cmd_t, armed=True, speed=est.v if est else None)
         car.step(out, t, dt)
-
         # scoring uses the true position, not the estimate
-        pr = track.project(car.x, car.y, hint=hint)
-        hint = pr.idx
-        if s_prev is not None:
-            ds = (pr.s - s_prev + track.length / 2) % track.length - track.length / 2
-            s_total += ds
-            if s_total >= track.length * (len(lap_times) + 1):
-                lap_times.append(t - lap_start)
-                lap_start = t
-        s_prev = pr.s
-        rows.append((t, car.x, car.y, car.v, out.steering, out.throttle, pr.lateral_error,
-                     float(track.half_width[pr.idx])))
+        rows.append((t, car.x, car.y, car.v, out.steering, out.throttle))
         t += dt
 
     log = np.array(rows)
-    e = log[:, 6]
-    steer_rate = np.diff(log[:, 4]) / dt
-    return RunResult(
-        laps=s_total / track.length,
-        lap_times=lap_times,
-        xtrack_rms=float(np.sqrt(np.mean(e ** 2))),
-        xtrack_max=float(np.max(np.abs(e))),
-        off_track_fraction=float(np.mean(np.abs(e) > log[:, 7] - params.width / 2)),
-        mean_speed=float(np.mean(log[:, 3])),
-        max_speed=float(np.max(log[:, 3])),
-        steer_rate_rms=float(np.sqrt(np.mean(steer_rate ** 2))),
-        log=log[:, :7],
-    )
+    return score_trajectory(log[:, :4], outer, inner, params, log[:, 4], log[:, 5], track=track)
 
 
 def render_depth(x, y, yaw, walls, K, width, height, cam_height=0.12, wall_height=0.3, max_range=6.0):
@@ -306,5 +343,5 @@ def make_follower_factory(mode: str, params: VehicleParams, lateral_cfg=None, sp
 
 __all__ = [
     "BicyclePlant", "PlantConfig", "RunResult", "oval_track", "twisty_track", "random_track",
-    "run_closed_loop", "run_depth_closed_loop", "render_depth", "make_follower_factory", "VehicleState",
+    "run_closed_loop", "run_depth_closed_loop", "score_trajectory", "render_depth", "make_follower_factory", "VehicleState",
 ]

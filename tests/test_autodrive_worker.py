@@ -110,6 +110,40 @@ def test_sim_message_fills_buffers_with_quaternion_order_and_jpeg():
             b.unlink()
 
 
+_SPAWN_CHECK = """
+import multiprocessing as mp, sys
+mp.set_start_method("spawn", force=True)          # as start.py does
+from shared_buffer import ControlBuffer
+from workers import AutoDRIVEWorker
+
+def check(worker):
+    assert worker.config["port"] == 4567
+
+if __name__ == "__main__":
+    act = ControlBuffer(slots=4, name=sys.argv[1])
+    try:
+        w = AutoDRIVEWorker(port=4567, command_buffer=act, reset_event=mp.Event(), lap_counter=mp.Value("i", 0))
+        p = mp.Process(target=check, args=(w,))
+        p.start()
+        p.join(60)
+        sys.exit(p.exitcode)
+    finally:
+        act.unlink()
+"""
+
+
+def test_worker_survives_spawn(tmp_path):
+    """start.py uses the spawn start method: the worker as built must pickle into a child."""
+    import subprocess
+    import sys
+
+    script = tmp_path / "spawn_check.py"
+    script.write_text(_SPAWN_CHECK)
+    r = subprocess.run([sys.executable, str(script), f"pk_{_uid()}"], cwd=REPO_ROOT, capture_output=True,
+                       text=True, timeout=120, env={**os.environ, "PYTHONPATH": REPO_ROOT})
+    assert r.returncode == 0, r.stderr[-2000:]
+
+
 # wire contract against the fake sim
 
 

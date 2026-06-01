@@ -128,7 +128,7 @@ class AutoDRIVEWorker(ZMQSensorWorker):
         self._server = None
         self._server_thread: Optional[threading.Thread] = None
         self._ws = None
-        self._ws_lock = threading.Lock()
+        self._ws_lock: Optional[threading.Lock] = None   # created in setup(): spawn pickles the worker
         self._cmd_buf = None
         self._cmd_timeout = 0.15
         self._reset_event = None
@@ -150,6 +150,7 @@ class AutoDRIVEWorker(ZMQSensorWorker):
         from websockets.sync.server import serve
 
         cfg = self.config
+        self._ws_lock = threading.Lock()
         self._frame_buf = cfg.get("frame_buffer")
         self._imu_buf = cfg.get("imu_buffer")
         self._pose_buf = cfg.get("pose_buffer")
@@ -206,6 +207,8 @@ class AutoDRIVEWorker(ZMQSensorWorker):
 
     def teardown(self) -> None:
         # last word to the sim is neutral, then stop answering
+        if self._ws_lock is None:      # setup() never ran
+            return
         with self._ws_lock:
             # flag and grab the socket together: the handler drops _ws as soon as it sees _closing
             self._closing = True

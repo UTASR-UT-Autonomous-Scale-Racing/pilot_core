@@ -7,6 +7,7 @@ mapping_done_event. map_reset_event (SLAM world frame changed) drops everything 
 
 from __future__ import annotations
 
+import math
 import multiprocessing as mp
 import time
 from typing import Any, Optional
@@ -286,7 +287,8 @@ class MappingWorker(BaseWorker):
                               lap is closed, so the wall map covers the seam, default 1.0
       jump_threshold          m; a pose step longer than this is a teleport (the sim respawns
                               the car after a wall hit): the trajectory is cut back to the
-                              point nearest the new pose, default 0.4
+                              point nearest the new pose. Default None (off): SLAM poses can
+                              legitimately be sparse
     """
 
     def __init__(self, name: str = "mapping", **kwargs: Any) -> None:
@@ -337,7 +339,8 @@ class MappingWorker(BaseWorker):
         self._auto_loop = bool(c.get("auto_loop_close", False))
         self._auto_loop_min = float(c.get("auto_loop_min_length", 8.0))
         self._auto_loop_overrun = float(c.get("auto_loop_overrun", 1.0))
-        self._jump = float(c.get("jump_threshold", 0.4))
+        jump = c.get("jump_threshold")
+        self._jump = float(jump) if jump is not None else math.inf
         self._path_length = 0.0
         self._path_s: list[float] = []      # arc length at each trajectory point
         self._max_dist_from_start = 0.0

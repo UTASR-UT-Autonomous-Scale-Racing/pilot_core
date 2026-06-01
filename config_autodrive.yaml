@@ -80,6 +80,8 @@ mapping:
   auto_loop_close: true         # end the mapping lap when the car is back at its start
   auto_loop_min_length: 8.0     # m
   lap_close_radius: 0.6         # m
+  auto_loop_overrun: 1.0        # m past the start before the lap is closed (covers the seam)
+  jump_threshold: 0.4           # m; longer pose steps are sim respawns after a wall hit
   boundary_save_path: "maps/autodrive_practice"   # null = don't save
 
 buffers:

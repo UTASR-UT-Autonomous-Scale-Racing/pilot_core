@@ -34,9 +34,8 @@ CHECKPOINT_DIR  = "rl/checkpoints"
 TOTAL_TIMESTEPS = 500_000
 
 ENV_KWARGS = dict(
-    zmq_host               = "localhost",
-    zmq_sensor_port        = 5555,
-    zmq_control_port       = 5556,
+    sim_host               = "0.0.0.0",   # the sim connects to the env (AutoDRIVEWorker)
+    sim_port               = 4567,
     boundary_spacing       = 0.5,   # 20 pts x 0.5 m = 10 m lookahead
     boundary_smooth_window = 30,
     n_ahead                = 20,
@@ -185,8 +184,10 @@ def safety_from_pilot_config(path: str | None) -> dict:
 
 def resolve_env_kwargs(base: dict[str, Any], safety: dict) -> dict[str, Any]:
     """Env kwargs to build (and save) the env with, safety filled in if the
-    saved config predates it (older runs also saved a vis_zmq_port)."""
-    kwargs = {k: v for k, v in base.items() if k != "vis_zmq_port"}
+    saved config predates it (older runs also saved vis_zmq_port and the ZMQ bridge's
+    zmq_* ports, which the direct sim link replaced)."""
+    legacy = ("vis_zmq_port", "zmq_host", "zmq_sensor_port", "zmq_control_port")
+    kwargs = {k: v for k, v in base.items() if k not in legacy}
     if kwargs.get("safety") is None:
         kwargs["safety"] = dict(safety)
     elif kwargs["safety"] != safety:

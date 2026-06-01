@@ -1,4 +1,5 @@
-"""Gymnasium env for RL training against the AutoDRIVE simulator.
+"""Gymnasium env for RL training against the AutoDRIVE simulator (direct link: the sim
+connects to the env's AutoDRIVEWorker on sim_port).
 
 TrackEnv() -> env.start() -> load_boundaries_from_path(...) -> reset()/step(); close() frees shm.
 Obs: (n_ahead+1)*4 outer/inner boundary points (vehicle frame) + speed. Action: [steer -1..1, throttle 0..1].
@@ -23,7 +24,7 @@ except ImportError:
 from control.boundary import obs_dim, prepare_boundary, track_observation
 from control.safety import SafetyConfig
 from shared_buffer import ControlBuffer, PoseBuffer, StateBuffer
-from workers import ActuatorWorker, ZMQSensorWorker
+from workers import ActuatorWorker, AutoDRIVEWorker
 from workers.control_worker import signed_to_unit
 
 # AutoDRIVE world is Z-up, X-forward, Y-left, so the ground plane is pose
@@ -32,9 +33,9 @@ _BEV_A0, _BEV_A1 = 0, 1
 
 
 class TrackEnv(gym.Env):
-    """AutoDRIVE sim over ZMQ, as a Gymnasium env.
+    """AutoDRIVE sim as a Gymnasium env.
 
-    zmq_host/zmq_sensor_port/zmq_control_port: autodrive_bridge (5555 in, 5556 out).
+    sim_host/sim_port: where the env's AutoDRIVEWorker listens for the sim (0.0.0.0:4567).
     boundary_spacing (m), boundary_smooth_window (points): boundary resampling.
     n_ahead: boundary points ahead of the closest one per side in the obs.
     max_steps: episode length in 10 Hz steps (scaled by policy_hz / 10).
@@ -48,9 +49,8 @@ class TrackEnv(gym.Env):
 
     def __init__(
         self,
-        zmq_host: str = "localhost",
-        zmq_sensor_port: int = 5555,
-        zmq_control_port: int = 5556,
+        sim_host: str = "0.0.0.0",
+        sim_port: int = 4567,
         boundary_spacing: float = 0.4,
         boundary_smooth_window: int = 30,
         n_ahead: int = 10,
@@ -80,23 +80,25 @@ class TrackEnv(gym.Env):
         prefix = shm_prefix or f"rl_{uuid.uuid4().hex[:8]}"
         self._pose_buf = PoseBuffer(slots=32, name=f"{prefix}_pose", create=True)
         self._ctrl_buf = ControlBuffer(slots=32, name=f"{prefix}_ctrl", create=True)
-        # speed source for the actuator's speed cap, written by ZMQSensorWorker
+        # supervised command, ActuatorWorker -> AutoDRIVEWorker -> sim
+        self._act_buf = ControlBuffer(slots=32, name=f"{prefix}_act", create=True)
+        # speed source for the actuator's speed cap, written by AutoDRIVEWorker
         self._state_buf = StateBuffer(slots=32, name=f"{prefix}_state", create=True)
-        self._buffers = (self._pose_buf, self._ctrl_buf, self._state_buf)
+        self._buffers = (self._pose_buf, self._ctrl_buf, self._act_buf, self._state_buf)
 
-        # reset() sets this, ActuatorWorker clears it once the reset is sent
+        # reset() sets this, AutoDRIVEWorker clears it once the reset is sent
         self._reset_event = mp.Event()
-        # ZMQSensorWorker mirrors the sim's counters into these
+        # AutoDRIVEWorker mirrors the sim's counters into these
         self._collision_count = mp.Value('i', 0)
         self._lap_count = mp.Value('i', 0)
         self._checkpoint_count = mp.Value('i', 0)
 
         # not started until env.start(). No frame/IMU buffers: the env only
         # needs pose, speed and the counters, so image decoding is skipped
-        self._sensor_worker = ZMQSensorWorker(
-            name="rl_zmq_sensor",
-            host=zmq_host,
-            port=zmq_sensor_port,
+        self._sensor_worker = AutoDRIVEWorker(
+            name="rl_autodrive",
+            host=sim_host,
+            port=sim_port,
             frame_buffer=None,
             imu_buffer=None,
             pose_buffer=self._pose_buf,
@@ -104,13 +106,14 @@ class TrackEnv(gym.Env):
             collision_counter=self._collision_count,
             lap_counter=self._lap_count,
             checkpoint_counter=self._checkpoint_count,
+            command_buffer=self._act_buf,
+            command_timeout=self.safety["command_timeout"],
+            reset_event=self._reset_event,
         )
         self._actuator_worker = ActuatorWorker(
             name="rl_actuator",
             input_buffer=self._ctrl_buf,
-            zmq_enabled=True,
-            zmq_port=zmq_control_port,
-            reset_event=self._reset_event,
+            output_buffer=self._act_buf,
             state_buffer=self._state_buf,
             safety=self.safety,
         )
@@ -180,9 +183,9 @@ class TrackEnv(gym.Env):
         self._ctrl_buf.write(*signed_to_unit(0.0, 0.0))
         self._reset_event.set()
         deadline = time.monotonic() + self._reset_timeout
-        while self._reset_event.is_set():   # ActuatorWorker clears it when sent
+        while self._reset_event.is_set():   # AutoDRIVEWorker clears it when sent
             if time.monotonic() > deadline:
-                raise TimeoutError("ActuatorWorker did not send the reset command (is it running?)")
+                raise TimeoutError("The reset never went out (is the sim connected?)")
             time.sleep(0.01)
         seq_at_reset = self._pose_buf.latest_seq()
 
@@ -219,7 +222,7 @@ class TrackEnv(gym.Env):
         steer_norm, throttle_norm = signed_to_unit(steering, max(throttle, 0.0))
         self._ctrl_buf.write(steer_norm, throttle_norm)
 
-        # ZMQSensorWorker keeps receiving while we sleep
+        # AutoDRIVEWorker keeps receiving while we sleep
         time.sleep(self._policy_dt)
 
         result = self._wait_for_pose(after_seq=self._last_pose_seq,
@@ -259,7 +262,7 @@ class TrackEnv(gym.Env):
         if lap_completed:
             reward += 2.0
 
-        # Collisions come from Unity's WallCollisionCounter over ZMQ. For the
+        # Collisions come from the sim's collision counter. For the
         # first few steps after reset we ignore them, since the previous
         # episode's collision can still show up
         current_collisions = self._collision_count.value

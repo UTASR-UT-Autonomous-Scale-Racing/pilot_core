@@ -96,6 +96,15 @@ def test_autodrive_wiring():
     finally:
         for b in p.buffers:
             b.unlink()
+    # racing on a saved map: no mapping workers, but the scan is still recorded
+    p = _build("config_autodrive.yaml", recording=True, enable_slam=False, use_saved_map=True)
+    try:
+        by = {w.name: w for w in p.workers}
+        assert "mapping" not in by and "lidar_proj" not in by
+        assert "lidar" in by["recorder"].config["buffers"]
+    finally:
+        for b in p.buffers:
+            b.unlink()
 
 
 def test_removed_modes_are_rejected():

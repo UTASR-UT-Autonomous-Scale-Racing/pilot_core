@@ -306,7 +306,8 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             create=True,
         )
         buffers.extend([b for b in [pc_buf, boundary_buf] if b is not None])
-    needs_lidar = (use_zmq or autodrive) and enable_slam and sim_pose
+    # the AutoDRIVE link always fills it (recordings, the mapping drive); ZMQ only for mapping
+    needs_lidar = autodrive or (use_zmq and enable_slam and sim_pose)
     if needs_lidar:
         lidar_buf = LidarBuffer(
             slots=buf_cfg.get("lidar", {}).get("slots", 16),

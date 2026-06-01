@@ -388,9 +388,206 @@ def make_command_gifs(out: str, gif_dir: str) -> list[str]:
     return made
 
 
+def observe_sim(seconds: float = 8.0, frames: int = 5) -> list[dict]:
+    """After pilot_core is gone: listen on :4567 for the sim and return its first telemetry
+    frames. The sim streams only once it has a 'Bridge', so one neutral goes out first;
+    the first frames still show where the car is and how fast it moves."""
+    import socket
+    import threading
+
+    from websockets.sync.server import serve
+
+    import autodrive_sim_ctl as sim_ctl
+    from workers.autodrive_worker import autodrive_to_internal, command_message, yaw_from_quat
+
+    got: list[dict] = []
+
+    def handler(ws):
+        ws.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        ws.send('0{"sid":"observer","upgrades":[],"pingInterval":25000,"pingTimeout":20000}')
+        ws.send("40")
+        ws.send(command_message(0.0, 0.0))
+        for raw in ws:
+            if raw == "2":
+                ws.send("3")
+            elif raw.startswith('42["Bridge"'):
+                msg = json.loads(raw[2:])[1]
+                d = autodrive_to_internal(msg)
+                got.append({"t": time.monotonic(), "x": d["position"][0], "y": d["position"][1],
+                            "yaw": yaw_from_quat(d["orientation_quat"]), "speed": d["speed"],
+                            "echo_throttle": d.get("throttle"), "echo_steering": d.get("steering"),
+                            "collisions": d.get("collision_count"), "sim_time": d.get("lap_time")})
+                if len(got) >= frames:
+                    return
+                ws.send(command_message(0.0, 0.0))
+
+    with serve(handler, "127.0.0.1", 4567, max_size=None) as srv:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        deadline = time.monotonic() + seconds
+        while not got and time.monotonic() < deadline:
+            time.sleep(0.2)
+        if not got:                      # the sim had stopped retrying: toggle it
+            sim_ctl.set_state("disconnected")
+            sim_ctl.set_state("connected")
+            deadline = time.monotonic() + seconds
+            while len(got) < frames and time.monotonic() < deadline:
+                time.sleep(0.1)
+        srv.shutdown()
+    return got
+
+
+def run_kill_checks(out: str, config: str, modes=("term", "kill", "killall"), drive_s: float = 12.0,
+                    wait_s: float = 8.0) -> dict:
+    """2d: pilot_core stopped while the car is racing on the saved map, three ways."""
+    from autodrive_bench import run_pilot
+
+    res = {}
+    for mode in modes:
+        d = os.path.join(out, mode)
+        run = run_pilot(config, d, {"enable_slam": False, "use_saved_map": True}, timeout=120,
+                        stop=mode, drive_s=drive_s)
+        m = load_messages(run["recording_dir"])
+        last = {k: float(m[k][-1]) for k in ("x", "y", "yaw", "speed", "cmd_throttle", "cmd_steering", "t_rx")}
+        time.sleep(wait_s)
+        seen = observe_sim()
+        first = seen[0] if seen else None
+        moved = math.hypot(first["x"] - last["x"], first["y"] - last["y"]) if first else math.nan
+        res[mode] = {
+            "exit_code": run.get("exit_code"), "last_sent": [last["cmd_steering"], last["cmd_throttle"]],
+            "last_pose_seen_by_pilot_core": last, "observer_first_frames": seen,
+            "seconds_between": (first["t"] - last["t_rx"]) if first else None,
+            "moved_m": moved, "collisions_during_gap": (first["collisions"] if first else None),
+            # at rest and no wall hits since: moved_m is then just the braking distance
+            "neutral": bool(first and abs(first["speed"]) < 0.05 and first["collisions"] == 0),
+            "teardown_sent_neutral": _log_has(run["log"], "Sent neutral to the sim"),
+            "video": run.get("video"), "t_stop_video_s": run["t_stop"] - run["video_t0"],
+        }
+        print(mode, {k: v for k, v in res[mode].items() if k in ("neutral", "moved_m", "last_sent",
+                                                                 "teardown_sent_neutral", "exit_code")}, flush=True)
+        # put the car back for the next mode
+        if seen:
+            import autodrive_sim_ctl as sim_ctl
+            sim_ctl.ensure_menu()
+            sim_ctl._click(sim_ctl.RESET_BTN)
+            sim_ctl.close_menu()
+    with open(os.path.join(out, "kill_results.json"), "w") as f:
+        json.dump(res, f, indent=1, default=float)
+    return res
+
+
+def _log_has(path: str, needle: str) -> bool:
+    with open(path, errors="ignore") as f:
+        return needle in f.read()
+
+
+def check_link(rec: str, map_dir: str = "maps/autodrive_practice", sample_k_frame: int = 2) -> dict:
+    """2a from a start.py --recording run: buffer rates against the sim's new-frame rate,
+    pose / yaw against the sim (its own Euler yaw), LiDAR geometry, camera decoding."""
+    from read_recording import load_buffer
+
+    from workers.lidar_projection_worker import _ANGLE_INCREMENT, _ANGLE_MIN, _LIDAR_OFFSET
+
+    m = load_messages(rec)
+    new = m["new_frame"] == 1
+    t_new = m["t_rx"][new]
+    t0, t1 = t_new[0], t_new[-1]
+    sim_rate = (len(t_new) - 1) / (t1 - t0)
+    out: dict = {"sim_new_frames": int(len(t_new)), "span_s": float(t1 - t0), "sim_frame_rate_hz": sim_rate}
+
+    rates = {}
+    bufs = {}
+    for name in ("pose", "lidar", "imu", "frame", "state", "control", "actuation"):
+        recs = [r for r in load_buffer(rec, name) if t0 - 0.05 <= r.produced_ts <= t1 + 0.05]
+        bufs[name] = recs
+        rates[name] = {"records": len(recs), "rate_hz": len(recs) / (t1 - t0)}
+    expect = {"pose": 1.0, "lidar": 1.0, "imu": 1.0, "frame": 1.0 / sample_k_frame}
+    for name, ratio in expect.items():
+        rates[name]["per_sim_frame"] = rates[name]["records"] / len(t_new)
+        rates[name]["expected_per_sim_frame"] = ratio
+    out["buffers"] = rates
+    rates_ok = all(abs(rates[n]["per_sim_frame"] - r) < 0.03 for n, r in expect.items())
+
+    # pose vs the sim: position exactly (same message), yaw against the sim's Euler z
+    pos_err, yaw_err = [], []
+    tn = m["t_rx"][new]
+    for r in bufs["pose"]:
+        k = np.searchsorted(tn, r.produced_ts) - 1        # the message this pose came from
+        if k < 0:
+            continue
+        pose = r.value[0]
+        row = {c: m[c][new][k] for c in ("x", "y", "sim_yaw_euler")}
+        pos_err.append(math.hypot(pose[0, 3] - row["x"], pose[1, 3] - row["y"]))
+        yaw = math.atan2(pose[1, 0], pose[0, 0])
+        yaw_err.append(abs((yaw - row["sim_yaw_euler"] + math.pi) % (2 * math.pi) - math.pi))
+    out["pose_vs_sim"] = {"n": len(pos_err), "max_position_error_m": float(max(pos_err)),
+                          "max_yaw_error_rad": float(max(yaw_err)), "median_yaw_error_rad": float(np.median(yaw_err))}
+    pose_ok = max(pos_err) < 1e-3 and max(yaw_err) < 2e-3
+
+    # LiDAR: ranges at the forward (centre), left (+90 deg) and right (-90 deg) beams vs a
+    # ray-cast of the mapped walls from the same pose; a mirrored or rotated beam order
+    # would swap / misplace them. Plus: scans projected with their pose land on the walls.
+    from tests.fake_autodrive import raycast
+
+    outer = np.load(os.path.join(REPO_ROOT, map_dir, "outer_line.npy"))[:, :2]
+    inner = np.load(os.path.join(REPO_ROOT, map_dir, "inner_line.npy"))[:, :2]
+    walls = np.vstack([outer, inner])
+    pose_ts = np.array([r.produced_ts for r in bufs["pose"]])
+    ang = _ANGLE_MIN + np.arange(1080) * _ANGLE_INCREMENT
+    beams = {"forward": 540, "left": 900, "right": 180}
+    err = {"as_is": {b: [] for b in beams}, "mirrored": {b: [] for b in beams}}
+    on_wall = []
+    for r in bufs["lidar"][:: max(1, len(bufs["lidar"]) // 80)]:
+        k = np.searchsorted(pose_ts, r.produced_ts + 1e-4) - 1
+        if k < 0:
+            continue
+        pose = bufs["pose"][k].value[0]
+        yaw = math.atan2(pose[1, 0], pose[0, 0])
+        lx, ly = pose[:2, 3] + _LIDAR_OFFSET[0] * np.array([math.cos(yaw), math.sin(yaw)])
+        expected = raycast(lx, ly, yaw, [outer, inner])        # 1081 beams, same angles
+        ranges = r.value
+        for b, i in beams.items():
+            mirrored_i = 1079 - i
+            for v, j in (("as_is", i), ("mirrored", mirrored_i)):
+                if np.isfinite(ranges[j]) and np.isfinite(expected[i]) and expected[i] < 4.0:
+                    err[v][b].append(abs(float(ranges[j]) - float(expected[i])))
+        ok = np.isfinite(ranges) & (ranges > 0.1) & (ranges < 4.0)
+        pts = np.column_stack([ranges[ok] * np.cos(ang[ok]) + _LIDAR_OFFSET[0], ranges[ok] * np.sin(ang[ok])])
+        pts_w = pts @ pose[:2, :2].T + pose[:2, 3]
+        d = np.min(np.hypot(pts_w[:, None, 0] - walls[None, :, 0], pts_w[:, None, 1] - walls[None, :, 1]), axis=1)
+        on_wall.append(float(np.mean(d < 0.10)))
+    lidar_beams = {len(r.value) for r in bufs["lidar"]}
+    out["lidar"] = {
+        "beams_in_buffer": sorted(lidar_beams), "scans_checked": len(on_wall),
+        "fraction_of_points_within_10cm_of_mapped_walls": float(np.median(on_wall)) if on_wall else None,
+        **{f"median_abs_error_m_{v}_{b}": (float(np.median(e)) if e else None)
+           for v, per in err.items() for b, e in per.items()},
+    }
+    L = out["lidar"]
+    lidar_ok = (lidar_beams == {1080} and all(L[f"median_abs_error_m_as_is_{b}"] is not None
+                                              and L[f"median_abs_error_m_as_is_{b}"] < 0.10 for b in beams)
+                and L["median_abs_error_m_mirrored_left"] > 2 * L["median_abs_error_m_as_is_left"]
+                and L["fraction_of_points_within_10cm_of_mapped_walls"] > 0.8)
+
+    # camera: decoded JPEGs, real images (not blank)
+    shapes = {tuple(r.value[0].shape) for r in bufs["frame"]}
+    stds = [float(r.value[0].std()) for r in bufs["frame"][:: max(1, len(bufs["frame"]) // 20)]]
+    out["camera"] = {"frames": len(bufs["frame"]), "shapes": sorted(shapes), "min_pixel_std": min(stds) if stds else None}
+    cam_ok = shapes == {(108, 192, 3)} and stds and min(stds) > 5
+    if bufs["frame"]:
+        import cv2
+        mid = bufs["frame"][len(bufs["frame"]) // 2].value[0]
+        cv2.imwrite(os.path.join(rec, "camera_frame.png"),
+                    cv2.cvtColor(mid, cv2.COLOR_RGB2BGR))
+
+    out["checks"] = {"rates": bool(rates_ok), "pose": bool(pose_ok), "lidar": bool(lidar_ok), "camera": bool(cam_ok)}
+    out["pass"] = all(out["checks"].values())
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("what", choices=["commands", "rescore", "gifs", "calibrate"])
+    ap.add_argument("what", choices=["commands", "rescore", "gifs", "kill", "link", "calibrate"])
+    ap.add_argument("--rec", help="recording dir (link)")
     ap.add_argument("--gif-dir", default="/workspaces/proof/gifs")
     ap.add_argument("--out", required=True)
     ap.add_argument("--config", default="config_autodrive.yaml")
@@ -400,6 +597,18 @@ def main() -> int:
     os.environ.setdefault("DISPLAY", ":99")
     if a.what == "commands":
         res = run_commands(a.out, a.config)
+    elif a.what == "link":
+        res = check_link(a.rec, a.map)
+        os.makedirs(a.out, exist_ok=True)
+        with open(os.path.join(a.out, "link_results.json"), "w") as f:
+            json.dump(res, f, indent=1, default=float)
+        print(json.dumps(res, indent=1, default=float))
+        return 0
+    elif a.what == "kill":
+        res = run_kill_checks(a.out, a.config)
+        print(json.dumps({k: {kk: v[kk] for kk in ("neutral", "moved_m", "exit_code")} for k, v in res.items()},
+                         indent=1, default=float))
+        return 0
     elif a.what == "gifs":
         print("\n".join(make_command_gifs(a.out, a.gif_dir)))
         return 0

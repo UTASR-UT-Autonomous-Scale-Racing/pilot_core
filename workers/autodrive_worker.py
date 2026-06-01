@@ -33,7 +33,7 @@ SIM_MAX_STEER = 0.5236   # rad: the sim maps steering +-1 to +-30 deg and echoes
 _OPEN = '0{"sid":"pilot_core","upgrades":[],"pingInterval":25000,"pingTimeout":20000}'
 _CSV_FIELDS = ("t_rx", "t_reply", "sim_time", "new_frame", "x", "y", "yaw", "speed",
                "echo_throttle", "echo_steering", "cmd_throttle", "cmd_steering", "cmd_age",
-               "reset", "lap_count", "collisions")
+               "reset", "lap_count", "collisions", "sim_yaw_euler")
 
 
 def _vec(s: str) -> list[float]:
@@ -71,6 +71,8 @@ def autodrive_to_internal(msg: dict) -> dict:
         out["position"] = _vec(msg["V1 Position"])
     if "V1 Orientation Quaternion" in msg:
         out["orientation_quat"] = _vec(msg["V1 Orientation Quaternion"])       # x y z w
+    if "V1 Orientation Euler Angles" in msg:
+        out["euler"] = _vec(msg["V1 Orientation Euler Angles"])               # sim's own, rad
     if "V1 Linear Acceleration" in msg:
         out["linear_acceleration"] = _vec(msg["V1 Linear Acceleration"])
     if "V1 Angular Velocity" in msg:
@@ -385,6 +387,7 @@ class AutoDRIVEWorker(ZMQSensorWorker):
             d.get("throttle", ""), d.get("steering", ""), f"{throttle:.4f}", f"{steering:.4f}",
             f"{age:.4f}" if math.isfinite(age) else "inf", int(reset),
             d.get("lap_count", ""), d.get("collision_count", ""),
+            f"{d['euler'][2]:.5f}" if len(d.get("euler", ())) == 3 else "",
         ])
         if new_frame:
             self._csv_fp.flush()

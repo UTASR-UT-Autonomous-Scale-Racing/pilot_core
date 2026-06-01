@@ -47,6 +47,8 @@ plt.rcParams.update({
 # forward_axis (the AutoDRIVE sim is Z-up: [0, 1], forward 0)
 BEV_AXES = [0, 2]
 FORWARD_AXIS = 2
+# what made the map: ORB-SLAM3 on the car, LiDAR on the sim's ground-truth pose
+MAP_SOURCE = {"points": "SLAM map points", "trajectory": "SLAM trajectory", "title": "ORB-SLAM3 map"}
 
 
 def _bev(points3d: np.ndarray) -> np.ndarray:
@@ -216,7 +218,7 @@ def map_figure(poses, clouds, boundaries, truth, out_dir):
     if clouds:
         pts = _bev(clouds[-1].value)
         keep = np.random.default_rng(0).choice(len(pts), min(len(pts), 6000), replace=False)
-        ax.scatter(pts[keep, 0], pts[keep, 1], s=2, color=MUTED, lw=0, label=f"SLAM map points ({len(pts)})")
+        ax.scatter(pts[keep, 0], pts[keep, 1], s=2, color=MUTED, lw=0, label=f"{MAP_SOURCE['points']} ({len(pts)})")
     if truth is not None:
         for wall in (truth.outer, truth.inner):
             c = np.vstack([wall, wall[:1]])
@@ -224,7 +226,7 @@ def map_figure(poses, clouds, boundaries, truth, out_dir):
         ax.plot([], [], color=INK2, lw=1, ls=(0, (4, 3)), label="true walls")
     traj = np.array([r.value[0][BEV_AXES, 3] for r in poses]) if poses else np.zeros((0, 2))
     if len(traj):
-        ax.plot(traj[:, 0], traj[:, 1], color=AQUA, lw=2, label="SLAM trajectory")
+        ax.plot(traj[:, 0], traj[:, 1], color=AQUA, lw=2, label=MAP_SOURCE["trajectory"])
         ax.text(traj[0, 0] + 0.1, traj[0, 1] - 0.25, "start", color=INK, fontsize=8)
         ax.plot(*traj[0], "o", color=AQUA, ms=8, mec=SURFACE, mew=2)
     if boundaries:
@@ -235,7 +237,7 @@ def map_figure(poses, clouds, boundaries, truth, out_dir):
     ax.set_aspect("equal")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("z (m), forward at start" if BEV_AXES == [0, 2] else "y (m)")
-    title = "Track mapping: ORB-SLAM3 map, driven lap and extracted boundaries"
+    title = f"Track mapping: {MAP_SOURCE['title']}, driven lap and extracted boundaries"
     if truth is not None and boundaries:
         eo, ei = truth.wall_error(*boundaries[-1].value)
         title += (f"\ntrajectory error vs truth: RMS {100 * np.sqrt(np.mean(truth.ate ** 2)):.1f} cm; "
@@ -275,7 +277,7 @@ def track_figure(boundaries, truth, out_dir):
     ax.set_aspect("equal")
     ax.set_title(f"Mapped track model\n{track.length:.1f} m centre line, coloured by speed target", loc="left")
     ax.set_xlabel("x (m)")
-    ax.set_ylabel("z (m)")
+    ax.set_ylabel("z (m)" if BEV_AXES == [0, 2] else "y (m)")
 
     ax = axes[1]
     ax.fill(np.r_[ring[:, 0], hole[:, 0]], np.r_[ring[:, 1], hole[:, 1]], color=GRID, lw=0)
@@ -284,9 +286,9 @@ def track_figure(boundaries, truth, out_dir):
             c = np.vstack([wall, wall[:1]])
             ax.plot(c[:, 0], c[:, 1], color=INK2, lw=1, ls=(0, (4, 3)))
         ax.plot([], [], color=INK2, lw=1, ls=(0, (4, 3)), label="true walls")
-    ax.plot(log[:, 1], log[:, 2], color=BLUE, lw=1.6, label="simulated car (pure_pursuit)")
+    ax.plot(log[:, 1], log[:, 2], color=BLUE, lw=1.6, label="bicycle-model bench car (pure_pursuit)")
     ax.set_aspect("equal")
-    title = (f"Simulated drive on the mapped track ({result.laps:.1f} laps)\n"
+    title = (f"Bicycle-model bench on the mapped track ({result.laps:.1f} laps)\n"
              f"cross-track RMS {100 * result.xtrack_rms:.1f} cm, mean {result.mean_speed:.2f} m/s")
     if truth is not None:
         from matplotlib.path import Path
@@ -411,6 +413,9 @@ def main() -> int:
         with open(resolve_path(args.config)) as f:
             mapping = (yaml.safe_load(f) or {}).get("mapping", {})
         BEV_AXES[:] = list(mapping.get("bev_axes", BEV_AXES))
+        if BEV_AXES == [0, 1]:      # the AutoDRIVE sim: LiDAR mapping on ground-truth pose
+            MAP_SOURCE.update(points="LiDAR wall points", trajectory="ground-truth trajectory",
+                              title="LiDAR map")
         global FORWARD_AXIS
         FORWARD_AXIS = int(mapping.get("forward_axis", FORWARD_AXIS))
     os.makedirs(args.out, exist_ok=True)
@@ -445,7 +450,7 @@ def main() -> int:
             print(f"boundary error median {100 * np.median(np.r_[eo, ei]):.1f} cm, "
                   f"95th pct {100 * np.percentile(np.r_[eo, ei], 95):.1f} cm, max {100 * np.max(np.r_[eo, ei]):.1f} cm")
     if result is not None:
-        print(f"closed loop on the mapped track: {result.summary()}")
+        print(f"bicycle-model bench on the mapped track (not the recorded drive): {result.summary()}")
     return 0
 
 

@@ -42,7 +42,9 @@ class ControlWorker(BaseWorker):
       output_buffer       ControlBuffer
       armed_event         optional; controllers are reset on arming so nothing winds up
       state_buffer, boundary_buffer, mapping_done_event   track modes
-      track_config        track_control config section (fallback: depth_ftg)
+      track_config        track_control config section (fallback: depth_ftg;
+                          mapping_drive: LidarGapConfig fields, drives the mapping lap)
+      lidar_buffer        LidarBuffer, for track_config.mapping_drive (simulator)
       vehicle_params      vehicle params YAML
       safety              runtime safety settings, compared with a policy's
       frame_buffer, camera_settings, depth_ftg_config     depth_ftg / fallback
@@ -60,6 +62,8 @@ class ControlWorker(BaseWorker):
         self._follower = None
         self._fallback = None
         self._depth_follower = None
+        self._mapping_driver = None
+        self._mapping_cmd = None
 
     def setup(self) -> None:
         self._mode = self.config.get("mode", "pure_pursuit")
@@ -84,7 +88,7 @@ class ControlWorker(BaseWorker):
     def step(self) -> None:
         armed = self._armed_event is None or self._armed_event.is_set()
         if armed and not self._was_armed:
-            for follower in (self._follower, self._fallback, self._depth_follower):
+            for follower in (self._follower, self._fallback, self._depth_follower, self._mapping_driver):
                 if follower is not None:
                     follower.reset()
         self._was_armed = armed
@@ -107,6 +111,17 @@ class ControlWorker(BaseWorker):
             self._fallback = self._make_depth_follower()
             self._fallback_after = float(self._track_cfg.get("fallback_after", 0.3))
             self._fallback_active = False
+        drive_cfg = self._track_cfg.get("mapping_drive")
+        if drive_cfg:
+            from control.lidar_gap import LidarGapConfig, LidarGapFollower
+
+            self._lidar_buf = self.config["lidar_buffer"]
+            self._last_lidar_seq = 0
+            cfg = dict(drive_cfg)
+            cfg.setdefault("speed_per_throttle", self._track_cfg.get("speed", {}).get(
+                "longitudinal", {}).get("speed_per_throttle", 3.0))
+            self._mapping_driver = LidarGapFollower(self._vehicle, LidarGapConfig(**cfg))
+            self.logger.info(f"Mapping lap driven by LiDAR follow-the-gap ({cfg})")
         self.logger.info(
             f"ControlWorker ready — {self._mode} mode "
             f"(wheelbase={self._vehicle.wheelbase} m, max_steer={self._vehicle.max_steering_angle} rad)"
@@ -144,7 +159,10 @@ class ControlWorker(BaseWorker):
 
     def _step_track(self) -> None:
         if self._mapping_done_event is not None and not self._mapping_done_event.is_set():
-            time.sleep(0.1)
+            if self._mapping_driver is not None:
+                self._step_mapping_drive()
+            else:
+                time.sleep(0.1)
             return
 
         result = self._state_buf.read_latest()
@@ -187,6 +205,27 @@ class ControlWorker(BaseWorker):
                 f"[{self._mode}] s={pr.s:.1f} e={pr.lateral_error:+.3f} v={state.v:.2f} "
                 f"steer={cmd.steering:+.3f} throttle={cmd.throttle:+.3f}"
             )
+
+    def _step_mapping_drive(self) -> None:
+        """LiDAR follow-the-gap until the track is mapped (sim stand-in for the RC lap)."""
+        result = self._lidar_buf.read_latest()
+        now = time.monotonic()
+        if result is None or result[0].seq_no <= self._last_lidar_seq:
+            # scans come at the sim's ~10 Hz: hold the last command (re-stamped, so the
+            # 150 ms watchdog doesn't trip between scans) while the scan is recent
+            last = self._mapping_cmd
+            if last is not None and now - last[0] < 0.4 and now - last[1] >= 0.02:
+                self._ctrl_buf.write(*signed_to_unit(last[2].steering, last[2].throttle))
+                self._mapping_cmd = (last[0], now, last[2])
+            time.sleep(0.005)
+            return
+        header, ranges = result
+        self._last_lidar_seq = header.seq_no
+        st = self._state_buf.read_latest()
+        speed = st[1].v if st is not None and time.monotonic() - st[1].t < 0.5 else None
+        cmd = self._mapping_driver.step(ranges, speed)
+        self._ctrl_buf.write(*signed_to_unit(cmd.steering, cmd.throttle))
+        self._mapping_cmd = (header.produced_ts, now, cmd)   # (scan time, last write, command)
 
     # depth Follow-the-Gap, either as its own mode or as the track-mode fallback
 

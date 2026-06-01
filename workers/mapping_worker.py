@@ -278,6 +278,10 @@ class MappingWorker(BaseWorker):
       boundary_bin_size       arc-length bin, default 0.10 m
       boundary_smooth_window  moving-average window in bins, default 5
       lap_close_radius, min_lap_length   lap trimming (clean_trajectory), default 0.5 / 3.0 m
+      auto_loop_close         set loop_event itself once the pose trajectory is back within
+                              lap_close_radius of its start after auto_loop_min_length m
+                              (ground-truth pose in the sim; no SLAM loop detection there)
+      auto_loop_min_length    m, default 8.0
     """
 
     def __init__(self, name: str = "mapping", **kwargs: Any) -> None:
@@ -325,6 +329,10 @@ class MappingWorker(BaseWorker):
         self._smooth_window = int(c.get("boundary_smooth_window", 5))
         self._lap_close_radius = float(c.get("lap_close_radius", 0.5))
         self._min_lap_length = float(c.get("min_lap_length", 3.0))
+        self._auto_loop = bool(c.get("auto_loop_close", False))
+        self._auto_loop_min = float(c.get("auto_loop_min_length", 8.0))
+        self._path_length = 0.0
+        self._max_dist_from_start = 0.0
 
         self.logger.info(
             f"MappingWorker ready (min_pts={self._min_points}, "
@@ -339,6 +347,8 @@ class MappingWorker(BaseWorker):
             "the wall map, recording starts again (drive the lap again)"
         )
         self._bev_trajectory = []
+        self._path_length = 0.0
+        self._max_dist_from_start = 0.0
         self._bev_wall_pts = []
         self._wall_vertical = None
         self._kf_traj = None
@@ -362,10 +372,15 @@ class MappingWorker(BaseWorker):
             if pose_result is not None and pose_result[0].seq_no > self._last_pose_seq:
                 pose_header, pose, _, _ = pose_result
                 (x, y), heading = pose_to_bev(pose, self._bev_axes, self._forward_axis)
+                if self._bev_trajectory:
+                    self._path_length += float(np.hypot(x - self._bev_trajectory[-1][0],
+                                                        y - self._bev_trajectory[-1][1]))
                 self._bev_trajectory.append(
                     np.array([x, y, heading, pose[self._vert_axis, 3]], dtype=np.float32)
                 )
                 self._last_pose_seq = pose_header.seq_no
+                if self._auto_loop:
+                    self._check_auto_loop(x, y)
 
         # the cloud is the full deduplicated wall map, so replace rather than append
         if self._pc_buf.latest_seq() > self._last_pc_seq:
@@ -392,6 +407,18 @@ class MappingWorker(BaseWorker):
             self._extract_boundaries()
 
         time.sleep(0.01)
+
+    def _check_auto_loop(self, x: float, y: float) -> None:
+        """Back at the start after a long enough drive: end the mapping lap."""
+        if self._loop_event is None or self._loop_event.is_set():
+            return
+        x0, y0 = self._bev_trajectory[0][:2]
+        d = float(np.hypot(x - x0, y - y0))
+        self._max_dist_from_start = max(self._max_dist_from_start, d)
+        if (self._path_length >= self._auto_loop_min and self._max_dist_from_start > 2 * self._lap_close_radius
+                and d < self._lap_close_radius):
+            self.logger.info(f"Auto loop closure: back at the start after {self._path_length:.1f} m")
+            self._loop_event.set()
 
     def _trajectory(self) -> tuple[np.ndarray, str]:
         """(T, 3) [bev0, bev1, vertical] trajectory: keyframes if available."""

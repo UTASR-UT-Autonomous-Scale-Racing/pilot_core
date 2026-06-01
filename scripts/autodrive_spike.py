@@ -156,6 +156,7 @@ def main() -> None:
         "rate_hz": float((len(t) - 1) / (t[-1] - t[0])) if len(t) > 1 else 0.0,
         "period_ms_p50_p95_max": [float(np.percentile(dt, 50) * 1e3), float(np.percentile(dt, 95) * 1e3),
                                   float(dt.max() * 1e3)],
+        "stalls_over_400ms": int((dt > 0.4).sum()), "stalled_s": float(dt[dt > 0.4].sum()),
         "reply_ms_p50": float(np.median(stats["reply_ms"])) if stats["reply_ms"] else None,
         "mean_payload_bytes": float(np.mean(stats["sizes"])) if stats["sizes"] else 0.0,
         "lidar_beams": stats["lidar_beams"], "lidar_centre_m": stats.get("lidar_centre_m"),

@@ -229,3 +229,14 @@ def test_auto_loop_cuts_respawn_jumps_and_overruns_the_start():
     for p in circle[:20]:                    # 1.26 m past the start
         drive(*p)
     assert w._loop_event.is_set()
+
+    # a reset to somewhere off the path (the car parked elsewhere, then 'r'): the lap
+    # restarts at the new pose instead of keeping a stale start point
+    w._loop_event.clear()
+    w._bev_trajectory, w._path_s, w._path_length = [], [], 0.0
+    w._max_dist_from_start, w._closest_start = 0.0, None
+    for _ in range(12):
+        drive(-10.0, -10.0)                  # parked away from the track
+    drive(*circle[0])
+    assert len(w._bev_trajectory) == 1 and w._path_length == 0.0
+    assert tuple(w._bev_trajectory[0][:2]) == pytest.approx(tuple(circle[0]))

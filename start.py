@@ -599,7 +599,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                    if k in ("wall_height_band", "max_track_half_width", "boundary_bin_size",
                             "boundary_smooth_window", "lap_close_radius", "up_sign", "min_lap_length",
                             "auto_loop_close", "auto_loop_min_length", "auto_loop_overrun",
-                            "jump_threshold")},
+                            "jump_threshold", "min_track_half_width")},
             )
         )
 

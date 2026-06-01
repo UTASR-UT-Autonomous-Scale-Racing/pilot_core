@@ -285,6 +285,8 @@ class MappingWorker(BaseWorker):
       auto_loop_min_length    m, default 8.0
       auto_loop_overrun       m driven past the closest approach to the start before the
                               lap is closed, so the wall map covers the seam, default 1.0
+      min_track_half_width    m; extracted boundaries narrower than this anywhere are
+                              rejected and mapping continues for another lap (None = off)
       jump_threshold          m; a pose step longer than this is a teleport (the sim respawns
                               the car after a wall hit): the trajectory is cut back to the
                               point nearest the new pose. Default None (off): SLAM poses can
@@ -339,6 +341,8 @@ class MappingWorker(BaseWorker):
         self._auto_loop = bool(c.get("auto_loop_close", False))
         self._auto_loop_min = float(c.get("auto_loop_min_length", 8.0))
         self._auto_loop_overrun = float(c.get("auto_loop_overrun", 1.0))
+        mw = c.get("min_track_half_width")
+        self._min_half_width = float(mw) if mw is not None else None
         jump = c.get("jump_threshold")
         self._jump = float(jump) if jump is not None else math.inf
         self._path_length = 0.0
@@ -431,7 +435,18 @@ class MappingWorker(BaseWorker):
         over, so the lap doesn't double back on itself."""
         traj = np.array(self._bev_trajectory, dtype=np.float32)[:, :2]
         lo = max(0, len(traj) - 300)                    # the last few metres only
-        k = lo + int(np.argmin(np.hypot(traj[lo:, 0] - x, traj[lo:, 1] - y)))
+        d = np.hypot(traj[lo:, 0] - x, traj[lo:, 1] - y)
+        if d.min() > self._jump:
+            # not put back onto the path just driven (a reset to the start, a teleport):
+            # start the lap again from here; the wall map stays, it is the same world
+            self.logger.warning(f"Pose jumped {step:.2f} m off the driven path — mapping lap restarts here")
+            self._bev_trajectory.clear()
+            self._path_s.clear()
+            self._path_length = 0.0
+            self._max_dist_from_start = 0.0
+            self._closest_start = None
+            return
+        k = lo + int(np.argmin(d))
         dropped = len(traj) - k
         del self._bev_trajectory[k:]
         del self._path_s[k:]
@@ -508,6 +523,22 @@ class MappingWorker(BaseWorker):
 
         if len(outer) == 0 or len(inner) == 0:
             return self._retry(f"One side empty (outer={len(outer)}, inner={len(inner)})")
+
+        if self._min_half_width is not None:
+            from control.track import TrackModel
+
+            narrowest = float(TrackModel(outer[:, :2], inner[:, :2]).half_width.min())
+            if narrowest < self._min_half_width:
+                # a bad lap (cut short, doubled back): don't race on it, map another lap
+                self.logger.error(f"Extracted track is {narrowest:.2f} m half-wide somewhere "
+                                  f"(< {self._min_half_width} m) — rejected, mapping another lap")
+                self._bev_trajectory.clear()
+                self._path_s.clear()
+                self._path_length = 0.0
+                self._max_dist_from_start = 0.0
+                self._closest_start = None
+                self._loop_event.clear()
+                return
 
         self._boundary_buf.write(outer, inner)
         self._boundaries_extracted = True

@@ -82,6 +82,7 @@ mapping:
   lap_close_radius: 0.6         # m
   auto_loop_overrun: 1.0        # m past the start before the lap is closed (covers the seam)
   jump_threshold: 0.4           # m; longer pose steps are sim respawns after a wall hit
+  min_track_half_width: 0.2     # m; a narrower extracted track is rejected (bad lap), map again
   boundary_save_path: "maps/autodrive_practice"   # null = don't save
 
 buffers:

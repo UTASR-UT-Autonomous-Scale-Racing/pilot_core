@@ -2,10 +2,11 @@
 # loaded by control.types.VehicleParams via config_autodrive.yaml.
 # Geometry from the AutoDRIVE devkit (autodrive_bridge.py TFs: front axle 0.33 m ahead
 # of the rear-axle vehicle frame, wheels at +-0.118 m) and the RoboRacer docs
-# (max steering 30 deg); width is the body width. Checked in the sim in step 2 of
-# docs/autodrive.md (steering -> curvature).
+# (max steering 30 deg); width is the body width. The wheelbase is the effective one
+# measured in the sim (steering -> curvature, docs/autodrive.md step 2e: median 0.342 m,
+# IQR 0.336-0.351, vs 0.324 m in the original plan and 0.33 m in the devkit TFs).
 
-wheelbase: 0.324              # m
+wheelbase: 0.342              # m
 width: 0.27                   # m
 max_steering_angle: 0.5236    # rad, 30 deg each way (sim maps steering +-1 to +-30 deg)
 max_steering_vel: 3.2         # rad/s

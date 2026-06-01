@@ -40,7 +40,7 @@ safety:
   command_timeout: 0.150        # s; also the age after which AutoDRIVEWorker sends neutral
   speed_cap: 2.0                # m/s
   cap_margin: 0.2               # m/s
-  speed_per_throttle: 25.0      # m/s per unit throttle, steady state
+  speed_per_throttle: 24.8      # m/s per unit throttle, steady state (2e: 0.02..0.10 -> 0.50..2.45 m/s)
   max_throttle_no_speed: 0.04   # forward bound with no speed estimate (1 m/s)
   max_reverse_throttle: 0.06    # -1.5 m/s
   throttle_rate: 0.5            # signed units/s (12 m/s^2 of set-point)
@@ -49,7 +49,7 @@ track_control:
   speed:
     v_max: 1.5                  # m/s
     longitudinal:               # gains scaled to the sim's 25 m/s per unit throttle
-      speed_per_throttle: 25.0  # keep equal to safety.speed_per_throttle
+      speed_per_throttle: 24.8  # keep equal to safety.speed_per_throttle
       kp: 0.01                  # throttle per m/s of error
       ki: 0.006
       integral_limit: 0.006

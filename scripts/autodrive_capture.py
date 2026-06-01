@@ -67,13 +67,28 @@ def stop(out: str) -> None:
         time.sleep(0.1)
 
 
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+
+def _captions(labels, t_start: float) -> str:
+    """[(t0, t1, text), ...] in source-video seconds -> drawtext filters (clip time)."""
+    out = []
+    for a, b, text in labels or []:
+        text = text.replace("\\", "").replace("'", "").replace(":", "\\:").replace(",", "\\,")
+        out.append(f"drawtext=fontfile={FONT}:text='{text}':x=8:y=h-th-8:fontsize=16:fontcolor=white:"
+                   f"box=1:boxcolor=black@0.6:boxborderw=5:enable='between(t,{a - t_start:.2f},{b - t_start:.2f})'")
+    return ",".join(out) + "," if out else ""
+
+
 def gif(src: str, dst: str, t_start: float = 0.0, t_end: float | None = None, width: int = 640,
-        fps: int = 10, max_mb: float = 15.0, speed: float = 1.0) -> str:
-    """Cut [t_start, t_end] s of src into a palette-optimised GIF, at most max_mb."""
+        fps: int = 10, max_mb: float = 15.0, speed: float = 1.0, labels=None) -> str:
+    """Cut [t_start, t_end] s of src into a palette-optimised GIF, at most max_mb.
+    labels: [(t0, t1, text)] captions in source seconds."""
+    caps = _captions(labels, t_start)
     while True:
         dur = [] if t_end is None else ["-t", f"{(t_end - t_start):.2f}"]
         pts = f"setpts=PTS/{speed}," if speed != 1.0 else ""
-        vf = (f"{pts}fps={fps},scale={width}:-1:flags=lanczos,split[a][b];"
+        vf = (f"{caps}{pts}fps={fps},scale={width}:-1:flags=lanczos,split[a][b];"
               f"[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4")
         subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-ss", f"{t_start:.2f}", *dur, "-i", src,
                         "-vf", vf, "-loop", "0", dst], check=True)

@@ -9,6 +9,7 @@ IP/port fields and a Connected/Disconnected toggle, so this clicks it.
     python scripts/autodrive_sim_ctl.py disconnect
     python scripts/autodrive_sim_ctl.py reconnect        # off, then on (after a server restart)
     python scripts/autodrive_sim_ctl.py menu             # open the left menu if it is closed
+    python scripts/autodrive_sim_ctl.py close-menu       # hide it (clean screen captures)
     python scripts/autodrive_sim_ctl.py reset|quality    # HUD Reset / quality toggle
 
 """
@@ -105,6 +106,13 @@ def ensure_menu() -> None:
         raise RuntimeError("could not open the sim menu")
 
 
+def close_menu() -> None:
+    """Hide the left menu (after connecting) so it doesn't cover the view."""
+    if menu_open():
+        _click(MENU_BTN)
+        time.sleep(0.8)
+
+
 def state() -> str:
     ensure_menu()
     _, _, _, w, h = _window()
@@ -124,12 +132,15 @@ def set_state(target: str, tries: int = 4) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["state", "connect", "disconnect", "reconnect", "menu", "reset", "quality"])
+    ap.add_argument("cmd", choices=["state", "connect", "disconnect", "reconnect", "menu", "close-menu", "reset", "quality"])
     a = ap.parse_args()
     if a.cmd in ("reset", "quality"):
         ensure_menu()
         _click(RESET_BTN if a.cmd == "reset" else QUALITY_BTN)
         print(a.cmd + " clicked")
+    elif a.cmd == "close-menu":
+        close_menu()
+        print("menu closed")
     elif a.cmd == "menu":
         ensure_menu()
         print("menu open")

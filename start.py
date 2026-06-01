@@ -4,6 +4,7 @@ pilot_core entry point: creates the shared buffers, spawns one process per worke
 restarts crashed workers and cleans up on SIGINT / SIGTERM / SIGHUP.
 
 Usage: python start.py --config config.yaml [--enable-slam] [--recording] [--debug]
+       python start.py --config config_autodrive.yaml      # AutoDRIVE Unity sim, direct link
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from shared_buffer import (
 from shared_buffer.segment_buffer import max_payload_for as seg_max_payload_for
 from workers import (
     ActuatorWorker,
+    AutoDRIVEWorker,
     BaseWorker,
     BufferRecorderWorker,
     CameraWorker,
@@ -104,7 +106,7 @@ _armed_event = None
 _keyboard = None
 MAX_RESTARTS = 3
 # a restart of any of these disarms the car: the command chain was interrupted
-CRITICAL_WORKERS = {"actuator", "control", "state", "camera", "slam", "zmq_sensor"}
+CRITICAL_WORKERS = {"actuator", "control", "state", "camera", "slam", "zmq_sensor", "autodrive"}
 
 
 def _release_buffers() -> None:
@@ -205,6 +207,9 @@ class Pipeline:
     mapping_done_event: Any
     localize_event: Any
     enable_slam: bool
+    reset_event: Any = None          # sim reset (AutoDRIVE)
+    counters: Dict[str, Any] = None  # sim lap / collision / checkpoint mp.Values
+    recording_dir: str | None = None
 
 
 def build_pipeline(config: Dict[str, Any]) -> Pipeline:
@@ -232,6 +237,17 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     control_mode = config.get("control_mode", "pure_pursuit")
     use_zmq = config.get("use_zmq", False)
     use_zmq_pose = config.get("use_zmq_pose", False)
+    # AutoDRIVE sim over its own Socket.IO link: sensors in, supervised commands out
+    autodrive = config.get("sim") == "autodrive"
+    if autodrive and use_zmq:
+        raise SystemExit("sim: autodrive and use_zmq are alternatives — set only one")
+    sim_pose = use_zmq_pose or (autodrive and config.get("sim_pose", True))   # ground-truth pose
+    control_mode_early = config.get("control_mode", "pure_pursuit")
+    if (sim_pose and control_mode_early in TRACK_MODES and not enable_slam and not use_saved_map):
+        # nothing would ever fill boundary_buf: the controller would wait (or crash) forever
+        raise SystemExit(
+            f"control_mode {control_mode_early!r} needs track boundaries: with the sim's ground-truth "
+            "pose, map a lap (--enable-slam, LiDAR mapping) or set use_saved_map")
 
     # shared buffers
     buf_cfg = config.get("buffers", {})
@@ -290,7 +306,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             create=True,
         )
         buffers.extend([b for b in [pc_buf, boundary_buf] if b is not None])
-    needs_lidar = use_zmq and enable_slam and use_zmq_pose
+    needs_lidar = (use_zmq or autodrive) and enable_slam and sim_pose
     if needs_lidar:
         lidar_buf = LidarBuffer(
             slots=buf_cfg.get("lidar", {}).get("slots", 16),
@@ -300,7 +316,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         buffers.append(lidar_buf)
 
     # state estimate only makes sense if something is producing poses
-    has_pose_source = enable_slam or use_zmq_pose
+    has_pose_source = enable_slam or sim_pose
     state_buf = None
     if has_pose_source:
         state_buf = StateBuffer(
@@ -366,8 +382,46 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
 
     workers: List[BaseWorker] = []
 
+    rec_dir = None
+    if config.get("recording", False):
+        rec_dir = os.path.join(config.get("recording_path", "/tmp/pilot_recordings"), time.strftime("%Y%m%d_%H%M%S"))
+
+    # sim reset (key r / TrackEnv) and the sim's race counters
+    reset_event = mp.Event() if autodrive else None
+    counters = ({"lap": mp.Value("i", 0), "collision": mp.Value("i", 0), "checkpoint": mp.Value("i", 0)}
+                if autodrive else {})
+    # supervised command (ActuatorWorker output) that AutoDRIVEWorker sends to the sim
+    act_buf = None
+    if autodrive:
+        act_buf = ControlBuffer(slots=buf_cfg.get("control", {}).get("slots", 8), name="act_buf", create=True)
+        buffers.append(act_buf)
+
     # sensors
-    if use_zmq:
+    if autodrive:
+        sim_host = config.get("sim_host", "0.0.0.0")
+        sim_port = config.get("sim_port", 4567)
+        workers.append(
+            AutoDRIVEWorker(
+                name="autodrive",
+                host=sim_host,
+                port=sim_port,
+                frame_buffer=frame_buf if config.get("sim_camera", True) else None,
+                imu_buffer=imu_buf,
+                pose_buffer=pose_buf if sim_pose else None,
+                lidar_buffer=lidar_buf,
+                depth_max_meters=config.get("depth_max_meters", 15.0),
+                depth_raw_scale=config.get("depth_raw_scale"),
+                command_buffer=act_buf,
+                command_timeout=config.get("safety", {}).get("command_timeout", 0.150),
+                reset_event=reset_event,
+                lap_counter=counters["lap"],
+                collision_counter=counters["collision"],
+                checkpoint_counter=counters["checkpoint"],
+                log_dir=rec_dir,
+            )
+        )
+        logger.info(f"AutoDRIVE sim link on {sim_host}:{sim_port}")
+    elif use_zmq:
         # sim: a single ZMQ subscriber stands in for all the hardware sensors
         workers.append(
             ZMQSensorWorker(
@@ -450,6 +504,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 frame_buffer=frame_buf,
                 camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
                 depth_ftg_config=depth_ftg_cfg,
+                lidar_buffer=lidar_buf,
             )
         )
     elif control_mode in ("depth_ftg", "vae", "bc"):
@@ -470,7 +525,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     else:
         needs_pose = control_mode in TRACK_MODES
         hint = (
-            " — it needs a pose source: run with --enable-slam (or use_zmq_pose in the simulator)"
+            " — it needs a pose source: run with --enable-slam (or the sim's ground-truth pose)"
             if needs_pose else
             " — valid modes: " + ", ".join((*TRACK_MODES, "depth_ftg", "vae", "bc"))
         )
@@ -484,8 +539,9 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 output_buffer=state_buf,
                 bev_axes=mapping_cfg.get("bev_axes", [0, 2]),
                 forward_axis=mapping_cfg.get("forward_axis", 2),
-                use_pose_speed=use_zmq_pose,
+                use_pose_speed=sim_pose,
                 estimator=config.get("estimator", {}),
+                rate_hz=config.get("control_rate_hz", 50.0),
             )
         )
 
@@ -502,11 +558,13 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             state_buffer=state_buf,
             safety=safety_cfg,
             pwm=config.get("pwm", {}),
+            output_buffer=act_buf,
+            rate_hz=config.get("control_rate_hz", 50.0),
         )
     )
 
     # SLAM + mapping
-    if enable_slam and use_zmq_pose:
+    if enable_slam and sim_pose:
         # ground-truth pose mode: 2D LIDAR scan -> world-frame 3D points
         lidar_cfg = config.get("lidar", {})
         workers.append(
@@ -521,7 +579,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 move_threshold=lidar_cfg.get("move_threshold", 0.05),
             )
         )
-        logger.info("Using ZMQ ground truth pose + LIDAR projection for point cloud")
+        logger.info("Using the sim's ground-truth pose + LIDAR projection for the point cloud")
     elif enable_slam:
         workers.append(
             SLAMWorker(
@@ -563,17 +621,17 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 camera_height=mapping_cfg.get("camera_height", depth_ftg_cfg.get("camera_height", 0.15)),
                 **{k: v for k, v in mapping_cfg.items()
                    if k in ("wall_height_band", "max_track_half_width", "boundary_bin_size",
-                            "boundary_smooth_window", "lap_close_radius", "up_sign")},
+                            "boundary_smooth_window", "lap_close_radius", "up_sign", "min_lap_length",
+                            "auto_loop_close", "auto_loop_min_length")},
             )
         )
 
     if config.get("recording", False):
         # recording_config.<buffer>.{sample_k, top_n, on_full, keep_files} override per buffer
         rec_cfg = config.get("recording_config", {})
-        rec_dir = os.path.join(config.get("recording_path", "/tmp/pilot_recordings"), time.strftime("%Y%m%d_%H%M%S"))
         candidates = {
             "frame": frame_buf, "imu": imu_buf, "segmentation": seg_buf if vision_cfg.get("enabled", False) else None,
-            "pose": pose_buf, "control": ctrl_buf, "pointcloud": pc_buf, "keyframes": kf_buf,
+            "pose": pose_buf, "control": ctrl_buf, "actuation": act_buf, "pointcloud": pc_buf, "keyframes": kf_buf,
             "boundary": boundary_buf,
             "state": state_buf, "lidar": lidar_buf,
         }
@@ -612,7 +670,8 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         )
         logger.info(f"ZMQ telemetry publisher enabled on port {zmq_telemetry_port}")
 
-    return Pipeline(workers, buffers, armed_event, loop_event, mapping_done_event, localize_event, enable_slam)
+    return Pipeline(workers, buffers, armed_event, loop_event, mapping_done_event, localize_event, enable_slam,
+                    reset_event=reset_event, counters=counters, recording_dir=rec_dir)
 
 
 def main() -> None:
@@ -654,6 +713,7 @@ def main() -> None:
     loop_event = pipeline.loop_event
     mapping_done_event = pipeline.mapping_done_event
     localize_event = pipeline.localize_event
+    reset_event = pipeline.reset_event
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, _shutdown)
@@ -672,7 +732,8 @@ def main() -> None:
     global _keyboard
     _keyboard = KeyboardControl()
     logger.info("=" * 60)
-    logger.info("Keys:  [a] ARM   [SPACE] DISARM (stop)   [l] loop closure   [q] quit")
+    logger.info("Keys:  [a] ARM   [SPACE] DISARM (stop)   [l] loop closure   [q] quit"
+                + ("   [r] reset the sim" if reset_event is not None else ""))
     logger.info("Outputs are neutral until armed.")
     logger.info("=" * 60)
 
@@ -688,6 +749,9 @@ def main() -> None:
                     if not loop_event.is_set():
                         loop_event.set()
                         logger.info("Manual loop closure — extracting boundaries …")
+                elif key == "r" and reset_event is not None:
+                    reset_event.set()
+                    logger.info("Sim reset requested")
                 elif key == "q":
                     logger.info("Quit requested")
                     _shutdown()

@@ -1,0 +1,101 @@
+# AutoDRIVE RoboRacer Unity sim, linked directly (no ROS, no bridge): pilot_core is the
+# server the sim connects to on sim_port; telemetry in, supervised commands out.
+#   python start.py --config config_autodrive.yaml       # LiDAR mapping lap, then race
+#   (race on a saved map instead: enable_slam: false, use_saved_map: true below)
+# then connect the sim: HUD menu -> "Disconnected" toggle, or
+#   python scripts/autodrive_sim_ctl.py connect
+# Keys: [a] arm, [SPACE] disarm, [r] reset the sim, [l] end the mapping lap, [q] quit.
+# Setup on a vast.ai box: scripts/vast_autodrive_setup.sh; details in docs/autodrive.md.
+
+sim: autodrive
+sim_host: "0.0.0.0"
+sim_port: 4567
+sim_pose: true                  # ground-truth pose from the sim (Z-up world, X forward)
+sim_camera: true                # decode the 192x108 front camera into frame_buf
+
+# hardware, all unused in the sim
+i2c_address: null
+i2c_bus: null
+use_oakd_imu: false
+synthetic: false
+
+resolution: [192, 108]          # sim front camera, [width, height]
+fps: 15
+
+depth_max_meters: 15.0          # Joshua's build: far clip of DepthCamera.cs (stock build has no depth)
+depth_raw_scale: null
+
+vision:
+  enabled: false
+
+control_mode: "pure_pursuit"    # pure_pursuit | stanley | lqr | mpc | policy
+control_rate_hz: 50             # StateWorker + ActuatorWorker loop rate
+
+vehicle_params: "vehicle_params_roboracer.yaml"
+
+# runtime safety (ActuatorWorker); speed_per_throttle calibrated in the sim, docs/autodrive.md
+safety:
+  command_timeout: 0.150        # s; also the age after which AutoDRIVEWorker sends neutral
+  speed_cap: 2.0                # m/s
+  speed_per_throttle: 5.0       # m/s per unit throttle, steady state (calibrated, step 2e)
+  max_reverse_throttle: 0.4
+
+track_control:
+  speed:
+    v_max: 1.5                  # m/s
+    longitudinal:
+      speed_per_throttle: 5.0   # keep equal to safety.speed_per_throttle
+  # drives the LiDAR mapping lap (on the car a human does that with the RC transmitter)
+  mapping_drive:
+    speed: 0.8                  # m/s
+    min_speed: 0.5
+
+# LidarProjectionWorker (enable_slam + sim_pose); sim Hokuyo UST-10LX, 1081 rays, 0.06-10 m
+lidar:
+  range_min: 0.1
+  range_max: 9.5
+  voxel_size: 0.10
+  move_threshold: 0.05
+
+# mapping. enable_slam here means LiDAR mapping on the ground-truth pose, not ORB-SLAM3
+enable_slam: true
+use_saved_map: false
+saved_map_path: "maps/autodrive_practice"
+slam:
+  vocabulary: "ORB_SLAM3/Vocabulary/ORBvoc.txt"
+
+mapping:
+  boundary_min_points: 50
+  bev_axes: [0, 1]              # sim world is Z-up so X, Y are horizontal
+  forward_axis: 0               # X forward in the sim vehicle frame
+  auto_loop_close: true         # end the mapping lap when the car is back at its start
+  auto_loop_min_length: 8.0     # m
+  lap_close_radius: 0.6         # m
+  boundary_save_path: "maps/autodrive_practice"   # null = don't save
+
+buffers:
+  frame:
+    slots: 8
+  imu:
+    slots: 32
+  segmentation:
+    slots: 4
+  pose:
+    slots: 8
+  control:
+    slots: 8
+  pointcloud:
+    slots: 4
+  boundary:
+    slots: 2
+  lidar:
+    slots: 16
+
+# recording (also start.py --recording): buffers + sim_messages.csv / sim_events.jsonl
+recording: false
+recording_path: "/tmp/pilot_recordings"
+recording_config:
+  sample_k: 1
+  top_n: 0                      # one file per buffer per run
+  frame:
+    sample_k: 2

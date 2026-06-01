@@ -131,6 +131,9 @@ class AutoDRIVEWorker(SimDecoder):
       reset_hold_s        default 0.4
       log_dir             sim_messages.csv + sim_events.jsonl go here (None = no logs)
       sim_time_dedupe     only write buffers when the sim clock moved, default True
+      sim_depth           {camera: sim_camera/camera.yaml, scale: 2}: RGB-D for ORB-SLAM3 from a
+                          camera without depth (workers/lidar_depth.py): the frame is upscaled,
+                          the car body hidden, depth comes from the same message's LiDAR scan
     """
 
     def __init__(self, name: str = "autodrive", **kwargs: Any) -> None:
@@ -179,6 +182,16 @@ class AutoDRIVEWorker(SimDecoder):
         self._reset_hold = float(cfg.get("reset_hold_s", 0.4))
         self._reset_started: Optional[float] = None
         self._dedupe = bool(cfg.get("sim_time_dedupe", True))
+        self._depth_fn = None
+        sd = cfg.get("sim_depth")
+        if sd and self._frame_buf is not None:
+            from .lidar_depth import CameraModel, LidarDepth
+
+            cam = CameraModel.from_yaml(sd.get("camera", "sim_camera/camera.yaml"), scale=float(sd.get("scale", 2.0)))
+            self._depth_fn = LidarDepth(cam)
+            self._depth_clahe = bool(sd.get("clahe", True))
+            self.logger.info(f"RGB-D from LiDAR: {cam.size[0]}x{cam.size[1]}, vfov {cam.vfov_deg:.1f} deg, "
+                             f"car mask {'on' if self._depth_fn.mask is not None else 'off'}")
 
         log_dir = cfg.get("log_dir")
         if log_dir:
@@ -305,7 +318,10 @@ class AutoDRIVEWorker(SimDecoder):
             self._frames += 1
             try:
                 if self._frame_buf is not None:
-                    self._process_frame_data(data)
+                    if self._depth_fn is not None and data.get("front_camera") and data.get("lidar"):
+                        self._write_rgbd(data)
+                    else:
+                        self._process_frame_data(data)
                 self._process_imu_data(data)
                 self._process_pose_data(data)
                 self._process_lidar_data(data)
@@ -314,6 +330,22 @@ class AutoDRIVEWorker(SimDecoder):
                 self.logger.error(f"Error writing sim data to buffers: {e}")
             self._log_events(data, t_rx)
         self._log_message(data, sim_time, new_frame, *sent)
+
+    def _write_rgbd(self, data: dict) -> None:
+        """Sim camera + LiDAR depth -> frame_buf (see workers/lidar_depth.py)."""
+        import cv2
+
+        from .lidar_depth import mask_rgb
+
+        raw = np.frombuffer(base64.b64decode(data["front_camera"]["data"]), np.uint8)
+        bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        if bgr is None:
+            return
+        w, h = self._depth_fn.cam.size
+        rgb = cv2.resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), (w, h), interpolation=cv2.INTER_LINEAR)
+        rgb = mask_rgb(rgb, self._depth_fn.mask, clahe=self._depth_clahe)
+        depth = self._depth_fn(np.asarray(data["lidar"], dtype=np.float32))
+        self._frame_buf.write(np.ascontiguousarray(rgb), depth)
 
     def _command(self, now: float) -> tuple[float, float, float]:
         """(throttle, steering, age) of the latest supervised command; neutral if stale."""

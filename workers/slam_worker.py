@@ -160,6 +160,10 @@ class SLAMWorker(BaseWorker):
         )
 
         try:
+            # load Python's own libssl / libcrypto first: the bindings link the system
+            # libcrypto.so.3, which can be older than the one this Python's libssl needs
+            import importlib
+            importlib.import_module("ssl")
             import orbslam3_python as _slam_mod
         except ImportError as exc:
             if not synthetic:

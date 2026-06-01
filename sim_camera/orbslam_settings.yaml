@@ -1,0 +1,43 @@
+%YAML:1.0
+# AutoDRIVE stock sim front camera, RGB-D with depth from the LiDAR (workers/lidar_depth.py).
+# Written by scripts/autodrive_camera_fit.py from sim_camera/camera.yaml (vertical FOV 35.0 deg,
+# images upscaled x2 from 192x108); do not edit by hand.
+File.version: "1.0"
+
+Camera.type: "PinHole"
+Camera1.fx: 342.532239
+Camera1.fy: 342.532239
+Camera1.cx: 191.500000
+Camera1.cy: 107.500000
+Camera1.k1: 0.0
+Camera1.k2: 0.0
+Camera1.p1: 0.0
+Camera1.p2: 0.0
+Camera.width: 384
+Camera.height: 216
+Camera.fps: 15
+# 0: BGR, 1: RGB
+Camera.RGB: 1
+
+RGBD.DepthMapFactor: 1.0
+# close / far point threshold = Stereo.b x Stereo.ThDepth = 5 m
+Stereo.b: 0.1
+Stereo.ThDepth: 50.0
+
+# dark, low-texture scene: lower FAST thresholds than the OAK-D settings
+ORBextractor.nFeatures: 2000
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 6
+ORBextractor.iniThFAST: 7
+ORBextractor.minThFAST: 3
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0

@@ -412,6 +412,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 collision_counter=counters["collision"],
                 checkpoint_counter=counters["checkpoint"],
                 log_dir=rec_dir,
+                sim_depth=config.get("sim_depth"),
             )
         )
         logger.info(f"AutoDRIVE sim link on {sim_host}:{sim_port}")

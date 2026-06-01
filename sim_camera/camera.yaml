@@ -1,0 +1,29 @@
+camera_model:
+  vfov_deg: 35.0
+  pitch_deg: 10.5
+  cam_height: 0.16999999999999998
+  wall_height: 0.22000000000000003
+  width: 192
+  height: 108
+  mask_path: sim_camera/car_mask.png
+fit:
+  stage1:
+    score: 16.66704889088869
+    vfov_deg: 35.0
+    pitch_deg: 11.0
+    cam_height: 0.21
+    wall_height: 5.0
+  stage2:
+    score: 27.168186831474305
+    vfov_deg: 35.0
+    pitch_deg: 10.5
+    cam_height: 0.16999999999999998
+    wall_height: 5.0
+  stage3:
+    score: 5.252779959142208
+    vfov_deg: 35.0
+    pitch_deg: 10.5
+    cam_height: 0.16999999999999998
+    wall_height: 0.22000000000000003
+  full_score_fitted: 16.415740648210047
+  full_score_devkit_guess: 2.658252081759274

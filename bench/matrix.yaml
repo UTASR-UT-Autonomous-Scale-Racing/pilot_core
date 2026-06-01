@@ -1,0 +1,52 @@
+# AutoDRIVE benchmark matrix, staged (full factorial would be ~600 cells on a real-time sim).
+#   python scripts/autodrive_bench.py matrix bench/matrix.yaml --stage A --out <dir>
+#   python scripts/autodrive_bench.py summary <dir>
+# Each cell: `repeats` runs of start.py on the live sim; a run is `laps` laps after arming
+# (or timeout_s, or aborted after max_collisions). Overrides are dotted config keys.
+base_config: config_autodrive.yaml
+repeats: 3
+laps: 2
+timeout_s: 300
+max_collisions: 20
+fixed:
+  enable_slam: false
+  use_saved_map: true
+  saved_map_path: maps/autodrive_practice
+  control_rate_hz: 50
+
+stages:
+  A:   # controller x speed, saved map, 50 Hz
+    vary:
+      control_mode: [pure_pursuit, stanley, lqr, mpc]
+      track_control.speed.v_max: [1.0, 1.5, 2.5, 4.0]
+    speed_cap_margin: 0.5        # safety.speed_cap = v_max + margin
+  B:   # control / actuator loop rate, the top 2 controllers of A at their best speed
+    from_stage: A
+    top: 2
+    distinct: control_mode
+    vary:
+      control_rate_hz: [30, 50, 100]
+  C:   # pose / map source, the best cell of B
+    from_stage: B
+    top: 1
+    vary:
+      pose_map: [lidar_mapping, saved_map, orbslam3_cuda, orbslam3_cpu]
+  D:   # track, the top 2 cells of B
+    from_stage: B
+    top: 2
+    vary:
+      track: [practice, compete, joshua]
+
+# cells that cannot run on the stock 2026-iros build
+skip:
+  orbslam3_cuda: "needs Joshua's build: SLAMWorker is ORB-SLAM3 RGB-D and the stock sim has no depth camera"
+  orbslam3_cpu: "needs Joshua's build: SLAMWorker is ORB-SLAM3 RGB-D and the stock sim has no depth camera"
+  joshua: "needs Joshua's build (not available)"
+
+pose_map:
+  lidar_mapping: {enable_slam: true, use_saved_map: false, mapping.boundary_save_path: null}
+  saved_map: {}
+
+tracks:
+  practice: {variant: practice, map: maps/autodrive_practice}
+  compete: {variant: compete, map: maps/autodrive_compete}

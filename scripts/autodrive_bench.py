@@ -105,7 +105,7 @@ def _cpu_ticks(pid: int) -> Optional[int]:
 
 def run_pilot(base_config: str, out: str, overrides: dict, laps: int = 3, timeout: float = 600.0,
               stop: str = "quit", capture: bool = True, settle: float = 2.0,
-              drive_s: Optional[float] = None) -> dict:
+              drive_s: Optional[float] = None, max_collisions: Optional[int] = None) -> dict:
     """One start.py run against the sim. Returns timings, laps and paths.
     stop: quit (key q) | term (SIGTERM to start.py) | kill (SIGKILL to start.py) |
     killall (SIGKILL to every pilot_core process). drive_s: stop that long after the
@@ -180,8 +180,13 @@ def run_pilot(base_config: str, out: str, overrides: dict, laps: int = 3, timeou
                         break
                     time.sleep(0.05)
                     continue
-                done = [e for e in _events(rec_dir) if e["event"] == "lap" and e["t"] > t_mapped + 1.0]
+                evs = _events(rec_dir)
+                done = [e for e in evs if e["event"] == "lap" and e["t"] > t_mapped + 1.0]
                 if len(done) >= laps:
+                    break
+                if max_collisions is not None and sum(
+                        e["event"] == "collision" and e["t"] > t_mapped for e in evs) > max_collisions:
+                    res["aborted"] = f"more than {max_collisions} collisions"
                     break
             time.sleep(0.2)
         else:
@@ -340,6 +345,287 @@ def run_gifs(run_dir: str, gif_dir: str, prefix: str, which=("mapping", "racing"
     return out
 
 
+# ---------------------------------------------------------------- matrix
+
+METRICS = ("laps_completed", "best_lap", "mean_lap", "collisions", "xtrack_rms", "xtrack_max", "off_track_pct",
+           "speed_mean", "speed_max", "steer_rate_rms", "msg_rate_hz", "frame_rate_hz", "stalled_pct",
+           "reply_latency_p50_ms", "reply_latency_p99_ms", "pose_age_p50_ms", "pose_age_p95_ms",
+           "control_rate_hz", "wall_s")
+
+
+def _cell_id(params: dict) -> str:
+    return "__".join(f"{k.split('.')[-1]}={v}" for k, v in params.items())
+
+
+def _rank_key(cell: dict):
+    m = cell["metrics"]
+    return (m["collisions"]["mean"], -m["laps_completed"]["mean"],
+            m["mean_lap"]["mean"] if math.isfinite(m["mean_lap"]["mean"]) else math.inf)
+
+
+def _load_cells(out: str, stage: str) -> list[dict]:
+    with open(os.path.join(out, stage, "cells.json")) as f:
+        return json.load(f)
+
+
+def stage_cells(mx: dict, stage: str, out: str) -> list[dict]:
+    """[{id, params, overrides, track, skip}] for one stage of the matrix."""
+    import itertools
+
+    st = mx["stages"][stage]
+    vary = st["vary"]
+    if "from_stage" in st:
+        ranked = sorted([c for c in _load_cells(out, st["from_stage"]) if not c.get("skip")], key=_rank_key)
+        bases, seen = [], set()
+        for c in ranked:
+            key = c["params"].get(st["distinct"]) if st.get("distinct") else c["id"]
+            if key in seen:
+                continue
+            seen.add(key)
+            bases.append(c)
+            if len(bases) == st.get("top", 1):
+                break
+    else:
+        bases = [{"params": {}, "overrides": {}}]
+    cells = []
+    for base in bases:
+        for combo in itertools.product(*vary.values()):
+            params = {**{k: v for k, v in base["params"].items() if k not in vary}, **dict(zip(vary, combo))}
+            ov = {**mx.get("fixed", {}), **base.get("overrides", {})}
+            track, skip = "practice", None
+            for k, v in zip(vary, combo):
+                if k == "pose_map":
+                    skip = mx.get("skip", {}).get(v)
+                    ov.update(mx.get("pose_map", {}).get(v, {}))
+                elif k == "track":
+                    skip = mx.get("skip", {}).get(v)
+                    if not skip:
+                        track = mx["tracks"][v]["variant"]
+                        ov["saved_map_path"] = mx["tracks"][v]["map"]
+                else:
+                    ov[k] = v
+            if "track_control.speed.v_max" in ov and "speed_cap_margin" in st:
+                ov["safety.speed_cap"] = float(ov["track_control.speed.v_max"]) + st["speed_cap_margin"]
+            cells.append({"id": _cell_id(params), "params": params, "overrides": ov, "track": track, "skip": skip})
+    return cells
+
+
+def ensure_sim_variant(variant: str) -> None:
+    """Switch the supervisor-run sim between the practice and compete builds."""
+    env = "/workspaces/autodrive_sim/sim.env"
+    with open(env) as f:
+        lines = f.read().splitlines()
+    cur = next((ln.split("=", 1)[1] for ln in lines if ln.startswith("SIM_VARIANT=")), "practice")
+    if cur == variant:
+        return
+    lines = [ln for ln in lines if not ln.startswith("SIM_VARIANT=")] + [f"SIM_VARIANT={variant}"]
+    with open(env, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    log = "/workspaces/logs/autodrive_sim.log"
+    size = os.path.getsize(log) if os.path.exists(log) else 0
+    subprocess.run(["supervisorctl", "restart", "autodrive_sim"], check=True, capture_output=True)
+    deadline = time.monotonic() + 120
+    while not _tail_has(log, "UnloadTime", since=size):
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"sim ({variant}) did not come up")
+        time.sleep(1)
+    time.sleep(3)
+
+
+def _summarise(runs: list[dict]) -> dict:
+    out = {}
+    for k in METRICS:
+        vals = np.array([r[k] for r in runs if isinstance(r.get(k), (int, float))], dtype=float)
+        fin = vals[np.isfinite(vals)]
+        out[k] = {"mean": float(fin.mean()) if len(fin) else math.nan,
+                  "std": float(fin.std(ddof=1)) if len(fin) > 1 else (0.0 if len(fin) else math.nan),
+                  "n": int(len(fin))}
+    return out
+
+
+def run_matrix(matrix: str, stage: str, out: str, only: Optional[list[str]] = None) -> list[dict]:
+    with open(matrix) as f:
+        mx = yaml.safe_load(f)
+    cells = stage_cells(mx, stage, out)
+    os.makedirs(os.path.join(out, stage), exist_ok=True)
+    done_cells = []
+    for cell in cells:
+        if only and cell["id"] not in only:
+            continue
+        cdir = os.path.join(out, stage, cell["id"])
+        os.makedirs(cdir, exist_ok=True)
+        runs = []
+        if not cell["skip"]:
+            ensure_sim_variant(cell["track"])
+            if cell["track"] == "compete" and not os.path.isfile(
+                    os.path.join(REPO_ROOT, cell["overrides"]["saved_map_path"], "outer_line.npy")):
+                print(f"[{stage}] mapping the compete track first", flush=True)
+                run_pilot(mx["base_config"], os.path.join(out, "maps", "compete"),
+                          {"enable_slam": True, "use_saved_map": False,
+                           "mapping.boundary_save_path": cell["overrides"]["saved_map_path"]},
+                          laps=0, timeout=600)
+            for k in range(mx.get("repeats", 3)):
+                rdir = os.path.join(cdir, f"rep{k + 1}")
+                if os.path.isfile(os.path.join(rdir, "score.json")):          # resume
+                    with open(os.path.join(rdir, "score.json")) as f:
+                        runs.append(json.load(f))
+                    continue
+                print(f"[{stage}] {cell['id']} rep {k + 1}", flush=True)
+                try:
+                    run = run_pilot(mx["base_config"], rdir, cell["overrides"], laps=mx.get("laps", 2),
+                                    timeout=mx.get("timeout_s", 300), max_collisions=mx.get("max_collisions"))
+                    sc = score_run(rdir)
+                    sc["aborted"] = run.get("aborted")
+                except Exception as e:                                # a broken run is a result too
+                    sc = {"error": repr(e)}
+                    with open(os.path.join(rdir, "score.json"), "w") as f:
+                        json.dump(sc, f, indent=1)
+                print(f"    laps={sc.get('laps_completed')} best={sc.get('best_lap')} coll={sc.get('collisions')} "
+                      f"xtrack={sc.get('xtrack_rms')} stalled={sc.get('stalled_pct')} {sc.get('aborted') or ''}"
+                      f"{sc.get('error') or ''}", flush=True)
+                runs.append(sc)
+        summary = {**{k: cell[k] for k in ("id", "params", "overrides", "track", "skip")},
+                   "runs": runs, "metrics": _summarise(runs) if runs else {}}
+        with open(os.path.join(cdir, "cell.json"), "w") as f:
+            json.dump(summary, f, indent=1, default=float)
+        done_cells.append(summary)
+    with open(os.path.join(out, stage, "cells.json"), "w") as f:
+        json.dump(done_cells, f, indent=1, default=float)
+    write_results_csv(out)
+    return done_cells
+
+
+def write_results_csv(out: str) -> str:
+    """One row per run, every stage, plus a SKIPPED row per skipped cell."""
+    rows = []
+    for stage in sorted(d for d in os.listdir(out) if os.path.isfile(os.path.join(out, d, "cells.json"))):
+        for c in _load_cells(out, stage):
+            base = {"stage": stage, "cell": c["id"], **{k.split(".")[-1]: v for k, v in c["params"].items()},
+                    "track": c["track"]}
+            if c.get("skip"):
+                rows.append({**base, "status": "SKIPPED", "note": c["skip"]})
+                continue
+            for i, r in enumerate(c["runs"]):
+                status = "ERROR" if r.get("error") else ("ABORTED" if r.get("aborted") else "OK")
+                rows.append({**base, "rep": i + 1, "status": status, "note": r.get("error") or r.get("aborted") or "",
+                             **{k: r.get(k) for k in METRICS},
+                             "lap_times": " ".join(f"{x:.2f}" for x in r.get("lap_times", []))})
+    keys = []
+    for r in rows:
+        keys += [k for k in r if k not in keys]
+    path = os.path.join(out, "results.csv")
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        w.writerows(rows)
+    return path
+
+
+# ---------------------------------------------------------------- summary
+
+BLUE, ORANGE, AQUA, PURPLE = "#2a78d6", "#eb6834", "#1baf7a", "#8a5cd1"
+INK, INK2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e6e5e1", "#fcfcfb"
+SERIES = (BLUE, ORANGE, AQUA, PURPLE)
+
+
+def _fmt(m: dict, scale: float = 1.0, nd: int = 2) -> str:
+    if not m or m.get("n", 0) == 0 or not math.isfinite(m["mean"]):
+        return "-"
+    return f"{m['mean'] * scale:.{nd}f} ± {m['std'] * scale:.{nd}f}" if m["n"] > 1 else f"{m['mean'] * scale:.{nd}f}"
+
+
+def summary_chart(out: str, path: str) -> None:
+    """Stage A as lines over v_max per controller (mean lap, cross-track RMS, collisions per
+    run, sim stall share), stages B-D as grouped bars; ±1 sd over the repeats."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    stages = [st for st in "ABCD" if os.path.isfile(os.path.join(out, st, "cells.json"))]
+    panels = [("mean_lap", "mean lap time (s, sim clock)", 1.0), ("xtrack_rms", "cross-track RMS (cm)", 100.0),
+              ("collisions", "collisions per run", 1.0), ("stalled_pct", "sim frozen (% of run)", 1.0)]
+    fig, axes = plt.subplots(len(stages), len(panels), figsize=(4.2 * len(panels), 3.3 * len(stages)),
+                             squeeze=False, facecolor=SURFACE)
+    for row, st in zip(axes, stages):
+        cells = [c for c in _load_cells(out, st) if not c.get("skip") and c.get("metrics")]
+        for ax, (key, label, scale) in zip(row, panels):
+            ax.set_facecolor(SURFACE)
+            if st == "A":
+                ctrls = sorted({c["params"]["control_mode"] for c in cells})
+                for color, ctrl in zip(SERIES, ctrls):
+                    cs = sorted((c for c in cells if c["params"]["control_mode"] == ctrl),
+                                key=lambda c: c["params"]["track_control.speed.v_max"])
+                    x = [c["params"]["track_control.speed.v_max"] for c in cs]
+                    y = [c["metrics"][key]["mean"] * scale for c in cs]
+                    e = [(c["metrics"][key]["std"] or 0) * scale for c in cs]
+                    ax.errorbar(x, y, yerr=e, marker="o", ms=4, color=color, label=ctrl, capsize=2, lw=1.6)
+                ax.set_xlabel("v_max (m/s)", color=INK2)
+            else:
+                names = [", ".join(f"{k.split('.')[-1]}={v}" for k, v in c["params"].items()) for c in cells]
+                y = [c["metrics"][key]["mean"] * scale for c in cells]
+                e = [(c["metrics"][key]["std"] or 0) * scale for c in cells]
+                ax.barh(range(len(cells)), y, xerr=e, color=BLUE, height=0.6, capsize=2)
+                ax.set_yticks(range(len(cells)), names, fontsize=7, color=INK)
+                ax.invert_yaxis()
+            ax.set_title(f"stage {st}: {label}", loc="left", fontsize=9, color=INK, fontweight="bold")
+            ax.grid(color=GRID)
+            ax.set_axisbelow(True)
+            for side in ("top", "right"):
+                ax.spines[side].set_visible(False)
+            ax.tick_params(colors=INK2, labelsize=8)
+        if st == "A":
+            row[0].legend(frameon=False, fontsize=8)
+    fig.suptitle("pilot_core on the AutoDRIVE RoboRacer sim (stock 2026-iros practice track), mean ± sd over repeats",
+                 color=INK, fontweight="bold", x=0.01, ha="left")
+    fig.tight_layout()
+    fig.savefig(path, dpi=110, facecolor=SURFACE)
+    plt.close(fig)
+
+
+def write_summary(out: str) -> str:
+    """results.csv + chart + results.md (tables per stage, best / worst cell)."""
+    write_results_csv(out)
+    chart = os.path.join(out, "summary.png")
+    summary_chart(out, chart)
+    lines = ["# AutoDRIVE benchmark results", "",
+             "Each cell: repeated `start.py` runs on the live stock sim (practice track unless noted), "
+             "racing a saved LiDAR map after a reset to the start line. Lap times are the sim's own "
+             "(sim clock, which pauses while the sim is frozen); lap 1 of a run is a standing start. "
+             "Cross-track error is the sim's own pose against the map raced on. mean ± sd over repeats.", "",
+             f"![summary]({os.path.basename(chart)})", ""]
+    cols = [("laps", "laps_completed", 1, 1), ("best lap (s)", "best_lap", 1, 2), ("mean lap (s)", "mean_lap", 1, 2),
+            ("collisions", "collisions", 1, 1), ("xtrack RMS (cm)", "xtrack_rms", 100, 1),
+            ("xtrack max (cm)", "xtrack_max", 100, 1), ("off-track %", "off_track_pct", 1, 1),
+            ("speed mean (m/s)", "speed_mean", 1, 2), ("frames/s", "frame_rate_hz", 1, 1),
+            ("sim frozen %", "stalled_pct", 1, 0), ("pose age p50/p95 (ms)", None, 1, 0)]
+    for st in "ABCD":
+        p = os.path.join(out, st, "cells.json")
+        if not os.path.isfile(p):
+            continue
+        cells = _load_cells(out, st)
+        lines += [f"## Stage {st}", "", "| cell | " + " | ".join(c[0] for c in cols) + " |",
+                  "|" + " --- |" * (len(cols) + 1)]
+        for c in sorted(cells, key=lambda c: (bool(c.get("skip")),) + (_rank_key(c) if c.get("metrics") else (0,))):
+            name = ", ".join(f"{k.split('.')[-1]}={v}" for k, v in c["params"].items())
+            if c.get("skip"):
+                lines.append(f"| {name} | SKIPPED: {c['skip']} |" + " |" * (len(cols) - 1))
+                continue
+            m = c["metrics"]
+            vals = []
+            for _, key, scale, nd in cols:
+                if key is None:
+                    vals.append(f"{_fmt(m['pose_age_p50_ms'], 1, 0)} / {_fmt(m['pose_age_p95_ms'], 1, 0)}")
+                else:
+                    vals.append(_fmt(m[key], scale, nd))
+            errs = sum(1 for r in c["runs"] if r.get("error"))
+            lines.append(f"| {name}{f' ({errs} run errors)' if errs else ''} | " + " | ".join(vals) + " |")
+        lines.append("")
+    md = os.path.join(out, "results.md")
+    with open(md, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return md
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -351,8 +637,15 @@ def main() -> int:
     r.add_argument("--timeout", type=float, default=600)
     r.add_argument("--stop", choices=["quit", "term", "kill", "killall"], default="quit")
     r.add_argument("--drive-s", type=float, help="stop after this long racing instead of --laps")
+    mxp = sub.add_parser("matrix")
+    mxp.add_argument("matrix")
+    mxp.add_argument("--stage", required=True)
+    mxp.add_argument("--out", required=True)
+    mxp.add_argument("--only", action="append", help="cell id(s) to run")
     sc = sub.add_parser("score")
     sc.add_argument("run_dir")
+    sm = sub.add_parser("summary")
+    sm.add_argument("out")
     g = sub.add_parser("gif")
     g.add_argument("run_dir")
     g.add_argument("--gif-dir", default="/workspaces/proof/gifs")
@@ -361,6 +654,12 @@ def main() -> int:
     g.add_argument("--speed", type=float, default=2.0)
     a = ap.parse_args()
     os.environ.setdefault("DISPLAY", ":99")
+    if a.cmd == "summary":
+        print(write_summary(a.out))
+        return 0
+    if a.cmd == "matrix":
+        run_matrix(a.matrix, a.stage, a.out, a.only)
+        return 0
     if a.cmd == "gif":
         print("\n".join(run_gifs(a.run_dir, a.gif_dir, a.prefix, a.which.split(","), a.speed)))
         return 0

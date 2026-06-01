@@ -74,6 +74,13 @@ def test_lidar_round_trip_keeps_inf():
     assert out[2] == np.inf and out[[0, 1, 3]] == pytest.approx(r[[0, 1, 3]], abs=1e-4)
 
 
+def test_speed_is_signed_and_steering_echo_normalised():
+    """Real sim: body-frame velocity (x < 0 reversing), steering echo in rad (30 deg = 1)."""
+    d = autodrive_to_internal({"V1 Linear Velocity": "-1.9946 0.0000 -0.0806", "V1 Steering": "-0.2618"})
+    assert d["speed"] == pytest.approx(-1.9946)
+    assert d["steering"] == pytest.approx(-0.5, abs=1e-4) and d["steering_angle"] == pytest.approx(-0.2618)
+
+
 def test_command_message_is_string_encoded():
     frame = command_message(0.25, -1.0, reset=True)
     assert frame.startswith("42")
@@ -198,13 +205,14 @@ def test_wire_contract(link):
     assert float(fake.stats.commands[-1]["V1 Throttle"]) == 0.0
     assert float(fake.stats.commands[-1]["V1 Steering"]) == 0.0
 
-    # reset: exactly one 'True', the event is cleared, then 'False' again
+    # reset: 'True' (with neutral) held for reset_hold_s, one block, then 'False' again
     n = len(fake.stats.commands)
     reset.set()
     _wait(lambda: not reset.is_set(), 3.0, "reset sent")
     _wait(lambda: len(fake.stats.commands) > n + 5, 5.0)
-    flags = [c["V1 Reset"] for c in fake.stats.commands[n:]]
-    assert flags.count("True") == 1 and flags[-1] == "False"
+    flags = "".join("T" if c["V1 Reset"] == "True" else "F" for c in fake.stats.commands[n:])
+    assert flags.strip("F").count("F") == 0 and flags.count("T") >= 2 and flags.endswith("F")
+    assert all(float(c["V1 Throttle"]) == 0.0 for c in fake.stats.commands[n:] if c["V1 Reset"] == "True")
     assert fake.stats.resets == 1
 
     # race counters reach the shared values and sim_events.jsonl
@@ -290,9 +298,6 @@ def test_closed_loop_mapping_lap_then_pure_pursuit(tmp_path, monkeypatch):
     config.update(sim_host="127.0.0.1", sim_port=port, enable_slam=True, recording=True,
                   recording_path=str(tmp_path / "rec"), sim_camera=False)
     config["mapping"]["boundary_save_path"] = str(tmp_path / "map")
-    # the fake plant's drivetrain: 3 m/s per unit throttle
-    config["safety"]["speed_per_throttle"] = 3.0
-    config["track_control"]["speed"]["longitudinal"]["speed_per_throttle"] = 3.0
 
     p = start.build_pipeline(config)
     procs = []

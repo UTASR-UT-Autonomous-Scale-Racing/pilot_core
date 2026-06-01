@@ -8,7 +8,9 @@ collisions on the track (oval_track() by default).
 Like the real sim it emits telemetry on its own clock (rate_hz) and, with echo=True,
 re-sends that snapshot once when the next command arrives; it only starts streaming after
 the server's first 'Bridge'. Steering +1 turns left (CCW), throttle drives the
-first-order speed model, 'V1 Reset': 'True' puts the car back at the start.
+first-order speed model, 'V1 Reset': 'True' on two consecutive messages puts the car
+back at the start (the real sim ignores a one-message pulse). As in the real sim, the
+velocity is body-frame (x = signed speed) and the steering echo is the wheel angle in rad.
 """
 
 from __future__ import annotations
@@ -79,8 +81,10 @@ class FakeAutoDRIVE:
         self.outer, self.inner, _ = track if track is not None else oval_track()
         self.track = TrackModel(self.outer, self.inner)
         self.params = params or VehicleParams.load("vehicle_params_roboracer.yaml")
-        self.plant_cfg = plant or PlantConfig(speed_per_throttle=3.0, pose_latency=0.0, pos_noise=0.0,
-                                              yaw_noise=0.0)
+        # measured on the stock sim: ~25 m/s per unit throttle, settles in ~0.5 s, and
+        # neutral stops the car in ~0.4 s from 1.5 m/s
+        self.plant_cfg = plant or PlantConfig(speed_per_throttle=25.0, tau=0.15, coast_decel=3.5,
+                                              pose_latency=0.0, pos_noise=0.0, yaw_noise=0.0)
         self.lidar, self.camera = lidar, camera
         # walls for the ray-cast, decimated to ~0.25 m segments: 5x cheaper, same scan
         step = max(1, int(round(0.25 / max(self.track.length / len(self.outer), 1e-3))))
@@ -92,6 +96,7 @@ class FakeAutoDRIVE:
         self.cmd = Command(0.0, 0.0)
         self.lap_count = self.collisions = 0
         self.lap_times: List[float] = []
+        self._reset_run = 0      # consecutive 'True' resets received
         self._jpeg = _jpeg() if camera else ""
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -136,12 +141,12 @@ class FakeAutoDRIVE:
         v = c.v if self.speed_override is None else self.speed_override
         q = (0.0, 0.0, math.sin(c.yaw / 2), math.cos(c.yaw / 2))
         msg = {
-            "V1 Throttle": f"{self.cmd.throttle:.4f}", "V1 Steering": f"{self.cmd.steering:.4f}",
+            "V1 Throttle": f"{self.cmd.throttle:.4f}", "V1 Steering": f"{self.cmd.steering * 0.5236:.4f}",
             "V1 Encoder Ticks": "0 0", "V1 Encoder Angles": "0.0000 0.0000",
             "V1 Position": f"{c.x:.4f} {c.y:.4f} 0.0592",
             "V1 Orientation Quaternion": " ".join(f"{v:.4f}" for v in q),
             "V1 Orientation Euler Angles": f"0.0000 0.0000 {c.yaw % (2 * math.pi):.4f}",
-            "V1 Linear Velocity": f"{v * math.cos(c.yaw):.4f} {v * math.sin(c.yaw):.4f} 0.0000",
+            "V1 Linear Velocity": f"{v:.4f} 0.0000 0.0000",
             "V1 Angular Velocity": f"0.0000 0.0000 {self.yaw_rate:.4f}",
             "V1 Linear Acceleration": "0.0000 0.0000 0.0000",
             "V1 LIDAR Scan Rate": "40.0000",
@@ -177,12 +182,15 @@ class FakeAutoDRIVE:
         with self._lock:
             self.stats.commands.append(dict(data))
             if data.get("V1 Reset") == "True":
-                self.stats.resets += 1
-                self.lap_count = self.collisions = 0
-                self.lap_times = []
-                self._place_at_start()
+                self._reset_run += 1
+                if self._reset_run == 2:
+                    self.stats.resets += 1
+                    self.lap_count = self.collisions = 0
+                    self.lap_times = []
+                    self._place_at_start()
                 self.cmd = Command(0.0, 0.0)
             else:
+                self._reset_run = 0
                 self.cmd = Command(float(data["V1 Steering"]), float(data["V1 Throttle"]))
 
     def _run(self) -> None:

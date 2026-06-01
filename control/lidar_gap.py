@@ -32,7 +32,7 @@ class LidarGapConfig:
     smooth: int = 9                  # beams, moving average
     centre_weight: float = 0.5       # 0 = aim at the deepest beam of the gap, 1 = its centre
     steer_gain: float = 1.0
-    kp_speed: float = 0.3            # throttle per m/s of speed error
+    kp_speed: float = 0.9            # speed feedback, (m/s of command) per m/s of error
 
 
 class LidarGapFollower:
@@ -82,7 +82,8 @@ class LidarGapFollower:
         self.last_target = target
         steer = float(np.clip(c.steer_gain * target / self.p.max_steering_angle, -1.0, 1.0))
         v_ref = c.min_speed + (c.speed - c.min_speed) * (1.0 - min(abs(steer), 1.0))
-        throttle = v_ref / c.speed_per_throttle
+        v_cmd = v_ref
         if speed is not None and np.isfinite(speed):
-            throttle += c.kp_speed * (v_ref - speed)
+            v_cmd += c.kp_speed * (v_ref - speed)
+        throttle = v_cmd / c.speed_per_throttle
         return Command(steer, float(np.clip(throttle, 0.0, 1.0)))

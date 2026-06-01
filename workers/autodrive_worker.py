@@ -29,6 +29,7 @@ from .control_worker import unit_to_signed
 from .zmq_sensor_worker import ZMQSensorWorker
 
 NEUTRAL = (0.0, 0.0)
+SIM_MAX_STEER = 0.5236   # rad: the sim maps steering +-1 to +-30 deg and echoes the angle
 _OPEN = '0{"sid":"pilot_core","upgrades":[],"pingInterval":25000,"pingTimeout":20000}'
 _CSV_FIELDS = ("t_rx", "t_reply", "sim_time", "new_frame", "x", "y", "yaw", "speed",
                "echo_throttle", "echo_steering", "cmd_throttle", "cmd_steering", "cmd_age",
@@ -75,9 +76,10 @@ def autodrive_to_internal(msg: dict) -> dict:
     if "V1 Angular Velocity" in msg:
         out["angular_velocity"] = _vec(msg["V1 Angular Velocity"])
     if "V1 Linear Velocity" in msg:
-        vel = np.array(_vec(msg["V1 Linear Velocity"]))
-        out["linear_velocity"] = vel.tolist()
-        out["speed"] = float(np.linalg.norm(vel))
+        # body frame (x forward), so x is the signed speed: negative when reversing
+        vel = _vec(msg["V1 Linear Velocity"])
+        out["linear_velocity"] = vel
+        out["speed"] = float(vel[0])
     if msg.get("V1 LIDAR Range Array"):
         out["lidar"] = decode_lidar(msg["V1 LIDAR Range Array"]).tolist()   # the decoder truth-tests it
     if msg.get("V1 Front Camera Image"):
@@ -86,7 +88,11 @@ def autodrive_to_internal(msg: dict) -> dict:
     for key in ("V1 Depth Camera Image", "V1 Front Depth Image"):
         if msg.get(key):
             out["depth_camera"] = {"data": msg[key], "encoding": "png"}
-    for src, dst in (("V1 Throttle", "throttle"), ("V1 Steering", "steering"),
+    if "V1 Steering" in msg:
+        # the echo is the applied wheel angle in rad; "steering" is normalised like the command
+        out["steering_angle"] = _num(msg["V1 Steering"])
+        out["steering"] = out["steering_angle"] / SIM_MAX_STEER
+    for src, dst in (("V1 Throttle", "throttle"),
                      ("V1 Lap Time", "lap_time"), ("V1 Last Lap Time", "last_lap_time"),
                      ("V1 Best Lap Time", "best_lap_time")):
         if src in msg:
@@ -118,7 +124,9 @@ class AutoDRIVEWorker(ZMQSensorWorker):
       host, port          listen address, default 0.0.0.0:4567
       command_buffer      ControlBuffer written by ActuatorWorker ([0, 1] units, post-safety)
       command_timeout     s; an older (or missing) command goes out as neutral, default 0.15
-      reset_event         set -> the next reply carries 'V1 Reset': 'True' once, then cleared
+      reset_event         set -> replies carry 'V1 Reset': 'True' (and neutral) for reset_hold_s,
+                          then the event is cleared; the sim ignores a one-message pulse
+      reset_hold_s        default 0.4
       log_dir             sim_messages.csv + sim_events.jsonl go here (None = no logs)
       sim_time_dedupe     only write buffers when the sim clock moved, default True
     """
@@ -166,6 +174,8 @@ class AutoDRIVEWorker(ZMQSensorWorker):
         self._cmd_buf = cfg.get("command_buffer")
         self._cmd_timeout = float(cfg.get("command_timeout", 0.15))
         self._reset_event = cfg.get("reset_event")
+        self._reset_hold = float(cfg.get("reset_hold_s", 0.4))
+        self._reset_started: Optional[float] = None
         self._dedupe = bool(cfg.get("sim_time_dedupe", True))
 
         log_dir = cfg.get("log_dir")
@@ -326,12 +336,15 @@ class AutoDRIVEWorker(ZMQSensorWorker):
         if self._reset_event is not None and self._reset_event.is_set():
             reset = True
             throttle, steering = NEUTRAL
+            if self._reset_started is None:
+                self._reset_started = now
+                self.logger.info("Resetting the sim")
+                self._event({"t": now, "event": "reset_sent"})
         with self._ws_lock:
             ws.send(command_message(throttle, steering, reset))
-        if reset:
+        if reset and now - self._reset_started >= self._reset_hold:
+            self._reset_started = None
             self._reset_event.clear()
-            self.logger.info("Sent reset to the sim")
-            self._event({"t": now, "event": "reset_sent"})
         return time.monotonic(), throttle, steering, age, reset
 
     # logs

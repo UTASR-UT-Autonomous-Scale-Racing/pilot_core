@@ -31,7 +31,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-timeout", "pyflakes"]
+test = ["pytest", "pytest-timeout", "pyflakes", "websockets>=13"]   # websockets: fake-sim tests
+# AutoDRIVE sim link (workers/autodrive_worker.py). Not python-socketio: the sim's client
+# never completes a python-socketio 4/5 handshake (docs/autodrive.md)
+sim = ["websockets>=13"]
 train = ["torch", "torchvision", "onnx"]
 rl = ["stable-baselines3[extra]", "gymnasium", "torch", "onnx"]
 slam = ["pybind11"]

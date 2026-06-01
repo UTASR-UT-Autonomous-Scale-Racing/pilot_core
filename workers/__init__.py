@@ -13,6 +13,7 @@ from .state_worker import StateWorker
 from .zmq_sensor_worker import ZMQSensorWorker
 from .zmq_publish_worker import ZMQPublishWorker
 from .lidar_projection_worker import LidarProjectionWorker
+from .autodrive_worker import AutoDRIVEWorker
 
 __all__ = [
     "BaseWorker",
@@ -28,4 +29,5 @@ __all__ = [
     "ZMQSensorWorker",
     "ZMQPublishWorker",
     "LidarProjectionWorker",
+    "AutoDRIVEWorker",
 ]

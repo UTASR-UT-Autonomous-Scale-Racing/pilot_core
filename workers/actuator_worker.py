@@ -1,6 +1,7 @@
 """
 ControlBuffer ([0, 1], 0.5 = neutral) -> SafetySupervisor -> PWM over I2C to the
-Arduino and/or signed [-1, 1] (steering +1 = left) over ZMQ to the sim.
+Arduino and/or signed [-1, 1] (steering +1 = left) over ZMQ to the sim, and/or the
+supervised command into an output ControlBuffer (AutoDRIVEWorker sends that to the sim).
 I2C is silent while disarmed so the Arduino passes the RC receiver through; once
 armed, commands go out at least every 100 ms (Arduino times out to RC / neutral).
 """
@@ -38,6 +39,8 @@ class ActuatorWorker(BaseWorker):
       i2c_bus        I2C bus number
       zmq_enabled    publish to the simulator (default False)
       zmq_port       PUB bind port (default 5556)
+      output_buffer  ControlBuffer for the supervised command, written every tick
+                     (same [0, 1] units as input_buffer); None = not written
       armed_event    neutral (I2C silent) unless set; None = always armed (tests only)
       state_buffer   vehicle state for the speed cap (else a plain throttle cap)
       safety         SafetyConfig overrides
@@ -61,6 +64,7 @@ class ActuatorWorker(BaseWorker):
         self._zmq_context = None
         self._zmq_pub = None
         self._reset_event = None
+        self._out_buf: ControlBuffer | None = None
         self._supervisor = None
         self._armed_event = None
         self._state_buf = None
@@ -90,6 +94,7 @@ class ActuatorWorker(BaseWorker):
                 self.logger.info(f"I2C actuator ready on bus {i2c_bus}, address 0x{i2c_address:02x}")
 
         self._reset_event = self.config.get("reset_event")
+        self._out_buf = self.config.get("output_buffer")
 
         self._zmq_enabled = self.config.get("zmq_enabled", False)
         if self._zmq_enabled:
@@ -136,6 +141,8 @@ class ActuatorWorker(BaseWorker):
             raise
 
     def _write_neutral(self) -> None:
+        if self._out_buf is not None:
+            self._out_buf.write(*signed_to_unit(0.0, 0.0))
         if self._zmq_enabled and self._zmq_pub is not None:
             self._publish_zmq(0.0, 0.0)
         if not self._dummy and self._pwm is not None:
@@ -162,6 +169,9 @@ class ActuatorWorker(BaseWorker):
         self._log_status()
 
         steering_norm, throttle_norm = signed_to_unit(out.steering, out.throttle)
+
+        if self._out_buf is not None:
+            self._out_buf.write(steering_norm, throttle_norm, ts=now)
 
         if self._zmq_enabled:
             reset = False
@@ -244,6 +254,8 @@ class ActuatorWorker(BaseWorker):
 
     def teardown(self) -> None:
         # leave everything at neutral on the way out
+        if self._out_buf is not None:
+            self._out_buf.write(*signed_to_unit(0.0, 0.0))
         if self._zmq_enabled and self._zmq_pub is not None:
             try:
                 self._publish_zmq(0.0, 0.0)

@@ -688,11 +688,12 @@ class TestEdgeCases:
 class TestStartPyRecorderConfig:
     """recording_config in the shipped configs only uses keys start.py knows."""
 
-    BUFFERS = {"frame", "imu", "segmentation", "pose", "control", "pointcloud", "keyframes", "boundary", "state", "lidar"}
+    BUFFERS = {"frame", "imu", "segmentation", "pose", "control", "actuation", "pointcloud", "keyframes", "boundary",
+               "state", "lidar"}
     GLOBAL_KEYS = {"sample_k", "top_n", "on_full", "keep_files", "flush_interval"}
     PER_BUFFER_KEYS = {"sample_k", "top_n", "on_full", "keep_files"}
 
-    @pytest.mark.parametrize("name", ["config.yaml", "config_cpu.yaml", "config_dev_local.yaml", "config_zmq.yaml"])
+    @pytest.mark.parametrize("name", ["config.yaml", "config_cpu.yaml", "config_dev_local.yaml", "config_autodrive.yaml"])
     def test_recording_config_keys(self, name, repo_root):
         import os
         import yaml

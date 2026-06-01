@@ -8,7 +8,6 @@ PyYAML
 opencv-python-headless
 depthai>=3.0        # OAK-D camera + IMU (v3 API)
 smbus2              # Arduino I2C link (Jetson)
-pyzmq               # AutoDRIVE simulator bridge
 osqp                # QP solver for control_mode: mpc
 onnxruntime         # control_mode: policy / vae / bc, vision.model: onnx (CPU inference)
 

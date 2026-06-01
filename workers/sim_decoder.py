@@ -1,13 +1,14 @@
 """
-Simulator stand-in for CameraWorker + IMUWorker: autodrive_bridge's JSON feed ->
-frame (RGB uint8, depth float32 m), IMU (sim commands remapped to [0, 1] in the last
-two slots), ground-truth pose (Z-up, vehicle-to-world), optional StateBuffer, LIDAR.
+Decoders shared by simulator links: a sensor dict (see AutoDRIVEWorker's
+autodrive_to_internal) -> frame (RGB uint8, depth float32 m), IMU (sim commands
+remapped to [0, 1] in the last two slots), ground-truth pose (Z-up, vehicle-to-world),
+optional StateBuffer, LIDAR, and the sim's lap / collision / checkpoint counters.
+Subclasses own the transport (setup / step / teardown).
 """
 
 from __future__ import annotations
 
 import base64
-import json
 import time
 from typing import Any
 
@@ -20,21 +21,15 @@ from .base_worker import BaseWorker
 from shared_buffer import FrameBuffer, IMUBuffer, PoseBuffer, LidarBuffer, StateBuffer
 
 try:
-    import zmq
-except ImportError:
-    zmq = None
-
-try:
     import cv2
 except ImportError:
     cv2 = None
 
 
-class ZMQSensorWorker(BaseWorker):
-    """Sim sensor feed -> shared buffers.
+class SimDecoder(BaseWorker):
+    """Sim sensor dicts -> shared buffers (decoders only; no transport).
 
     Config kwargs:
-      host, port          autodrive_bridge publisher, default localhost:5555
       frame_buffer        FrameBuffer; None skips all image decoding
       imu_buffer          IMUBuffer
       pose_buffer         PoseBuffer (ground truth)
@@ -46,10 +41,8 @@ class ZMQSensorWorker(BaseWorker):
       collision_counter, lap_counter, checkpoint_counter   mp.Values for the gym env
     """
 
-    def __init__(self, name: str = "zmq_sensor", **kwargs: Any) -> None:
+    def __init__(self, name: str = "sim", **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
-        self._socket = None
-        self._context = None
         self._frame_buf: FrameBuffer | None = None
         self._imu_buf: IMUBuffer | None = None
         self._pose_buf: PoseBuffer | None = None
@@ -71,85 +64,6 @@ class ZMQSensorWorker(BaseWorker):
         self._lap_counter = None
         self._checkpoint_counter = None
 
-    def setup(self) -> None:
-        if zmq is None:
-            raise ImportError("pyzmq is required for ZMQSensorWorker")
-
-        host = self.config.get("host", "localhost")
-        port = self.config.get("port", 5555)
-
-        self._context = zmq.Context()
-        self._socket = self._context.socket(zmq.SUB)
-        self._socket.setsockopt(zmq.RCVHWM, 10)
-        self._socket.setsockopt(zmq.CONFLATE, 1)  # latest message only, drop the backlog
-
-        try:
-            self._socket.connect(f"tcp://{host}:{port}")
-            self._socket.setsockopt_string(zmq.SUBSCRIBE, "")
-            self.logger.info(f"Connected to ZMQ sensor publisher at {host}:{port}")
-        except Exception as e:
-            self.logger.error(f"Failed to connect to {host}:{port}: {e}")
-            raise
-
-        self._frame_buf = self.config.get("frame_buffer")
-        self._imu_buf = self.config.get("imu_buffer")
-        self._pose_buf = self.config.get("pose_buffer")
-        self._state_buf = self.config.get("state_buffer")
-        self._lidar_buf = self.config.get("lidar_buffer")
-        self._depth_max_meters = float(self.config.get("depth_max_meters", 15.0))
-        scale = self.config.get("depth_raw_scale")
-        self._depth_raw_scale = float(scale) if scale is not None else None
-        self._no_msg_warn_s = float(self.config.get("no_message_warn_s", 1.0))
-        self._collision_counter = self.config.get("collision_counter")
-        self._lap_counter = self.config.get("lap_counter")
-        self._checkpoint_counter = self.config.get("checkpoint_counter")
-
-        self._last_report_time = time.monotonic()
-        self._last_msg_time = time.monotonic()
-        self.logger.info(
-            f"ZMQSensorWorker ready (depth_max_meters={self._depth_max_meters}, "
-            f"depth_raw_scale={self._depth_raw_scale}, frames={'on' if self._frame_buf is not None else 'off'})"
-        )
-
-    def step(self) -> None:
-        # block (up to 100 ms, so stop() is still noticed) instead of spinning
-        if not self._socket.poll(timeout=100):
-            self._check_silence(time.monotonic())
-            return
-        try:
-            msg_json = self._socket.recv_string(zmq.NOBLOCK)
-        except zmq.Again:
-            return
-        now = time.monotonic()
-        if self._silent:
-            self.logger.info(f"Sensor stream back after {now - self._last_msg_time:.1f} s")
-            self._silent = False
-        self._last_msg_time = now
-        try:
-            data = json.loads(msg_json)
-
-            if self._frame_buf is not None:
-                self._process_frame_data(data)
-            self._process_imu_data(data)
-            self._process_pose_data(data)
-            self._process_lidar_data(data)
-            self._process_telemetry_data(data)
-
-            self._frame_count += 1
-
-            if now - self._last_report_time >= 1.0:
-                elapsed = now - self._last_report_time
-                fps = self._frame_count / elapsed if elapsed > 0 else 0
-                self.logger.debug(f"ZMQ sensor FPS: {fps:.1f}")
-                self._frame_count = 0
-                self._last_report_time = now
-
-        except json.JSONDecodeError as e:
-            self.logger.warning(f"Failed to decode JSON: {e}")
-        except Exception as e:
-            self.logger.error(f"Error processing sensor data: {e}")
-            time.sleep(0.01)
-
     def _check_silence(self, now: float) -> None:
         """Warn when the sim has gone quiet (repeats every 5 s while it stays quiet)."""
         gap = now - self._last_msg_time
@@ -167,7 +81,7 @@ class ZMQSensorWorker(BaseWorker):
             front_cam = data['front_camera']
             img_bytes = base64.b64decode(front_cam['data'])
 
-            # either 'jpeg' (what the bridge sends by default) or raw uint8 + a 'shape' field
+            # either 'jpeg' (the AutoDRIVE sim) or raw uint8 + a 'shape' field
             encoding = front_cam.get('encoding', 'raw')
             if encoding == 'jpeg':
                 nparr = np.frombuffer(img_bytes, dtype=np.uint8)
@@ -238,7 +152,7 @@ class ZMQSensorWorker(BaseWorker):
             return
         try:
             if 'orientation_quat' in data:
-                # bridge sends [x, y, z, w] (ROS order), the IMU vector wants [w, x, y, z]
+                # the sim sends [x, y, z, w] (ROS order), the IMU vector wants [w, x, y, z]
                 x, y, z, w = data['orientation_quat']
                 quat = np.array([w, x, y, z], dtype=np.float32)
             else:
@@ -291,7 +205,7 @@ class ZMQSensorWorker(BaseWorker):
             pose = np.eye(4, dtype=np.float32)
             pose[0:3, 3] = pos
 
-            # quat -> R. Again [x, y, z, w] order from the bridge
+            # quat -> R. Again [x, y, z, w] order from the sim
             x, y, z, w = quat[0], quat[1], quat[2], quat[3]
 
             R = np.array([
@@ -323,7 +237,7 @@ class ZMQSensorWorker(BaseWorker):
 
         try:
             ranges = np.array(data['lidar'], dtype=np.float32)
-            # bridge quirk: may be 1081 rays, not 1080. Trim
+            # AutoDRIVE sends 1081 rays (-135..+135 deg inclusive); the buffer holds 1080
             if len(ranges) < 1080:
                 self.logger.debug(f"Unexpected LIDAR ray count: {len(ranges)}, skipping")
                 return
@@ -343,10 +257,3 @@ class ZMQSensorWorker(BaseWorker):
             self._lap_counter.value = sim_laps
         if self._checkpoint_counter is not None:
             self._checkpoint_counter.value = sim_checkpoint
-
-    def teardown(self) -> None:
-        if self._socket is not None:
-            self._socket.close()
-        if self._context is not None:
-            self._context.term()
-        self.logger.info("ZMQSensorWorker shut down")

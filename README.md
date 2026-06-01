@@ -151,11 +151,24 @@ python scripts/recording_to_dataset.py <run> --vision datasets/track --bootstrap
 | `config.yaml` | Car (Jetson): I2C actuator, SLAM, `pure_pursuit` |
 | `config_cpu.yaml` | Workstation with OAK-D; actuator output disabled |
 | `config_dev_local.yaml` | No hardware: simulated track |
-| `config_zmq.yaml` | AutoDRIVE simulator (sensors on ZMQ 5555, commands 5556, telemetry 5557) |
+| `config_autodrive.yaml` | AutoDRIVE RoboRacer Unity sim, direct link on :4567 ([docs/autodrive.md](docs/autodrive.md)) |
 
 `--config` is required; `--enable-slam`, `--recording`, `--control-mode`,
 `--oakd-imu` and `--debug` override it. Only `config.yaml` enables I2C; on a desktop
 `/dev/i2c-*` are motherboard buses.
+
+## Simulator
+
+`config_autodrive.yaml` runs the whole pipeline against the AutoDRIVE RoboRacer Unity
+simulator. pilot_core is the server the sim connects to on port 4567, so no ROS or
+bridge is involved. Sensors fill the usual buffers, and the actuator's supervised
+command goes back to the sim. A LiDAR follow-the-gap lap maps the track, then the
+control mode races on it. Setup on a GPU box, the sim's protocol quirks, calibration
+and the benchmark are in [docs/autodrive.md](docs/autodrive.md).
+
+```bash
+python start.py --config config_autodrive.yaml      # then: python scripts/autodrive_sim_ctl.py connect
+```
 
 ## Development
 

@@ -1,0 +1,126 @@
+# AutoDRIVE RoboRacer simulator
+
+pilot_core drives the AutoDRIVE RoboRacer Unity simulator directly. There is no ROS and
+no external bridge: `AutoDRIVEWorker` is the server the sim connects to. Sensors go into
+the usual shared buffers, and the supervised command (`ActuatorWorker`'s output: arming,
+150 ms watchdog, speed cap) is sent back on every sim message.
+
+```mermaid
+flowchart LR
+    sim["AutoDRIVE sim<br/>(Unity, client)"] -- "'Bridge' telemetry<br/>ws :4567" --> ad[AutoDRIVEWorker]
+    ad -- "pose · state · lidar · frame · imu<br/>lap / collision counters" --> pc["pipeline<br/>(state, mapping, control)"]
+    pc -- ctrl_buf --> act[ActuatorWorker<br/>safety supervisor]
+    act -- "act_buf (supervised)" --> ad
+    ad -- "'Bridge' command" --> sim
+```
+
+## Setup (vast.ai box, no Docker)
+
+```bash
+scripts/vast_autodrive_setup.sh       # Xvfb :99, openbox, x11vnc, noVNC on 127.0.0.1:6080, sim builds
+pip install -e ".[sim]"               # websockets
+```
+
+The script installs the stock `2026-iros` practice and compete builds under
+`/workspaces/autodrive_sim`. It registers supervisor services `autodrive_xvfb`,
+`autodrive_wm`, `autodrive_vnc`, `autodrive_novnc` and `autodrive_sim`, with logs under
+`/workspaces/logs`. Sim settings live in `/workspaces/autodrive_sim/sim.env`
+(`SIM_VARIANT`, `SIM_W`/`SIM_H`, …); change them, then run
+`supervisorctl restart autodrive_sim`. To watch, run
+`ssh -L 6080:127.0.0.1:6080 <box>` and open `http://localhost:6080/vnc.html`.
+
+## Running
+
+```bash
+python start.py --config config_autodrive.yaml           # LiDAR mapping lap, then race
+python scripts/autodrive_sim_ctl.py connect              # the sim has no CLI connect option
+```
+
+Keys: `a` arm, `SPACE` disarm, `r` reset the sim, `l` end the mapping lap, `q` quit.
+
+- Once armed, `LidarGapFollower` (`track_control.mapping_drive`) drives the mapping lap.
+  On the car a human drives this lap with the RC transmitter.
+- `MappingWorker` closes the lap on its own (`mapping.auto_loop_close`) once the car is
+  back past its start. The control mode then takes over.
+- The map is saved to `maps/autodrive_practice`. To race on a saved map, set
+  `enable_slam: false` and `use_saved_map: true`.
+- Once a server is listening and the sim is in the connected state, the sim reconnects
+  by itself. Otherwise toggle the connection with `autodrive_sim_ctl.py reconnect`.
+
+With `--recording`, the recording directory also gets `sim_messages.csv` (one row per
+message: receive and reply times, sim clock, pose, the sim's echo, the command sent and
+its age) and `sim_events.jsonl` (laps with the sim's lap time, collisions, resets).
+
+## The stock sim's protocol and behaviour, as measured
+
+The protocol spike is `scripts/autodrive_spike.py`; the live probes are in
+`scripts/autodrive_validate.py`.
+
+- **Transport.** The sim opens `ws://host:4567/socket.io/?EIO=4&transport=websocket`
+  (websocket-sharp). It sends client-side pings (`2`) and never sends a namespace
+  CONNECT (`40`). It only starts streaming after the server has sent `40` and a first
+  `Bridge`. python-socketio 4 rejects `EIO=4`, and 5 waits for the `40` forever, so
+  pilot_core speaks this subset directly over `websockets`.
+- **Rate.** The sim emits on its own clock and also re-sends its last snapshot when a
+  command arrives. Only messages whose sim clock (`V1 Lap Time`) has moved are new
+  frames. On the vast box that is 10–18 new frames/s.
+- **Keys.** `V1 Throttle`, `V1 Steering`, `V1 Encoder Ticks`, `V1 Encoder Angles`,
+  `V1 Position`, `V1 Orientation Quaternion` (x y z w), `V1 Orientation Euler Angles`,
+  `V1 Linear Velocity`, `V1 Angular Velocity`, `V1 Linear Acceleration`,
+  `V1 LIDAR Scan Rate`, `V1 LIDAR Range Array` (base64 → gzip → 1081 newline floats,
+  `Infinity` = no return), `V1 Front Camera Image` (192×108 JPEG), `V1 Lap Count`,
+  `V1 Lap Time` (sim clock), `V1 Last Lap Time`, `V1 Best Lap Time`, `V1 Collisions`.
+  The stock build has no depth camera and no checkpoint counter.
+- **Units.** `V1 Linear Velocity` is in the body frame: x is the signed speed. The
+  `V1 Steering` echo is the wheel angle in rad, with ±1 mapping to ±30°.
+- **Throttle is a speed set-point**, about **24.8 m/s per unit** (step 2e below). At
+  neutral the car stops in about 0.3 s from 1.5 m/s; it does not coast. Negative
+  throttle drives in reverse.
+- **Reset.** A one-message `V1 Reset: True` is usually ignored, so the worker holds it
+  for 0.4 s, with neutral. The Reset button on the HUD also works.
+- **Collisions.** After a wall hit the sim counts a collision and puts the car back a
+  short way. `MappingWorker`'s `jump_threshold` cuts those jumps out of the mapping lap.
+
+## Calibration (`scripts/autodrive_validate.py calibrate`)
+
+| throttle | 0.02 | 0.03 | 0.04 | 0.05 | 0.06 | 0.07 | 0.08 | 0.10 |
+| -------- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |
+| steady-state speed (m/s) | 0.50 | 0.75 | 1.00 | 1.25 | 1.50 | 1.75 | 1.99 | 2.45 |
+
+- **Throttle.** The fit through the origin is 24.8 m/s per unit, with a maximum residual
+  of 3 cm/s. This value is `safety.speed_per_throttle`, and the speed controller's gains
+  in `config_autodrive.yaml` are scaled to it.
+- **Steering.** Curvature against yaw rate gives an effective wheelbase of 0.342 m
+  (IQR 0.336–0.351), which is the value in `vehicle_params_roboracer.yaml`.
+
+## Known limitations
+
+- **Sim freezes on a shared GPU.** When other jobs load the GPU, the sim freezes for up
+  to several seconds; 25–50 % of wall time in some runs on the vast box. During a freeze
+  its graphics thread sits in the NVIDIA kernel driver (`D` state, `os_acquire_rwlock_read`).
+  The sim clock pauses with it, so its lap times stay valid. pilot_core's state goes
+  stale (0.5 s), the watchdog sends neutral, and control resumes when frames return.
+  Ways round it were checked and ruled out:
+  - The build ships only HDRP Vulkan shaders, so `-force-glcore` fails and Mesa
+    lavapipe renders magenta.
+  - Fewer job workers or a lower resolution did not help.
+- **No command timeout in the sim.** The sim keeps applying the last command it
+  received. pilot_core sends neutral on SIGTERM / SIGINT, and also when only `start.py`
+  is SIGKILLed (the orphaned link worker notices and sends neutral). If every
+  pilot_core process is SIGKILLed at once, the car keeps driving its last command.
+  That needs a sim-side timeout, like the firmware's 250 ms.
+- **Missing sensors.** Depth camera and checkpoint counters need Joshua Choi's modified
+  build. The worker accepts likely key names, but they are unconfirmed.
+
+## Benchmark (`scripts/autodrive_bench.py`)
+
+```bash
+python scripts/autodrive_bench.py run --out runs/x --laps 3 [--set dotted.key=value ...]
+python scripts/autodrive_bench.py matrix bench/matrix.yaml --stage A --out bench/<date>
+python scripts/autodrive_bench.py summary bench/<date>
+```
+
+A run launches `start.py` with keys piped in, connects, resets and arms the sim, then
+counts laps from `sim_events.jsonl`. It scores the sim's own trajectory against the map
+the controller raced on with `control.sim.score_trajectory`, plus link timing and CPU
+per worker.

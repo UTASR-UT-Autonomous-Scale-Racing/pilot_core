@@ -88,7 +88,7 @@ def _tiny_policy(tmp_path, n_ahead, spacing, window):
 
 
 def test_observation_parity_training_vs_deployment(tmp_path):
-    pytest.importorskip("zmq")
+    pytest.importorskip("websockets")           # sim extra (TrackEnv's AutoDRIVEWorker)
     pytest.importorskip("gymnasium")            # rl extra
     from control.policy import PolicyFollower
     from control.types import VehicleState

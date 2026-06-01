@@ -295,9 +295,9 @@ def main() -> None:
                         help="Run to take value network weights from, e.g. PPO_2")
     parser.add_argument("--value-step",  metavar="N", type=int, dest="value_step",  default=None,
                         help="Step to use from --value-from (default: latest)")
-    parser.add_argument("--pilot-config", default=os.path.join(REPO_ROOT, "config_zmq.yaml"),
+    parser.add_argument("--pilot-config", default=os.path.join(REPO_ROOT, "config_autodrive.yaml"),
                         dest="pilot_config",
-                        help="pilot config whose `safety` section the env's actuator uses (default: config_zmq.yaml)")
+                        help="pilot config whose `safety` section the env's actuator uses (default: config_autodrive.yaml)")
     args = parser.parse_args()
     if bool(args.policy_from) != bool(args.value_from):
         parser.error("--policy-from and --value-from have to be given together")

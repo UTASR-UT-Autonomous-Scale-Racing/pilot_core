@@ -48,8 +48,6 @@ from workers import (
     SLAMWorker,
     StateWorker,
     VisionWorker,
-    ZMQPublishWorker,
-    ZMQSensorWorker,
 )
 from workers.control_worker import TRACK_MODES
 
@@ -106,7 +104,7 @@ _armed_event = None
 _keyboard = None
 MAX_RESTARTS = 3
 # a restart of any of these disarms the car: the command chain was interrupted
-CRITICAL_WORKERS = {"actuator", "control", "state", "camera", "slam", "zmq_sensor", "autodrive"}
+CRITICAL_WORKERS = {"actuator", "control", "state", "camera", "slam", "autodrive"}
 
 
 def _release_buffers() -> None:
@@ -235,13 +233,13 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
 
     saved_map_path = resolve_path(config.get("saved_map_path", "rl/boundaries"))
     control_mode = config.get("control_mode", "pure_pursuit")
-    use_zmq = config.get("use_zmq", False)
-    use_zmq_pose = config.get("use_zmq_pose", False)
     # AutoDRIVE sim over its own Socket.IO link: sensors in, supervised commands out
     autodrive = config.get("sim") == "autodrive"
-    if autodrive and use_zmq:
-        raise SystemExit("sim: autodrive and use_zmq are alternatives — set only one")
-    sim_pose = use_zmq_pose or (autodrive and config.get("sim_pose", True))   # ground-truth pose
+    removed = sorted(k for k in config if k.startswith(("use_zmq", "zmq_")))
+    if removed:
+        raise SystemExit(f"{', '.join(removed)}: the ZMQ bridge was replaced by the direct sim link "
+                         "(sim: autodrive, config_autodrive.yaml)")
+    sim_pose = autodrive and config.get("sim_pose", True)   # ground-truth pose
     control_mode_early = config.get("control_mode", "pure_pursuit")
     if (sim_pose and control_mode_early in TRACK_MODES and not enable_slam and not use_saved_map):
         # nothing would ever fill boundary_buf: the controller would wait (or crash) forever
@@ -306,8 +304,8 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             create=True,
         )
         buffers.extend([b for b in [pc_buf, boundary_buf] if b is not None])
-    # the AutoDRIVE link always fills it (recordings, the mapping drive); ZMQ only for mapping
-    needs_lidar = autodrive or (use_zmq and enable_slam and sim_pose)
+    # the AutoDRIVE link always fills it (recordings, the mapping drive)
+    needs_lidar = autodrive
     if needs_lidar:
         lidar_buf = LidarBuffer(
             slots=buf_cfg.get("lidar", {}).get("slots", 16),
@@ -376,11 +374,6 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     use_synthetic = (
         config.get("synthetic", False) or os.environ.get("PILOT_SYNTHETIC") == "1"
     )
-    zmq_host = config.get("zmq_host", "localhost")
-    zmq_sensor_port = config.get("zmq_sensor_port", 5555)
-    zmq_control_port = config.get("zmq_control_port", 5556)
-    zmq_telemetry_port = config.get("zmq_telemetry_port", 5557)
-
     workers: List[BaseWorker] = []
 
     rec_dir = None
@@ -422,22 +415,6 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             )
         )
         logger.info(f"AutoDRIVE sim link on {sim_host}:{sim_port}")
-    elif use_zmq:
-        # sim: a single ZMQ subscriber stands in for all the hardware sensors
-        workers.append(
-            ZMQSensorWorker(
-                name="zmq_sensor",
-                host=zmq_host,
-                port=zmq_sensor_port,
-                frame_buffer=frame_buf,
-                imu_buffer=imu_buf,
-                pose_buffer=pose_buf if use_zmq_pose else None,
-                lidar_buffer=lidar_buf,
-                depth_max_meters=config.get("depth_max_meters", 15.0),
-                depth_raw_scale=config.get("depth_raw_scale"),
-            )
-        )
-        logger.info(f"ZMQ sensor mode enabled (host={zmq_host}, port={zmq_sensor_port})")
     else:
         # only one process can open the OAK-D, so the camera worker streams its IMU
         oakd_imu_via_camera = use_oakd_imu and not use_synthetic
@@ -553,8 +530,6 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             input_buffer=ctrl_buf,
             i2c_address=i2c_address,
             i2c_bus=i2c_bus,
-            zmq_enabled=use_zmq,
-            zmq_port=zmq_control_port,
             armed_event=armed_event,
             state_buffer=state_buf,
             safety=safety_cfg,
@@ -623,7 +598,8 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 **{k: v for k, v in mapping_cfg.items()
                    if k in ("wall_height_band", "max_track_half_width", "boundary_bin_size",
                             "boundary_smooth_window", "lap_close_radius", "up_sign", "min_lap_length",
-                            "auto_loop_close", "auto_loop_min_length")},
+                            "auto_loop_close", "auto_loop_min_length", "auto_loop_overrun",
+                            "jump_threshold")},
             )
         )
 
@@ -654,22 +630,6 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             )
         )
         logger.info(f"Recording {', '.join(rec_buffers)} to {rec_dir}")
-
-    # ZMQ telemetry for the sim visualiser
-    zmq_publish_cfg = config.get("zmq_publish", {})
-    if use_zmq and zmq_publish_cfg.get("enabled", False):
-        workers.append(
-            ZMQPublishWorker(
-                name="zmq_publish",
-                port=zmq_telemetry_port,
-                pose_buffer=pose_buf if zmq_publish_cfg.get("pose", False) else None,
-                seg_buffer=seg_buf if zmq_publish_cfg.get("segmentation", False) else None,
-                boundary_buffer=boundary_buf if zmq_publish_cfg.get("boundary", False) else None,
-                pointcloud_buffer=pc_buf if zmq_publish_cfg.get("pointcloud", False) else None,
-                publish=zmq_publish_cfg,
-            )
-        )
-        logger.info(f"ZMQ telemetry publisher enabled on port {zmq_telemetry_port}")
 
     return Pipeline(workers, buffers, armed_event, loop_event, mapping_done_event, localize_event, enable_slam,
                     reset_event=reset_event, counters=counters, recording_dir=rec_dir)

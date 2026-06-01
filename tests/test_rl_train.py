@@ -11,6 +11,7 @@ from dataclasses import asdict
 
 import numpy as np
 import pytest
+import yaml
 
 gym = pytest.importorskip("gymnasium")
 sb3 = pytest.importorskip("stable_baselines3")
@@ -130,8 +131,8 @@ def test_resume_path_trains(tmp_path, monkeypatch):
 def test_config_and_safety_helpers(tmp_path):
     from rl import train
 
-    safety = train.safety_from_pilot_config(os.path.join(REPO, "config_zmq.yaml"))
-    assert safety == asdict(SafetyConfig())
+    safety = train.safety_from_pilot_config(os.path.join(REPO, "config_autodrive.yaml"))
+    assert safety == asdict(SafetyConfig(**yaml.safe_load(open(os.path.join(REPO, "config_autodrive.yaml")))["safety"]))
     assert train.safety_from_pilot_config(None) == asdict(SafetyConfig())
     cfg = tmp_path / "c.yaml"
     cfg.write_text("safety: {speed_cap: 2.0}\ntrack_control: {speed: {longitudinal: {speed_per_throttle: 4.0}}}\n")

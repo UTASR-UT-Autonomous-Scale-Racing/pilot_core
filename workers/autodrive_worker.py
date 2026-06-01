@@ -26,7 +26,7 @@ from typing import Any, Optional
 import numpy as np
 
 from .control_worker import unit_to_signed
-from .zmq_sensor_worker import ZMQSensorWorker
+from .sim_decoder import SimDecoder
 
 NEUTRAL = (0.0, 0.0)
 SIM_MAX_STEER = 0.5236   # rad: the sim maps steering +-1 to +-30 deg and echoes the angle
@@ -65,7 +65,7 @@ def encode_lidar(ranges) -> str:
 
 def autodrive_to_internal(msg: dict) -> dict:
     """AutoDRIVE 'Bridge' telemetry (string values, 'V1 ...' keys) -> the dict the
-    ZMQSensorWorker decoders read. Missing keys are left out; image data stays base64."""
+    SimDecoder decoders read. Missing keys are left out; image data stays base64."""
     out: dict[str, Any] = {}
     if "V1 Position" in msg:
         out["position"] = _vec(msg["V1 Position"])
@@ -118,10 +118,10 @@ def yaw_from_quat(q) -> float:
     return math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
 
 
-class AutoDRIVEWorker(ZMQSensorWorker):
+class AutoDRIVEWorker(SimDecoder):
     """AutoDRIVE sim endpoint: sensors into the buffers, supervised commands out.
 
-    Config kwargs (plus the ZMQSensorWorker buffers: frame_buffer, imu_buffer,
+    Config kwargs (plus the SimDecoder buffers: frame_buffer, imu_buffer,
     pose_buffer, state_buffer, lidar_buffer, depth_*, counters):
       host, port          listen address, default 0.0.0.0:4567
       command_buffer      ControlBuffer written by ActuatorWorker ([0, 1] units, post-safety)

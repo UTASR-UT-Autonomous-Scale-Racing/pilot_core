@@ -11,7 +11,7 @@ import pytest
 import start
 from tests.conftest import REPO_ROOT
 
-CONFIGS = ["config.yaml", "config_cpu.yaml", "config_dev_local.yaml", "config_zmq.yaml", "config_autodrive.yaml"]
+CONFIGS = ["config.yaml", "config_cpu.yaml", "config_dev_local.yaml", "config_autodrive.yaml"]
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +56,7 @@ def test_every_config_builds(config_name, recording):
 
 
 def test_workstation_configs_never_write_i2c():
-    for name in ("config_cpu.yaml", "config_dev_local.yaml", "config_zmq.yaml", "config_autodrive.yaml"):
+    for name in ("config_cpu.yaml", "config_dev_local.yaml", "config_autodrive.yaml"):
         config = start.load_config(os.path.join(REPO_ROOT, name))
         assert config.get("i2c_address") is None, name
 
@@ -66,25 +66,24 @@ def test_track_mode_without_pose_source_is_rejected():
         _build("config_cpu.yaml", control_mode="pure_pursuit", enable_slam=False)
 
 
-@pytest.mark.parametrize("config_name,overrides", [
-    ("config_zmq.yaml", {"use_zmq_pose": True}),
-    ("config_autodrive.yaml", {}),
-])
-def test_sim_pose_without_a_map_is_rejected(config_name, overrides):
+def test_sim_pose_without_a_map_is_rejected():
     # ground-truth pose, track mode, but nothing would ever fill boundary_buf
     with pytest.raises(SystemExit, match="track boundaries"):
-        _build(config_name, enable_slam=False, use_saved_map=False, **overrides)
+        _build("config_autodrive.yaml", enable_slam=False, use_saved_map=False)
+
+
+def test_zmq_bridge_keys_are_rejected():
+    with pytest.raises(SystemExit, match="direct sim link"):
+        _build("config_dev_local.yaml", use_zmq=True, zmq_sensor_port=5555)
 
 
 def test_autodrive_wiring():
     p = _build("config_autodrive.yaml", recording=True)
     try:
         by = {w.name: w for w in p.workers}
-        assert "zmq_sensor" not in by and "zmq_publish" not in by
         sim, act, ctrl = by["autodrive"], by["actuator"], by["control"]
         # the supervised command is what goes to the sim, nothing over ZMQ
         assert act.config["output_buffer"] is sim.config["command_buffer"] is not None
-        assert not act.config["zmq_enabled"]
         assert sim.config["reset_event"] is p.reset_event is not None
         assert sim.config["lap_counter"] is p.counters["lap"]
         assert sim.config["log_dir"] == p.recording_dir
@@ -92,6 +91,7 @@ def test_autodrive_wiring():
         assert sim.config["lidar_buffer"] is by["lidar_proj"].config["lidar_buffer"] is not None
         assert ctrl.config["lidar_buffer"] is sim.config["lidar_buffer"]
         assert by["mapping"].config["auto_loop_close"] is True
+        assert by["mapping"].config["jump_threshold"] == 0.4      # sim respawns; off for SLAM
         assert "actuation" in by["recorder"].config["buffers"]
     finally:
         for b in p.buffers:

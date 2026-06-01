@@ -185,3 +185,47 @@ def test_lidar_voxel_filter_first_point_wins():
                                sorted(map(tuple, pts[[0, 2, 3]])))
     assert w._add_to_voxel_map(np.array([[0.05, 0.05, 0.0], [1.0, 1.0, 1.0]], np.float32)) == 1
     assert len(w._voxel_pts) == 4
+
+
+def test_auto_loop_cuts_respawn_jumps_and_overruns_the_start():
+    """Sim respawn (pose jumps back) trims the retraced stretch; the lap closes only
+    after driving auto_loop_overrun past the closest approach to the start."""
+    import logging
+    import multiprocessing as mp
+
+    from workers.mapping_worker import MappingWorker
+
+    w = MappingWorker(auto_loop_close=True, auto_loop_min_length=8.0, auto_loop_overrun=1.0,
+                      lap_close_radius=0.5, jump_threshold=0.4)
+    w._logger = logging.getLogger("test.mapping")
+    w._loop_event = mp.Event()
+    w._lap_close_radius, w._auto_loop, w._auto_loop_min = 0.5, True, 8.0
+    w._auto_loop_overrun, w._jump = 1.0, 0.4
+    w._path_length, w._path_s, w._max_dist_from_start, w._closest_start = 0.0, [], 0.0, None
+    w._bev_trajectory = []
+
+    def drive(x, y):
+        if w._bev_trajectory:
+            step = float(np.hypot(x - w._bev_trajectory[-1][0], y - w._bev_trajectory[-1][1]))
+            if step > w._jump:
+                w._cut_back_to(x, y, step)
+            else:
+                w._path_length += step
+        w._bev_trajectory.append(np.array([x, y, 0.0, 0.0], dtype=np.float32))
+        w._path_s.append(w._path_length)
+        w._check_auto_loop(x, y)
+
+    th = np.linspace(0, 2 * np.pi, 300, endpoint=False)
+    circle = np.column_stack([3 * np.cos(th), 3 * np.sin(th)])     # 18.8 m lap, 6.3 cm steps
+    for p in circle[:100]:
+        drive(*p)
+    n_before, s_before = len(w._bev_trajectory), w._path_length
+    drive(*circle[80])                       # respawned 20 steps back
+    assert len(w._bev_trajectory) == 81 < n_before
+    assert w._path_length < s_before
+    for p in circle[81:]:
+        drive(*p)
+    assert not w._loop_event.is_set()        # at the start, not past it yet
+    for p in circle[:20]:                    # 1.26 m past the start
+        drive(*p)
+    assert w._loop_event.is_set()

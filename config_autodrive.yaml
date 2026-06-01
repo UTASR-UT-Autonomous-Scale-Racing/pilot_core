@@ -56,8 +56,8 @@ track_control:
       max_backward: 0.012
   # drives the LiDAR mapping lap (on the car a human does that with the RC transmitter)
   mapping_drive:
-    speed: 0.8                  # m/s
-    min_speed: 0.5
+    speed: 0.6                  # m/s
+    min_speed: 0.4
 
 # LidarProjectionWorker (enable_slam + sim_pose); sim Hokuyo UST-10LX, 1081 rays, 0.06-10 m
 lidar:

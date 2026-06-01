@@ -282,6 +282,11 @@ class MappingWorker(BaseWorker):
                               lap_close_radius of its start after auto_loop_min_length m
                               (ground-truth pose in the sim; no SLAM loop detection there)
       auto_loop_min_length    m, default 8.0
+      auto_loop_overrun       m driven past the closest approach to the start before the
+                              lap is closed, so the wall map covers the seam, default 1.0
+      jump_threshold          m; a pose step longer than this is a teleport (the sim respawns
+                              the car after a wall hit): the trajectory is cut back to the
+                              point nearest the new pose, default 0.4
     """
 
     def __init__(self, name: str = "mapping", **kwargs: Any) -> None:
@@ -331,8 +336,12 @@ class MappingWorker(BaseWorker):
         self._min_lap_length = float(c.get("min_lap_length", 3.0))
         self._auto_loop = bool(c.get("auto_loop_close", False))
         self._auto_loop_min = float(c.get("auto_loop_min_length", 8.0))
+        self._auto_loop_overrun = float(c.get("auto_loop_overrun", 1.0))
+        self._jump = float(c.get("jump_threshold", 0.4))
         self._path_length = 0.0
+        self._path_s: list[float] = []      # arc length at each trajectory point
         self._max_dist_from_start = 0.0
+        self._closest_start: Optional[tuple[float, float]] = None   # (distance, arc length)
 
         self.logger.info(
             f"MappingWorker ready (min_pts={self._min_points}, "
@@ -348,7 +357,9 @@ class MappingWorker(BaseWorker):
         )
         self._bev_trajectory = []
         self._path_length = 0.0
+        self._path_s = []
         self._max_dist_from_start = 0.0
+        self._closest_start = None
         self._bev_wall_pts = []
         self._wall_vertical = None
         self._kf_traj = None
@@ -373,11 +384,15 @@ class MappingWorker(BaseWorker):
                 pose_header, pose, _, _ = pose_result
                 (x, y), heading = pose_to_bev(pose, self._bev_axes, self._forward_axis)
                 if self._bev_trajectory:
-                    self._path_length += float(np.hypot(x - self._bev_trajectory[-1][0],
-                                                        y - self._bev_trajectory[-1][1]))
+                    step = float(np.hypot(x - self._bev_trajectory[-1][0], y - self._bev_trajectory[-1][1]))
+                    if step > self._jump:
+                        self._cut_back_to(x, y, step)
+                    else:
+                        self._path_length += step
                 self._bev_trajectory.append(
                     np.array([x, y, heading, pose[self._vert_axis, 3]], dtype=np.float32)
                 )
+                self._path_s.append(self._path_length)
                 self._last_pose_seq = pose_header.seq_no
                 if self._auto_loop:
                     self._check_auto_loop(x, y)
@@ -408,16 +423,33 @@ class MappingWorker(BaseWorker):
 
         time.sleep(0.01)
 
+    def _cut_back_to(self, x: float, y: float, step: float) -> None:
+        """Teleport (sim respawn after a wall hit): drop the stretch the car is put back
+        over, so the lap doesn't double back on itself."""
+        traj = np.array(self._bev_trajectory, dtype=np.float32)[:, :2]
+        lo = max(0, len(traj) - 300)                    # the last few metres only
+        k = lo + int(np.argmin(np.hypot(traj[lo:, 0] - x, traj[lo:, 1] - y)))
+        dropped = len(traj) - k
+        del self._bev_trajectory[k:]
+        del self._path_s[k:]
+        self._path_length = self._path_s[-1] if self._path_s else 0.0
+        self.logger.warning(f"Pose jumped {step:.2f} m (sim respawn?) — trajectory cut back by {dropped} poses")
+
     def _check_auto_loop(self, x: float, y: float) -> None:
-        """Back at the start after a long enough drive: end the mapping lap."""
+        """Back past the start after a long enough drive: end the mapping lap."""
         if self._loop_event is None or self._loop_event.is_set():
             return
         x0, y0 = self._bev_trajectory[0][:2]
         d = float(np.hypot(x - x0, y - y0))
         self._max_dist_from_start = max(self._max_dist_from_start, d)
-        if (self._path_length >= self._auto_loop_min and self._max_dist_from_start > 2 * self._lap_close_radius
-                and d < self._lap_close_radius):
-            self.logger.info(f"Auto loop closure: back at the start after {self._path_length:.1f} m")
+        if self._path_length < self._auto_loop_min or self._max_dist_from_start <= 2 * self._lap_close_radius:
+            return
+        if d < self._lap_close_radius and (self._closest_start is None or d < self._closest_start[0]):
+            self._closest_start = (d, self._path_length)
+        # overrun the start a little so the wall map covers the seam; clean_trajectory
+        # trims the lap at the closest approach
+        if self._closest_start is not None and self._path_length - self._closest_start[1] >= self._auto_loop_overrun:
+            self.logger.info(f"Auto loop closure: back at the start after {self._closest_start[1]:.1f} m")
             self._loop_event.set()
 
     def _trajectory(self) -> tuple[np.ndarray, str]:

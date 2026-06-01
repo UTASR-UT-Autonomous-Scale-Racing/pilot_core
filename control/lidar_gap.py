@@ -27,10 +27,12 @@ class LidarGapConfig:
     speed_per_throttle: float = 3.0  # m/s per unit throttle (same calibration as the car)
     max_range: float = 6.0           # m, longer returns are clipped (and inf -> this)
     fov: float = 1.75                # rad either side of straight ahead that is considered
-    bubble: float = 0.35             # m, cleared around the closest return
+    bubble: float = 0.45             # m, cleared around the closest return
     gap_threshold: float = 1.2       # m, a beam counts as free beyond this
     smooth: int = 9                  # beams, moving average
-    centre_weight: float = 0.5       # 0 = aim at the deepest beam of the gap, 1 = its centre
+    centre_weight: float = 0.7       # 0 = aim at the deepest beam of the gap, 1 = its centre
+    wall_margin: float = 0.45        # m; closer side returns push the steering away
+    wall_gain: float = 0.8           # rad of steering per m inside wall_margin
     steer_gain: float = 1.0
     kp_speed: float = 0.9            # speed feedback, (m/s of command) per m/s of error
 
@@ -76,9 +78,20 @@ class LidarGapFollower:
         idx = (1 - c.centre_weight) * deepest + c.centre_weight * centre
         return float(ANGLE_MIN + idx * ANGLE_INCREMENT)
 
+    def wall_push(self, ranges: np.ndarray) -> float:
+        """Steering offset (rad, + = left) away from walls closer than wall_margin at the sides."""
+        c = self.cfg
+        r = np.nan_to_num(np.asarray(ranges, dtype=np.float64), nan=c.max_range, posinf=c.max_range)
+        ang = ANGLE_MIN + np.arange(len(r)) * ANGLE_INCREMENT
+        lateral = np.abs(r * np.sin(ang))
+        side = (np.abs(ang) > 0.35) & (np.abs(ang) < 2.0) & (r > 0.05)
+        left = lateral[side & (ang > 0)].min(initial=c.max_range)
+        right = lateral[side & (ang < 0)].min(initial=c.max_range)
+        return c.wall_gain * (max(0.0, c.wall_margin - right) - max(0.0, c.wall_margin - left))
+
     def step(self, ranges: np.ndarray, speed: float | None) -> Command:
         c = self.cfg
-        target = self.target_angle(ranges)
+        target = self.target_angle(ranges) + self.wall_push(ranges)
         self.last_target = target
         steer = float(np.clip(c.steer_gain * target / self.p.max_steering_angle, -1.0, 1.0))
         v_ref = c.min_speed + (c.speed - c.min_speed) * (1.0 - min(abs(steer), 1.0))

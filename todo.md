@@ -1,4 +1,4 @@
-# TODO: pilot_core ↔ AutoDRIVE (where the work stopped, 2026-10-20)
+# TODO: pilot_core ↔ AutoDRIVE (status 2026-10-21)
 
 Branch `autodrive-direct`, 21 commits on top of `main` (`38f0032`). Nothing has been
 pushed: the vast box's gh token has no UTASR access. The plan is in
@@ -31,60 +31,21 @@ pushed: the vast box's gh token has no UTASR access. The plan is in
 - **Step 3 Stage A.** All 48 runs done (16 cells × 3) in
   `/workspaces/proof/bench_runs/2026-10-20/A`; the summary has not been run.
 
+## Done 2026-10-21 (on a new vast box, `/workspaces` -> `/workspace` symlink)
+
+- Stages A-D all run (84 runs OK). Results: `bench/2026-10-20/`, `/workspaces/proof/bench/`.
+- Compete-track mapping fixed (`gap_select: area`, `8e398b7`).
+- ORB-SLAM3 cells marked FAILED with the HUD-quality replays (`dbc1571`).
+- `/workspaces/proof/validation.md` and `/workspaces/REPORT_PILOT_CORE.md` written.
+- Final pytest: 357 passed, 7 skipped.
+
 ## Left to do
 
-1. **Stage A summary.** Run
-   `python scripts/autodrive_bench.py summary /workspaces/proof/bench_runs/2026-10-20`.
-   This writes `results.csv`, `summary.png` and `results.md`. Copy them to
-   `/workspaces/proof/bench/`, and possibly to `bench/2026-10-20/` in the repo.
-2. **Stages B and D.** Run
-   `python scripts/autodrive_bench.py matrix bench/matrix.yaml --stage B --out /workspaces/proof/bench_runs/2026-10-20`,
-   then `--stage D`.
-   - D switches the sim to the compete build and maps that track first.
-   - The Joshua cells are SKIPPED.
-   - Best and worst benchmark cell GIFs: `autodrive_bench.py gif <rep dir> --prefix ...`.
-3. **Stage C / ORB-SLAM3. Not working yet.**
-   - The stock build has no depth and only a 192×108 front camera, which sits near the
-     rear axle and sees the chassis in the bottom ~40 % of the image. Verified on the
-     raw wire JPEG (`tests/data/autodrive_bridge_sample.json`).
-   - The adapter is committed (`37160f0`):
-     - `workers/lidar_depth.py`: LiDAR depth, chassis mask, CLAHE.
-     - `sim_camera/`: fitted camera (vfov 35°, pitch 10.5°, height 0.17 m).
-     - `AutoDRIVEWorker` uses it when `sim_depth` is set.
-   - ORB-SLAM3 is built with CUDA (sm_120) and imports.
-   - Offline replay (`scripts/autodrive_slam_replay.py`) with the car fully hidden:
-     30 % of frames tracked, ATE 2.7 m over an 8.7 m path. The scene is too dark and
-     texture-poor; the earlier 78 % "tracking" was locked onto the car body.
-   - **Next:** test the HUD "Scene Light" toggle and Low/High Quality for brighter, more
-     textured camera frames, and record frames at `sample_k: 1`. If that's still not
-     enough, say so and mark the ORB-SLAM3 cells FAILED with the replay evidence. Then:
-     - matrix `pose_map` entries for `orbslam3_*` (`sim_pose: false`, `sim_depth`,
-       `resolution: [384, 216]`, `slam.settings: sim_camera/orbslam_settings.yaml`,
-       `mapping.bev_axes: [0, 2]`)
-     - CUDA vs CPU (`ORB_SLAM3_CUDA=0`)
-     - remove the orbslam3 entries from `skip:`
-   - Note to the user: they say the camera is front-mounted. That's true of the real car
-     or Joshua's build, not this stock build.
-4. **Proof write-up.**
-   - `/workspaces/proof/validation.md`: per check PASS/FAIL, command, key numbers,
-     evidence file. All numbers are in the JSON files listed above.
-   - `/workspaces/proof/logs`: copy the sim, pilot_core and pytest logs it relies on.
-   - `/workspaces/proof/bench/`
-   - Re-read `validation.md` against the evidence.
-5. **`/workspaces/REPORT_PILOT_CORE.md`.** Cover:
-   - commits
-   - pytest
-   - validation table
-   - benchmark headlines
-   - SKIPPED and FAILED items: Joshua build cells, SIGKILL-all, ORB-SLAM3
-   - deviations:
-     - websockets instead of python-socketio
-     - LiDAR mapping driver and auto loop closure
-     - sim under `/workspaces`
-     - lavapipe/GL impossible
-   - reproduce commands
-6. **Before the final pytest run**, add websockets/gymnasium notes. CI needs
-   `websockets` (it's in the `test` extra).
+1. Push `autodrive-direct` once a gh token with UTASR access is available.
+2. Optional: re-run Stage A without other GPU jobs, since it had 0-89.8 % sim stalls.
+3. Optional: find out why the lidar_mapping laps (best 12.34-12.78 s) beat the saved map
+   (12.89 s).
+4. ORB-SLAM3 needs Joshua's build: a camera ahead of the car body, with depth.
 
 ## Environment caveats
 

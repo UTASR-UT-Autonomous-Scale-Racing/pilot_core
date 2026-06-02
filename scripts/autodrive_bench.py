@@ -569,11 +569,14 @@ def summary_chart(out: str, path: str) -> None:
                     ax.errorbar(x, y, yerr=e, marker="o", ms=4, color=color, label=ctrl, capsize=2, lw=1.6)
                 ax.set_xlabel("v_max (m/s)", color=INK2)
             else:
-                names = [", ".join(f"{k.split('.')[-1]}={v}" for k, v in c["params"].items()) for c in cells]
+                # label with only the parameters that differ between this stage's cells
+                keys = [k for k in cells[0]["params"] if len({str(c["params"][k]) for c in cells}) > 1]
+                names = [", ".join(f"{k.split('.')[-1]}={c['params'][k]}" for k in keys) for c in cells]
                 y = [c["metrics"][key]["mean"] * scale for c in cells]
                 e = [(c["metrics"][key]["std"] or 0) * scale for c in cells]
                 ax.barh(range(len(cells)), y, xerr=e, color=BLUE, height=0.6, capsize=2)
-                ax.set_yticks(range(len(cells)), names, fontsize=7, color=INK)
+                ax.set_xlim(0, 1.1 * max([v + d for v, d in zip(y, e) if math.isfinite(v + d)] + [1.0]))
+                ax.set_yticks(range(len(cells)), names if ax is row[0] else [], fontsize=7, color=INK)
                 ax.invert_yaxis()
             ax.set_title(f"stage {st}: {label}", loc="left", fontsize=9, color=INK, fontweight="bold")
             ax.grid(color=GRID)
@@ -583,7 +586,7 @@ def summary_chart(out: str, path: str) -> None:
             ax.tick_params(colors=INK2, labelsize=8)
         if st == "A":
             row[0].legend(frameon=False, fontsize=8)
-    fig.suptitle("pilot_core on the AutoDRIVE RoboRacer sim (stock 2026-iros practice track), mean ± sd over repeats",
+    fig.suptitle("pilot_core on the AutoDRIVE RoboRacer sim (stock 2026-iros build; practice track unless noted), mean ± sd over repeats",
                  color=INK, fontweight="bold", x=0.01, ha="left")
     fig.tight_layout()
     fig.savefig(path, dpi=110, facecolor=SURFACE)

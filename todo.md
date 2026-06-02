@@ -26,7 +26,7 @@ pushed: the vast box's gh token has no UTASR access. The plan is in
     timeout and keeps driving the last command.
   - **2e** (`runs/2e_calibration`): 24.8 m/s per unit throttle; effective wheelbase 0.342 m.
   - **2f PASS**, before and after the ZMQ removal (`runs/2af`, `runs/2f_recheck`):
-    3 laps, 0 collisions, 4.1 cm cross-track RMS. The map is in `maps/autodrive_practice`.
+    3 laps, 0 collisions each; cross-track RMS 4.4 cm before, 4.1 cm after. The map is in `maps/autodrive_practice`.
   - The ZMQ bridge path is removed (`b8754ef`).
 - **Step 3 Stage A.** All 48 runs done (16 cells × 3) in
   `/workspaces/proof/bench_runs/2026-10-20/A`; the summary has not been run.

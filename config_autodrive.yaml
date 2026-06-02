@@ -58,6 +58,7 @@ track_control:
   mapping_drive:
     speed: 0.6                  # m/s
     min_speed: 0.4
+    gap_select: area            # widest-gap turns into the compete track's hairpin pockets
 
 # LidarProjectionWorker (enable_slam + sim_pose); sim Hokuyo UST-10LX, 1081 rays, 0.06-10 m
 lidar:

@@ -31,6 +31,10 @@ class LidarGapConfig:
     gap_threshold: float = 1.2       # m, a beam counts as free beyond this
     smooth: int = 9                  # beams, moving average
     centre_weight: float = 0.7       # 0 = aim at the deepest beam of the gap, 1 = its centre
+    # which free gap to take: "widest" (most beams) or "area" (largest sum of ranges).
+    # "widest" turns into a short dead-end pocket next to a hairpin when the pocket spans
+    # more beams than the lane opening (compete track, docs/autodrive.md); "area" doesn't
+    gap_select: str = "widest"
     wall_margin: float = 0.45        # m; closer side returns push the steering away
     wall_gain: float = 0.8           # rad of steering per m inside wall_margin
     steer_gain: float = 1.0
@@ -68,10 +72,15 @@ class LidarGapFollower:
         free = r > c.gap_threshold
         if not free.any():
             return float(ang[int(np.argmax(r))])
-        # longest run of free beams
+        # runs of free beams; take the longest, or the one with the most range in it
         edges = np.diff(np.concatenate([[0], free.astype(int), [0]]))
         starts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
-        k = int(np.argmax(ends - starts))
+        if c.gap_select == "area":
+            k = int(np.argmax([r[s:e].sum() for s, e in zip(starts, ends)]))
+        elif c.gap_select == "widest":
+            k = int(np.argmax(ends - starts))
+        else:
+            raise ValueError(f"gap_select must be 'widest' or 'area', not {c.gap_select!r}")
         s, e = starts[k], ends[k]
         deepest = s + int(np.argmax(r[s:e]))
         centre = (s + e - 1) / 2.0

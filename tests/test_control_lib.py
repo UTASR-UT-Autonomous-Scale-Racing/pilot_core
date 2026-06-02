@@ -234,3 +234,35 @@ class TestSafety:
         for k in range(5):
             out = sup.step(k * 0.02, Command(0.0, -1.0), k * 0.02, armed=True, speed=0.0)
         assert out.throttle == pytest.approx(-0.3) and sup.status.speed_limited
+
+
+class TestLidarGap:
+
+    @staticmethod
+    def _hairpin_scan():
+        """A wide, shallow pocket on the right and a narrower, deep lane on the left,
+        with a wall ahead: the scans before the compete-track hairpin collisions."""
+        from control.lidar_gap import ANGLE_INCREMENT, ANGLE_MIN
+
+        ang = np.degrees(ANGLE_MIN + np.arange(1080) * ANGLE_INCREMENT)
+        r = np.full(1080, 0.8)
+        r[(ang > -100) & (ang < -10)] = 1.7
+        r[(ang > 50) & (ang < 100)] = np.inf
+        return r
+
+    def test_widest_takes_the_shallow_pocket(self):
+        from control.lidar_gap import LidarGapConfig, LidarGapFollower
+
+        assert LidarGapFollower(P, LidarGapConfig()).target_angle(self._hairpin_scan()) < 0
+
+    def test_area_takes_the_deep_lane(self):
+        from control.lidar_gap import LidarGapConfig, LidarGapFollower
+
+        f = LidarGapFollower(P, LidarGapConfig(gap_select="area"))
+        assert np.degrees(f.target_angle(self._hairpin_scan())) > 50
+
+    def test_unknown_gap_select_rejected(self):
+        from control.lidar_gap import LidarGapConfig, LidarGapFollower
+
+        with pytest.raises(ValueError):
+            LidarGapFollower(P, LidarGapConfig(gap_select="nope")).target_angle(self._hairpin_scan())

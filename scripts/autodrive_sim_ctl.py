@@ -10,7 +10,7 @@ IP/port fields and a Connected/Disconnected toggle, so this clicks it.
     python scripts/autodrive_sim_ctl.py reconnect        # off, then on (after a server restart)
     python scripts/autodrive_sim_ctl.py menu             # open the left menu if it is closed
     python scripts/autodrive_sim_ctl.py close-menu       # hide it (clean screen captures)
-    python scripts/autodrive_sim_ctl.py reset|quality    # HUD Reset / quality toggle
+    python scripts/autodrive_sim_ctl.py reset|quality|light   # HUD Reset / quality / Scene Light toggle
 
 """
 
@@ -32,6 +32,7 @@ MENU_BTN = (49, 30)            # hamburger, top left
 CONNECT_BTN = (149, 275)       # Connected / Disconnected label
 RESET_BTN = (119, 605)         # Reset (respawn at the start line)
 QUALITY_BTN = (149, 473)       # Low / High Quality toggle
+LIGHT_BTN = (149, 541)         # Scene Light toggle
 # "Disconnected" is ~40 px wider than "Connected": white text in this box = disconnected
 LABEL_TAIL = (231, 265, 261, 285)      # x0, y0, x1, y1
 MENU_PROBE = (27, 80, 159, 98)         # "IP Address" heading
@@ -99,11 +100,15 @@ def menu_open(img=None) -> bool:
 
 
 def ensure_menu() -> None:
-    if not menu_open():
-        _click(MENU_BTN)
-        time.sleep(1.0)
-    if not menu_open():
-        raise RuntimeError("could not open the sim menu")
+    if menu_open():
+        return
+    _click(MENU_BTN)
+    # the slide-in can take over a second right after a run disconnects
+    deadline = time.monotonic() + 3.0
+    while not menu_open():
+        if time.monotonic() > deadline:
+            raise RuntimeError("could not open the sim menu")
+        time.sleep(0.25)
 
 
 def close_menu() -> None:
@@ -132,11 +137,11 @@ def set_state(target: str, tries: int = 4) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["state", "connect", "disconnect", "reconnect", "menu", "close-menu", "reset", "quality"])
+    ap.add_argument("cmd", choices=["state", "connect", "disconnect", "reconnect", "menu", "close-menu", "reset", "quality", "light"])
     a = ap.parse_args()
-    if a.cmd in ("reset", "quality"):
+    if a.cmd in ("reset", "quality", "light"):
         ensure_menu()
-        _click(RESET_BTN if a.cmd == "reset" else QUALITY_BTN)
+        _click({"reset": RESET_BTN, "quality": QUALITY_BTN, "light": LIGHT_BTN}[a.cmd])
         print(a.cmd + " clicked")
     elif a.cmd == "close-menu":
         close_menu()

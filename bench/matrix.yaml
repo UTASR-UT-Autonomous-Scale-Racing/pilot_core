@@ -39,8 +39,10 @@ stages:
 
 # cells that cannot run on the stock 2026-iros build
 skip:
-  orbslam3_cuda: "needs Joshua's build: SLAMWorker is ORB-SLAM3 RGB-D and the stock sim has no depth camera"
-  orbslam3_cpu: "needs Joshua's build: SLAMWorker is ORB-SLAM3 RGB-D and the stock sim has no depth camera"
+# orbslam3_*: "FAILED:" = tried offline (scripts/autodrive_slam_replay.py on recorded laps,
+# Low/High/Ultra quality) and not usable, so not run live. Evidence: proof/runs/3c_camera
+  orbslam3_cuda: "FAILED: replay ATE 2.5-2.7 m over an 8.5 m lap, Sim(3) scale 42-56 (metric RGB-D should be 1): features are horizon and view-dependent floor glare, the car fills ~55 % of the 192x108 view"
+  orbslam3_cpu: "FAILED: as orbslam3_cuda (High quality, CPU: 50 % tracked, 12 maps, ATE 2.67 m, scale 67)"
   joshua: "needs Joshua's build (not available)"
 
 pose_map:

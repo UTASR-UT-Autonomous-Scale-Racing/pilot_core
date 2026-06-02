@@ -495,6 +495,13 @@ def run_matrix(matrix: str, stage: str, out: str, only: Optional[list[str]] = No
     return done_cells
 
 
+def _skip_status(reason: str) -> tuple[str, str]:
+    """A matrix skip reason "FAILED: ..." is a cell that was tried offline and failed."""
+    if reason.startswith("FAILED:"):
+        return "FAILED", reason[len("FAILED:"):].strip()
+    return "SKIPPED", reason
+
+
 def write_results_csv(out: str) -> str:
     """One row per run, every stage, plus a SKIPPED row per skipped cell."""
     rows = []
@@ -503,7 +510,8 @@ def write_results_csv(out: str) -> str:
             base = {"stage": stage, "cell": c["id"], **{k.split(".")[-1]: v for k, v in c["params"].items()},
                     "track": c["track"]}
             if c.get("skip"):
-                rows.append({**base, "status": "SKIPPED", "note": c["skip"]})
+                status, note = _skip_status(c["skip"])
+                rows.append({**base, "status": status, "note": note})
                 continue
             for i, r in enumerate(c["runs"]):
                 status = "ERROR" if r.get("error") else ("ABORTED" if r.get("aborted") else "OK")
@@ -608,7 +616,7 @@ def write_summary(out: str) -> str:
         for c in sorted(cells, key=lambda c: (bool(c.get("skip")),) + (_rank_key(c) if c.get("metrics") else (0,))):
             name = ", ".join(f"{k.split('.')[-1]}={v}" for k, v in c["params"].items())
             if c.get("skip"):
-                lines.append(f"| {name} | SKIPPED: {c['skip']} |" + " |" * (len(cols) - 1))
+                lines.append(f"| {name} | {': '.join(_skip_status(c['skip']))} |" + " |" * (len(cols) - 1))
                 continue
             m = c["metrics"]
             vals = []

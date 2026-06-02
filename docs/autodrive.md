@@ -96,7 +96,7 @@ The protocol spike is `scripts/autodrive_spike.py`; the live probes are in
 ## Known limitations
 
 - **Sim freezes on a shared GPU.** When other jobs load the GPU, the sim freezes for up
-  to several seconds; 25–50 % of wall time in some runs on the vast box. During a freeze
+  to several seconds; 0–90 % of wall time per run on the vast box (`stalled_pct`). During a freeze
   its graphics thread sits in the NVIDIA kernel driver (`D` state, `os_acquire_rwlock_read`).
   The sim clock pauses with it, so its lap times stay valid. pilot_core's state goes
   stale (0.5 s), the watchdog sends neutral, and control resumes when frames return.
@@ -109,6 +109,15 @@ The protocol spike is `scripts/autodrive_spike.py`; the live probes are in
   is SIGKILLed (the orphaned link worker notices and sends neutral). If every
   pilot_core process is SIGKILLed at once, the car keeps driving its last command.
   That needs a sim-side timeout, like the firmware's 250 ms.
+- **ORB-SLAM3 on the stock camera does not work.** The 192×108 front camera sits near
+  the rear axle, so the car's own body fills about 55 % of the view; with that masked,
+  the features left are the horizon and the edges of floor glare, which moves with the
+  camera. Offline replays (`scripts/autodrive_slam_replay.py`, one lap each) at the HUD's
+  Low / High / Ultra Quality, CUDA and CPU: 30–63 % of frames tracked, ATE 2.5–2.7 m over
+  an 8.5 m lap, Sim(3) scale 42–67 where metric RGB-D should give 1. High and Ultra track
+  more frames but are no more accurate. The HUD "Scene Light" toggle turns the light off
+  (the default is on). `autodrive_sim_ctl.py quality` cycles Low → High → Ultra; the
+  benchmark ran at Low.
 - **Missing sensors.** Depth camera and checkpoint counters need Joshua Choi's modified
   build. The worker accepts likely key names, but they are unconfirmed.
 

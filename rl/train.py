@@ -3,6 +3,7 @@
     python rl/train.py                            # new run, auto-numbered PPO_N
     python rl/train.py --resume PPO_1 --step 50000
     python rl/train.py --policy-from PPO_5 --value-from PPO_3   # merge nets
+    python rl/train.py --resume PPO_1 --boundaries maps/autodrive_practice   # e.g. fine-tune a rl/pretrain_bicycle.py run
 """
 
 import argparse
@@ -298,7 +299,11 @@ def main() -> None:
     parser.add_argument("--pilot-config", default=os.path.join(REPO_ROOT, "config_autodrive.yaml"),
                         dest="pilot_config",
                         help="pilot config whose `safety` section the env's actuator uses (default: config_autodrive.yaml)")
+    parser.add_argument("--boundaries", default=None,
+                        help=f"map dir (outer_line.npy + inner_line.npy) of the track the sim runs (default: {BOUNDARY_PATH})")
     args = parser.parse_args()
+    if args.boundaries:
+        globals()["BOUNDARY_PATH"] = args.boundaries   # read by make_env() and _save_config()
     if bool(args.policy_from) != bool(args.value_from):
         parser.error("--policy-from and --value-from have to be given together")
 

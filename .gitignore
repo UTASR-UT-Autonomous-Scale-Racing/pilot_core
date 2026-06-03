@@ -32,6 +32,7 @@ orbslam3_python*.so
 *_policy.json
 policy.json
 track_seg.json
+sim_track_seg.json
 
 # Datasets and recordings
 *.npz

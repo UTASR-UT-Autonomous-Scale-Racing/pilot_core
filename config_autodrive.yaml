@@ -27,6 +27,10 @@ depth_raw_scale: null
 
 vision:
   enabled: false
+  # needs sim_depth (frames upscaled x2, car body hidden, depth from the LiDAR): the
+  # intrinsics are the sim camera's at that resolution, not slam.settings
+  camera_settings: "sim_camera/orbslam_settings.yaml"
+  model: ground_plane           # ground_plane | onnx (onnx_model: trained on sim runs)
 
 control_mode: "pure_pursuit"    # pure_pursuit | stanley | lqr | mpc | policy
 control_rate_hz: 50             # StateWorker + ActuatorWorker loop rate

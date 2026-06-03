@@ -183,6 +183,7 @@ class AutoDRIVEWorker(SimDecoder):
         self._reset_started: Optional[float] = None
         self._dedupe = bool(cfg.get("sim_time_dedupe", True))
         self._depth_fn = None
+        self._frame_errors = 0
         sd = cfg.get("sim_depth")
         if sd and self._frame_buf is not None:
             from .lidar_depth import CameraModel, LidarDepth
@@ -316,12 +317,19 @@ class AutoDRIVEWorker(SimDecoder):
         if new_frame:
             self._last_sim_time = sim_time
             self._frames += 1
+            # the camera on its own: a frame that fails must not hold back the pose
+            # (and so the controller) or the other sensors
             try:
                 if self._frame_buf is not None:
                     if self._depth_fn is not None and data.get("front_camera") and data.get("lidar"):
                         self._write_rgbd(data)
                     else:
                         self._process_frame_data(data)
+            except Exception as e:
+                self._frame_errors += 1
+                if self._frame_errors in (1, 10, 100) or self._frame_errors % 1000 == 0:
+                    self.logger.error(f"Error writing the sim frame ({self._frame_errors} so far): {e}")
+            try:
                 self._process_imu_data(data)
                 self._process_pose_data(data)
                 self._process_lidar_data(data)

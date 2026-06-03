@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import uuid
 
+import numpy as np
 import pytest
 
 import start
@@ -124,3 +125,19 @@ def test_shipped_files_resolve_from_any_directory(tmp_path, monkeypatch):
     assert "control_mode" in start.load_config("config.yaml")
     (tmp_path / "config.yaml").write_text("control_mode: local\n")      # a local file wins
     assert start.load_config("config.yaml")["control_mode"] == "local"
+
+
+def test_sim_depth_frames_fit_and_vision_uses_the_sim_camera():
+    # sim_depth upscales the 192x108 sim camera (x2 here): the frame buffer must hold
+    # that, and VisionWorker's intrinsics are the sim camera's, not slam.settings
+    p = _build("config_autodrive.yaml", sim_depth={"camera": "sim_camera/camera.yaml", "scale": 2},
+               vision={"enabled": True, "model": "ground_plane",
+                       "camera_settings": "sim_camera/orbslam_settings.yaml"})
+    try:
+        by = {w.name: w for w in p.workers}
+        by["autodrive"].config["frame_buffer"].write(np.zeros((216, 384, 3), np.uint8),
+                                                      np.zeros((216, 384), np.float32))
+        assert by["vision"].config["camera_settings"] == "sim_camera/orbslam_settings.yaml"
+    finally:
+        for b in p.buffers:
+            b.unlink()

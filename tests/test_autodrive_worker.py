@@ -331,3 +331,29 @@ def test_closed_loop_mapping_lap_then_pure_pursuit(tmp_path, monkeypatch):
         for b in p.buffers:
             b.unlink()
     assert all(proc.exitcode == 0 for proc in procs), [(q.name, q.exitcode) for q in procs]
+
+
+def test_a_frame_that_fails_still_writes_the_pose():
+    # e.g. frame_buf sized for 192x108 while sim_depth writes 384x216: the camera error
+    # must not hold back the pose, or the controller never sees the car move
+    fake = FakeAutoDRIVE(port=1)
+    fake.car.x, fake.car.y = 2.0, -1.5
+    names = [f"ad_{_uid()}" for _ in range(2)]
+    pb, fb = PoseBuffer(slots=4, name=names[0]), FrameBuffer(slots=2, name=names[1], max_payload=1000)
+    w = AutoDRIVEWorker(host="127.0.0.1", port=0, pose_buffer=pb, frame_buffer=fb,
+                        sim_depth={"camera": "sim_camera/camera.yaml", "scale": 2})
+    w.setup()
+
+    class _WS:
+        def send(self, msg):
+            pass
+
+    try:
+        w._on_bridge(_WS(), "42" + json.dumps(["Bridge", fake.telemetry()]))
+        assert w._frame_errors == 1
+        _, pose, _, _ = pb.read_latest()
+        assert pose[:2, 3] == pytest.approx([2.0, -1.5], abs=1e-4)
+    finally:
+        w.teardown()
+        for b in (pb, fb):
+            b.unlink()

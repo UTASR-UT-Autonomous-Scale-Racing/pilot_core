@@ -251,8 +251,12 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     buf_cfg = config.get("buffers", {})
     resolution = config.get("resolution", [640, 400])
 
-    # frame payload = meta(16) + W*H*3 RGB uint8 + W*H float32 depth in metres
+    # frame payload = meta(16) + W*H*3 RGB uint8 + W*H float32 depth in metres;
+    # sim_depth (AutoDRIVE RGB-D from the LiDAR) writes frames upscaled by its scale
     width, height = resolution
+    if config.get("sim_depth"):
+        _s = float(config["sim_depth"].get("scale", 2.0))
+        width, height = int(round(width * _s)), int(round(height * _s))
     _frame_max_payload = 16 + width * height * 3 + width * height * 4
     frame_buf = FrameBuffer(
         slots=buf_cfg.get("frame", {}).get("slots", 8),
@@ -456,7 +460,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 mode=vision_cfg.get("model", "ground_plane"),
                 onnx_model=vision_cfg.get("onnx_model", "track_seg.onnx"),
                 threshold=vision_cfg.get("threshold"),
-                camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
+                camera_settings=vision_cfg.get("camera_settings", slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml")),
                 ground_plane=vision_cfg.get("ground_plane", {}),
             )
         )

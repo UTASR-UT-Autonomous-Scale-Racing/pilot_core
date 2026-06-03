@@ -12,6 +12,7 @@ live (upscaled, car painted out, contrast-equalised).
     python scripts/autodrive_vision_labels.py dataset <rec dir> [<rec dir> ...] --map maps/autodrive_practice \\
         --out datasets/sim_track [--stride 2]
     python scripts/autodrive_vision_labels.py score <rec dir> --map maps/autodrive_practice   # recorded seg vs GT
+    python scripts/autodrive_vision_labels.py eval <dataset dir> --onnx track_seg.onnx          # model on a dataset
 """
 
 from __future__ import annotations
@@ -128,6 +129,33 @@ def score(rec: str, map_dir: str, camera: str) -> dict:
             "precision": tp / max(tp + fp, 1), "recall": tp / max(tp + fn, 1)}
 
 
+def eval_onnx(data: str, onnx: str, camera: str, scale: float = 2.0) -> dict:
+    """VisionWorker's ONNX segmenter on a dataset made by `dataset`; the car body is left out."""
+    import glob
+
+    import cv2
+
+    from vision.segmenters import OnnxTrackSegmenter
+    from workers.lidar_depth import CameraModel
+
+    seg = OnnxTrackSegmenter(onnx)
+    car = CameraModel.from_yaml(camera, scale=scale).load_mask()
+    tp = fp = fn = 0
+    ious = []
+    for p in sorted(glob.glob(os.path.join(data, "images", "*.png"))):
+        rgb = cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB)
+        g = cv2.imread(p.replace(os.sep + "images" + os.sep, os.sep + "masks" + os.sep), cv2.IMREAD_GRAYSCALE) > 0
+        pred = seg.get_mask(None, rgb) > 0
+        ok = ~car if car is not None else np.ones_like(g)
+        a, b, c = int((pred & g & ok).sum()), int((pred & ~g & ok).sum()), int((~pred & g & ok).sum())
+        tp, fp, fn = tp + a, fp + b, fn + c
+        ious.append(a / max(a + b + c, 1))
+    return {"data": data, "model": onnx, "images": len(ious), "iou": tp / max(tp + fp + fn, 1),
+            "iou_per_image_median": float(np.median(ious)) if ious else float("nan"),
+            "iou_per_image_p10": float(np.percentile(ious, 10)) if ious else float("nan"),
+            "precision": tp / max(tp + fp, 1), "recall": tp / max(tp + fn, 1)}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -141,11 +169,17 @@ def main() -> int:
     s.add_argument("recording")
     s.add_argument("--map", required=True)
     s.add_argument("--camera", default="sim_camera/camera.yaml")
+    e = sub.add_parser("eval")
+    e.add_argument("data")
+    e.add_argument("--onnx", required=True)
+    e.add_argument("--camera", default="sim_camera/camera.yaml")
     a = ap.parse_args()
     if a.cmd == "dataset":
         print(f"{build_dataset(a.recordings, a.map, a.out, a.stride, a.camera)} images -> {a.out}")
-    else:
+    elif a.cmd == "score":
         print(json.dumps(score(a.recording, a.map, a.camera), indent=1))
+    else:
+        print(json.dumps(eval_onnx(a.data, a.onnx, a.camera), indent=1))
     return 0
 
 

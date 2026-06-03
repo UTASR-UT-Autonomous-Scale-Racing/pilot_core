@@ -133,3 +133,29 @@ A run launches `start.py` with keys piped in, connects, resets and arms the sim,
 counts laps from `sim_events.jsonl`. It scores the sim's own trajectory against the map
 the controller raced on with `control.sim.score_trajectory`, plus link timing and CPU
 per worker.
+
+## Vision (`VisionWorker` in the sim)
+
+Needs `sim_depth` (frames upscaled ×2, car body painted out, depth from the LiDAR); the
+vision section of `config_autodrive.yaml` points it at the sim camera's intrinsics.
+Ground truth comes from `scripts/autodrive_vision_labels.py`: a pixel is track when
+the LiDAR depth adapter puts its ray on the floor before any wall and that floor point,
+placed with the sim pose, lies between the mapped boundaries (car body ignored).
+
+```bash
+# record runs with sim_depth on (any controller), e.g.
+python scripts/autodrive_bench.py run --out runs/v1 --laps 2 --set sim_depth.camera=sim_camera/camera.yaml \
+    --set sim_depth.scale=2 --set enable_slam=false --set use_saved_map=true
+python scripts/autodrive_vision_labels.py dataset runs/v*/rec/*/ --map maps/autodrive_practice --out datasets/sim_track
+python scripts/train_vision.py --data datasets/sim_track --model fast_scnn --size 224 384 --epochs 40 \
+    --batch-size 16 --out sim_track_seg.onnx               # GPU if available, ~13 min
+python scripts/autodrive_vision_labels.py eval datasets/sim_track_compete --onnx sim_track_seg.onnx
+python scripts/autodrive_vision_labels.py score <run>/rec/<ts> --map maps/autodrive_compete   # a live run
+```
+
+Trained on 4 practice-track runs (1417 images; pure_pursuit / stanley / lqr / mpc,
+1.5–4.0 m/s), checked on the compete track it never saw: 926 images IoU 0.941
+(precision 0.994, recall 0.946); live in `VisionWorker` (`vision.model: onnx`) over
+2 laps of compete, IoU 0.939, with lap times unchanged. `ground_plane` live on practice:
+IoU 0.94, but its depth is the same LiDAR adapter the labels come from, so that number
+mostly checks the wiring.

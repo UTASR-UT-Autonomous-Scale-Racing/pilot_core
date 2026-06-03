@@ -41,6 +41,10 @@ class _ProbabilityGraph(nn.Module):
         return torch.sigmoid(self.model(x))
 
 
+def _device(model: torch.nn.Module) -> torch.device:
+    return next(model.parameters()).device
+
+
 def evaluate(model: TrackSegNet, pairs: List[Tuple[str, str]], size, threshold: float = 0.5) -> float:
     """Mean track IoU over ``pairs``."""
     model.eval()
@@ -49,7 +53,7 @@ def evaluate(model: TrackSegNet, pairs: List[Tuple[str, str]], size, threshold: 
         for img, msk in pairs:
             rgb, mask = load_pair(img, msk, size)
             x, _ = to_tensor_batch([rgb], [mask])
-            pred = (torch.sigmoid(model(x))[0, 0].numpy() > threshold)
+            pred = (torch.sigmoid(model(x.to(_device(model))))[0, 0].cpu().numpy() > threshold)
             ious.append(track_iou(pred, mask))
     return float(np.mean(ious)) if ious else float("nan")
 
@@ -73,7 +77,8 @@ def train(model: TrackSegNet, train_pairs, val_pairs, size, epochs: int = 40, ba
                 continue
             batch = [augment(*load_pair(*train_pairs[i], size), rng) for i in idx]
             x, y = to_tensor_batch([r for r, _ in batch], [m for _, m in batch])
-            loss = bce_dice_loss(model(x), y)
+            dev = _device(model)
+            loss = bce_dice_loss(model(x.to(dev)), y.to(dev))
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -90,6 +95,7 @@ def train(model: TrackSegNet, train_pairs, val_pairs, size, epochs: int = 40, ba
 def export_onnx(model: TrackSegNet, path: str, size, meta: dict | None = None) -> str:
     """Export ``RGB (N, 3, H, W) in [0, 1] → track probability (N, 1, H, W)`` + JSON sidecar."""
     h, w = size
+    model = model.cpu()
     graph = _ProbabilityGraph(model).eval()      # eval on the wrapper: export traces in its mode
     torch.onnx.export(graph, torch.zeros(1, 3, h, w), path,
                       input_names=["rgb"], output_names=["track_prob"],

@@ -35,6 +35,7 @@ def main() -> int:
     ap.add_argument("--val", type=float, default=0.15, help="validation fraction (default: 0.15)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="track_seg.onnx", help="output ONNX path (+ .json sidecar)")
+    ap.add_argument("--device", default=None, help="torch device (default: cuda if available, else cpu)")
     args = ap.parse_args()
 
     import torch
@@ -49,7 +50,8 @@ def main() -> int:
     tr = [pairs[i] for i in order[n_val:]]
     print(f"{len(tr)} training / {len(val)} validation images, input {args.size[0]}x{args.size[1]}, model {args.model}")
 
-    model = TrackSegNet(args.model, pretrained_backbone=args.pretrained)
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    model = TrackSegNet(args.model, pretrained_backbone=args.pretrained).to(device)
     model = train(model, tr, val, tuple(args.size), args.epochs, args.batch_size, args.lr, args.seed)
     val_iou = evaluate(model, val, tuple(args.size)) if val else float("nan")
 

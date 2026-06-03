@@ -1,0 +1,44 @@
+%YAML:1.0
+# AutoDRIVE stock sim front camera, RGB-D with depth from the LiDAR (workers/lidar_depth.py).
+# For the textured sim copy (scripts/autodrive_texture_sim.py, SIM_VARIANT=practice_textured):
+# sim_camera/orbslam_settings.yaml with the ORB extractor tuned on its high-contrast shapes
+# (replays of one lap, 4 runs each: ATE 1.16 +- 0.13 m vs 1.67 +- 0.24 m with the stock-sim values).
+File.version: "1.0"
+
+Camera.type: "PinHole"
+Camera1.fx: 342.532239
+Camera1.fy: 342.532239
+Camera1.cx: 191.500000
+Camera1.cy: 107.500000
+Camera1.k1: 0.0
+Camera1.k2: 0.0
+Camera1.p1: 0.0
+Camera1.p2: 0.0
+Camera.width: 384
+Camera.height: 216
+Camera.fps: 15
+# 0: BGR, 1: RGB
+Camera.RGB: 1
+
+RGBD.DepthMapFactor: 1.0
+# close / far point threshold = Stereo.b x Stereo.ThDepth = 5 m
+Stereo.b: 0.1
+Stereo.ThDepth: 50.0
+
+# high-contrast shapes: standard FAST thresholds, more pyramid levels for the near floor
+ORBextractor.nFeatures: 1500
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0

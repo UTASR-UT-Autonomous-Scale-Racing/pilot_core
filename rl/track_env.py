@@ -43,6 +43,7 @@ class TrackEnv(gym.Env):
     safety: SafetyConfig overrides (car's ``safety`` section), None = defaults.
     shm_prefix: shared-memory name prefix, random by default.
     stale_timeout / reset_timeout / stuck_grace_s: seconds.
+    reset_settle_s: reset() returns once poses have streamed without a gap this long.
     """
 
     metadata = {"render_modes": []}
@@ -61,6 +62,7 @@ class TrackEnv(gym.Env):
         stale_timeout: float = 0.5,
         reset_timeout: float = 5.0,
         stuck_grace_s: float = 1.0,
+        reset_settle_s: float = 1.0,
     ) -> None:
         super().__init__()
 
@@ -73,6 +75,7 @@ class TrackEnv(gym.Env):
         self._stale_timeout = float(stale_timeout)
         self._reset_timeout = float(reset_timeout)
         self._stuck_grace = int(round(stuck_grace_s * policy_hz))
+        self._reset_settle_s = float(reset_settle_s)
         # full SafetyConfig, so it can be recorded next to the model
         self.safety = asdict(SafetyConfig(**(safety or {})))
 
@@ -193,10 +196,23 @@ class TrackEnv(gym.Env):
         # moving after the respawn
         time.sleep(0.4)
 
-        # only a pose produced after the reset went out counts
-        result = self._wait_for_pose(after_seq=seq_at_reset, timeout=self._reset_timeout)
+        # only a pose produced after the reset went out counts. The stock sim streams a
+        # few more poses, then pauses ~2 s while it respawns the car: wait until poses have
+        # kept coming for reset_settle_s, or the first step() lands in that pause
+        deadline = time.monotonic() + self._reset_timeout
+        result = self._wait_for_pose(after_seq=seq_at_reset, deadline=deadline)
         if result is None:
             raise TimeoutError("No fresh pose from the simulator after reset")
+        steady_since = time.monotonic()
+        while time.monotonic() - steady_since < self._reset_settle_s:
+            r = self._wait_for_pose(after_seq=self._last_pose_seq,
+                                    deadline=min(deadline, time.monotonic() + self._stale_timeout))
+            if r is not None:
+                result = r
+            elif time.monotonic() >= deadline:
+                raise TimeoutError("The pose stream did not settle after the reset")
+            else:
+                steady_since = time.monotonic()      # a gap: start the settle again
         pos, heading, speed = result
 
         self._step_count = 0

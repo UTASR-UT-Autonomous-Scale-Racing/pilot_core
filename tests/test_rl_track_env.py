@@ -89,3 +89,35 @@ def test_track_env_against_fake_sim():
     for suffix in ("pose", "ctrl", "act", "state"):
         with pytest.raises(FileNotFoundError):
             shared_memory.SharedMemory(name=f"{prefix}_{suffix}")
+
+
+def test_reset_waits_out_the_respawn_pause():
+    # the stock sim streams a few poses after a reset, then pauses ~2 s while it
+    # respawns the car: reset() must not return into that pause, or every episode
+    # ends on its first step as a stale pose (what live fine-tuning hit)
+    from rl.track_env import TrackEnv
+
+    port = _free_port()
+    outer, inner, _ = oval_track()
+    env = TrackEnv(sim_host="127.0.0.1", sim_port=port, n_ahead=5, policy_hz=20.0,
+                   shm_prefix=f"te_{uuid.uuid4().hex[:6]}", stale_timeout=0.3, reset_timeout=10.0,
+                   safety={"speed_cap": 1.5, "cap_margin": 0.2, "speed_per_throttle": None,
+                           "command_timeout": 0.5})
+    sim = FakeAutoDRIVE(port, rate_hz=25.0, lidar=False, camera=False)
+    sim.reset_pause = (0.6, 1.0)        # starts after the old reset() had returned
+    try:
+        env.load_boundaries(outer, inner)
+        env.start()
+        sim.start()
+        deadline = time.monotonic() + 10
+        while not (sim.stats.connected and sim.stats.sent > 5):
+            assert time.monotonic() < deadline, "sim never connected"
+            time.sleep(0.05)
+        for _ in range(2):
+            env.reset()
+            for _ in range(5):
+                _, _, term, trunc, info = env.step(np.array([0.0, 0.5], np.float32))
+                assert not trunc and not info.get("stale_pose")
+    finally:
+        env.close()
+        sim.close()

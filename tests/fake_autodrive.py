@@ -93,6 +93,10 @@ class FakeAutoDRIVE:
         self.stats = FakeSimStats()
         self.speed_override: Optional[float] = None   # report this speed instead of the plant's
         self.paused = False                            # stop emitting telemetry (stalled sim)
+        # the stock sim keeps streaming for a moment after a reset, then pauses ~2 s while
+        # it respawns the car: (seconds after the reset, pause length); 0 = no pause
+        self.reset_pause = (0.15, 0.0)
+        self._reset_pause_window = (0.0, 0.0)
         self.cmd = Command(0.0, 0.0)
         self.lap_count = self.collisions = 0
         self.lap_times: List[float] = []
@@ -188,6 +192,8 @@ class FakeAutoDRIVE:
                     self.lap_count = self.collisions = 0
                     self.lap_times = []
                     self._place_at_start()
+                    t0 = time.monotonic() + self.reset_pause[0]
+                    self._reset_pause_window = (t0, t0 + self.reset_pause[1])
                 self.cmd = Command(0.0, 0.0)
             else:
                 self._reset_run = 0
@@ -249,7 +255,8 @@ class FakeAutoDRIVE:
                 while t_phys < now:
                     self._physics(t_phys, dt)
                     t_phys += dt
-            if streaming and now >= t_next_tx and not self.paused:
+            in_reset_pause = self._reset_pause_window[0] <= now < self._reset_pause_window[1]
+            if streaming and now >= t_next_tx and not self.paused and not in_reset_pause:
                 t_next_tx = now + 1.0 / self.rate_hz
                 with self._lock:
                     last = self.telemetry()

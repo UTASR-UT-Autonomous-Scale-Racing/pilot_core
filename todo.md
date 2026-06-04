@@ -39,8 +39,26 @@ pushed: the vast box's gh token has no UTASR access. The plan is in
 - `/workspaces/proof/validation.md` and `/workspaces/REPORT_PILOT_CORE.md` written.
 - Final pytest: 357 passed, 7 skipped.
 
+## Done 2026-10-21, later (vision, policy, telemetry export)
+
+- **Vision.** VisionWorker runs in the sim with sim_depth (`d0a249e`).
+  - Fixed: with sim_depth on, every frame was too big for the buffer, and the pose was held back with it.
+  - Fast-SCNN trained on sim runs: IoU 0.94 live on the unseen compete track (`d6e88ea`).
+- **Policy.**
+  - Bicycle-model pretraining, PPO_1 (`076feec`).
+  - Zero-shot on the live sim: lap 1 in 17.58 s, against pure_pursuit's 18.09 s at the same 2.0 m/s cap.
+  - Live fine-tune: 26.5k steps, 121 episodes, about 30 % of episodes collided from the start to the end.
+    No improvement; stopped. Checkpoints at 4.51M and 4.52M; PPO_1 at 4.5M is untouched.
+  - TrackEnv reset fix (`9d1070d`).
+  - The policy model key is `track_control.policy.model`.
+- **Telemetry export.** `scripts/export_recording.py` exports all buffers on one clock plus timeline CSVs.
+  The showcase run is in `/workspaces/proof/showcase`.
+
 ## Left to do
 
+0. Policy: the ~30 % collision rate live is most likely the bicycle env's small collision body (circles r=0.14 m).
+   Retrain in rl/bicycle_env.py with the real footprint and a wall margin, then benchmark
+   (3 runs x 2 laps, practice + compete) against pure_pursuit at the same cap.
 1. Push `autodrive-direct` once a gh token with UTASR access is available.
 2. Optional: re-run Stage A without other GPU jobs, since it had 0-89.8 % sim stalls.
 3. Optional: find out why the lidar_mapping laps (best 12.34-12.78 s) beat the saved map

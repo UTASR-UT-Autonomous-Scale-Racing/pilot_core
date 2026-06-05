@@ -93,22 +93,3 @@ def test_first_frame_gets_the_startup_timeout(monkeypatch):
     w._last_frame_t = time.monotonic() - 6.0
     w.step()
     w._start_device.assert_called_once()
-
-
-def test_synthetic_track_scene_publishes_projected_frames():
-    import uuid
-
-    from shared_buffer import FrameBuffer
-
-    fb = FrameBuffer(slots=2, name=f"cr_f_{uuid.uuid4().hex[:8]}", create=True)
-    try:
-        w = CameraWorker(name="camera", output_buffer=fb, synthetic=True, synthetic_scene="track",
-                         resolution=[160, 100], fps=1000)
-        w._logger = MagicMock()
-        w.setup()
-        w.step()
-        _, rgb, depth = fb.read_latest()
-        assert rgb.shape == (100, 160, 3) and depth.shape == (100, 160)
-        assert np.all(depth[-1] > 0) and depth[-1].max() < 2.0    # floor just ahead of the camera
-    finally:
-        fb.unlink()

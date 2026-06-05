@@ -375,9 +375,6 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     bc_cfg = dict(config.get("bc", {}))
     bc_cfg.setdefault("speed_per_throttle", speed_per_throttle)
 
-    use_synthetic = (
-        config.get("synthetic", False) or os.environ.get("PILOT_SYNTHETIC") == "1"
-    )
     workers: List[BaseWorker] = []
 
     rec_dir = None
@@ -422,18 +419,15 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         logger.info(f"AutoDRIVE sim link on {sim_host}:{sim_port}")
     else:
         # only one process can open the OAK-D, so the camera worker streams its IMU
-        oakd_imu_via_camera = use_oakd_imu and not use_synthetic
+        oakd_imu_via_camera = use_oakd_imu
         workers.append(
             CameraWorker(
                 name="camera",
                 output_buffer=frame_buf,
                 fps=fps,
                 resolution=resolution,
-                synthetic=use_synthetic,
                 imu_buffer=imu_buf if oakd_imu_via_camera else None,
                 settings_path=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
-                synthetic_scene=config.get("synthetic_scene", "corridor"),
-                synthetic_track=config.get("synthetic_track", {}),
                 **{k: v for k, v in config.get("camera", {}).items()
                    if k in ("max_exposure_us", "extended_disparity", "frame_timeout_s")},
             )
@@ -445,7 +439,6 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                     output_buffer=imu_buf,
                     i2c_address=i2c_address,
                     i2c_bus=i2c_bus,
-                    synthetic=use_synthetic,
                     poll_hz=config.get("imu_poll_hz", 100.0),
                 )
             )
@@ -570,7 +563,6 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 pointcloud_buffer=pc_buf,
                 keyframe_buffer=kf_buf,
                 map_reset_event=map_reset_event,
-                synthetic=use_synthetic,
                 vocab_path=slam_cfg.get(
                     "vocabulary", "ORB_SLAM3/Vocabulary/ORBvoc.txt"
                 ),

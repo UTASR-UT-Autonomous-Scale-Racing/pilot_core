@@ -38,7 +38,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[test]"                           # ,sim AutoDRIVE, ,plot HUD/figures, ,train torch, ,rl RL
 
 python start.py --config config_cpu.yaml           # OAK-D + map-free control, no actuator output
-python start.py --config config_dev_local.yaml     # no hardware: simulated track
+python start.py --config config_autodrive.yaml     # AutoDRIVE sim (docs/autodrive.md)
 ```
 
 Keys while running: `a` arm, `SPACE` disarm, `l` end of the mapping lap, `q` quit.
@@ -109,49 +109,13 @@ python rl/train.py && python rl/export_onnx.py --run PPO_N --out policy.onnx   #
 python scripts/train_vision.py --data datasets/track --model fast_scnn          # vision.model: onnx
 ```
 
-BC/VAE train on rendered depth; for the real car build `--data` from a recording
+BC/VAE train on depth rendered by the bicycle-model bench (`control/sim.py`); for the real car build `--data` from a recording
 (see below).
 
 Before driving: calibrate `track_control.speed.longitudinal.speed_per_throttle`,
 measure `vehicle_params.yaml` (F1TENTH placeholders) and the camera height/pitch
 (`depth_ftg`), then bench-test arm/disarm and steering direction with the wheels off
 the ground.
-
-## Dev simulator run
-
-![Camera and map over a dev-simulator run](docs/images/demo.gif)
-
-The dev simulator (`config_dev_local.yaml`, `synthetic_scene: track`) ray-casts a
-closed track with the camera 0.15 m up and pitched 12° down, and drives a scripted lap
-through the same workers as the car. The camera path is scripted (open loop); closed
-loop is shown with the bicycle model on the mapped track.
-
-```bash
-python start.py --config config_dev_local.yaml --enable-slam --control-mode pure_pursuit --recording
-python scripts/render_recording.py /tmp/pilot_recordings/<run> --out docs/images --truth config_dev_local.yaml --gif
-```
-
-What the car sees: RGB, depth, the `ground_plane` drivable mask and the `depth_ftg` scan.
-
-![What the car sees](docs/images/car_view.png)
-
-Track mapping: ORB-SLAM3 map points, the driven lap and the extracted boundaries
-(true walls dashed).
-
-![Track mapping](docs/images/map.png)
-
-The mapped track as the controllers use it, and a simulated `pure_pursuit` drive on it.
-
-![Mapped track](docs/images/track.png)
-
-| Against ground truth | Run shown | Repeat |
-| --- | --- | --- |
-| Floor fit (true 12°, 0.15 m) | 12.0°, 0.150 m | 12.0°, 0.150 m |
-| SLAM trajectory RMS | 1.0 cm | 1.4 cm |
-| Boundaries vs true walls (median / 95th pct) | 1.2 / 3.5 cm | 1.2 / 4.4 cm |
-| Simulated drive on the mapped track | 3 laps, 4.8 cm RMS, 100 % inside | 3 laps, 4.9 cm, 100 % |
-
-6 FPS on 4 CPU cores, limited by the synthetic renderer.
 
 ## Recording
 
@@ -162,12 +126,10 @@ so frames are usually sampled (`config.yaml` keeps every 2nd).
 
 ```bash
 python scripts/read_recording.py <run>                                     # per-buffer summary
-python scripts/render_recording.py <run> --out figs/                       # the figures above
+python scripts/render_recording.py <run> --out figs/                       # camera, map, track, timeline figures
 python scripts/recording_to_dataset.py <run> --bc demos.npz --label-source imu   # BC data from a hand-driven lap
 python scripts/recording_to_dataset.py <run> --vision datasets/track --bootstrap-masks
 ```
-
-![Recorded frames, sampled across the run](docs/images/frames.png)
 
 ## Configuration
 
@@ -175,7 +137,6 @@ python scripts/recording_to_dataset.py <run> --vision datasets/track --bootstrap
 | ---- | --- |
 | `config.yaml` | Car (Jetson): I2C actuator, SLAM, `pure_pursuit` |
 | `config_cpu.yaml` | Workstation with OAK-D; actuator output disabled |
-| `config_dev_local.yaml` | No hardware: simulated track |
 | `config_autodrive.yaml` | AutoDRIVE RoboRacer Unity sim, direct link on :4567 ([docs/autodrive.md](docs/autodrive.md)) |
 
 `--config` is required; `--enable-slam`, `--recording`, `--control-mode`,
@@ -229,7 +190,6 @@ contents, checksums, rebuild commands and the data still to collect are in
 | `control/` | Controllers, EKF, safety supervisor, bicycle-model sim (plain library) |
 | `vision/` | Track segmentation models, training and inference |
 | `rl/` | PPO training: bicycle-model pretraining and the live-sim `TrackEnv` |
-| `synthetic/` | Synthetic sensors for the hardware-free dev simulator |
 | `scripts/` | Setup, benchmark, calibration, training, recording and rendering tools |
 | `tests/` | pytest suite; `fake_autodrive.py` stands in for the sim |
 | `bench/` | Benchmark matrix and dated result tables |
@@ -242,9 +202,9 @@ contents, checksums, rebuild commands and the data still to collect are in
 ## Development
 
 ```bash
-PILOT_SYNTHETIC=1 python -m pytest -m "not oakd and not slam"   # hardware-free suite (CI)
+python -m pytest -m "not oakd and not slam"                     # hardware-free suite (CI)
 OAKD_AVAILABLE=1 python -m pytest -m oakd                       # with an OAK-D on USB 3
-python -m pyflakes control vision workers shared_buffer synthetic rl scripts tests start.py
+python -m pyflakes control vision workers shared_buffer rl scripts tests start.py
 ```
 
 ## Documentation

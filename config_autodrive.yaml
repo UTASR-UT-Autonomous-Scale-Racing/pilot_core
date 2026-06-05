@@ -17,7 +17,6 @@ sim_camera: true                # decode the 192x108 front camera into frame_buf
 i2c_address: null
 i2c_bus: null
 use_oakd_imu: false
-synthetic: false
 
 resolution: [192, 108]          # sim front camera, [width, height]
 fps: 15

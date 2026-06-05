@@ -115,7 +115,7 @@ def test_map_reset_while_mapping_adopts_new_map():
         fb.unlink(); pb.unlink()
 
 
-def test_stub_only_in_synthetic_mode(monkeypatch):
+def test_missing_bindings_is_an_error(monkeypatch):
     import builtins
     import pytest
 
@@ -127,7 +127,6 @@ def test_stub_only_in_synthetic_mode(monkeypatch):
         return real_import(name, *a, **k)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    monkeypatch.delenv("PILOT_SYNTHETIC", raising=False)
     fb = FrameBuffer(slots=2, name=f"sp_f_{_uid()}", create=True)
     pb = PoseBuffer(slots=2, name=f"sp_p_{_uid()}", create=True)
     try:
@@ -135,10 +134,6 @@ def test_stub_only_in_synthetic_mode(monkeypatch):
         w._logger = MagicMock()
         with pytest.raises(RuntimeError, match="LD_LIBRARY_PATH"):
             w.setup()
-        w = SLAMWorker(name="slam", input_buffer=fb, output_buffer=pb, synthetic=True)
-        w._logger = MagicMock()
-        w.setup()
-        assert w._slam is None
     finally:
         fb.unlink(); pb.unlink()
 

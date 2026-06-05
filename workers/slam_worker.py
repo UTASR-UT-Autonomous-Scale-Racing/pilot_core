@@ -98,7 +98,6 @@ class SLAMWorker(BaseWorker):
       level_frames          good floor fits to average, default 5
       level_timeout_frames  give up levelling after this many frames, default 150
       floor_height_range    accepted camera height above the floor, default (0.03, 1.0) m
-      synthetic             allow the identity-pose stub without orbslam3_python
     """
 
     _PC_PUBLISH_INTERVAL = 30  # also publish point cloud every N frames
@@ -147,10 +146,6 @@ class SLAMWorker(BaseWorker):
         self._localize_event = self.config.get("localize_event")
         self._map_reset_event = self.config.get("map_reset_event")
         self._warmup_frames = int(self.config.get("warmup_frames", 15))
-        synthetic = (
-            bool(self.config.get("synthetic", False))
-            or os.environ.get("PILOT_SYNTHETIC", "") == "1"
-        )
 
         vocab_path = self.config.get(
             "vocab_path", "ORB_SLAM3/Vocabulary/ORBvoc.txt"
@@ -166,21 +161,13 @@ class SLAMWorker(BaseWorker):
             importlib.import_module("ssl")
             import orbslam3_python as _slam_mod
         except ImportError as exc:
-            if not synthetic:
-                raise RuntimeError(
-                    f"orbslam3_python could not be imported ({exc}). Build the "
-                    "ORB-SLAM3 bindings (docs/slam.md). If the module exists, a "
-                    "shared library is not found: rebuild orbslam3_wrapper (it "
-                    "sets an RPATH) or add ORB_SLAM3/lib and its Thirdparty lib "
-                    "dirs to LD_LIBRARY_PATH. The identity-pose stub is only "
-                    "allowed in synthetic mode (synthetic: true / PILOT_SYNTHETIC=1)."
-                ) from exc
-            self.logger.warning(
-                "orbslam3_python not available — synthetic mode, running SLAM "
-                "stub (identity poses, no point cloud)"
-            )
-            self._slam = None
-            return
+            raise RuntimeError(
+                f"orbslam3_python could not be imported ({exc}). Build the "
+                "ORB-SLAM3 bindings (docs/slam.md). If the module exists, a "
+                "shared library is not found: rebuild orbslam3_wrapper (it "
+                "sets an RPATH) or add ORB_SLAM3/lib and its Thirdparty lib "
+                "dirs to LD_LIBRARY_PATH."
+            ) from exc
 
         from control.types import resolve_path
 
@@ -296,11 +283,6 @@ class SLAMWorker(BaseWorker):
         ts = header.produced_ts  # capture time (time.monotonic clock)
 
         self._frame_count += 1
-
-        if self._slam is None:
-            # stub (synthetic mode only), no orbslam3_python
-            self._pose_buf.write(np.eye(4, dtype=np.float32), ts=ts)
-            return
 
         # warm-up frames: sparse early depth makes ORB-SLAM3 init a thin map and
         # keep resetting; they still feed the floor fit

@@ -693,7 +693,7 @@ class TestStartPyRecorderConfig:
     GLOBAL_KEYS = {"sample_k", "top_n", "on_full", "keep_files", "flush_interval"}
     PER_BUFFER_KEYS = {"sample_k", "top_n", "on_full", "keep_files"}
 
-    @pytest.mark.parametrize("name", ["config.yaml", "config_cpu.yaml", "config_dev_local.yaml", "config_autodrive.yaml"])
+    @pytest.mark.parametrize("name", ["config.yaml", "config_cpu.yaml", "config_autodrive.yaml"])
     def test_recording_config_keys(self, name, repo_root):
         import os
         import yaml

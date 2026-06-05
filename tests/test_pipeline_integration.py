@@ -84,52 +84,16 @@ class TestWorkerLifecycle:
             p.join(timeout=2)
 
 
-# frame -> SLAM stub -> pose -> mapping, synthetic data
+# pose -> mapping -> boundaries -> control, on generated data
 
-class TestSyntheticPipeline:
-    def test_frame_to_pose_pipeline(self):
-        from workers import SLAMWorker
+class TestMappingPipeline:
+    def test_pose_to_mapping_pipeline(self):
+        from workers import MappingWorker
 
-        fn = f"pipe_f_{_uid()}"
-        pn = f"pipe_p_{_uid()}"
-        fb = FrameBuffer(slots=4, name=fn, create=True)
-        pb = PoseBuffer(slots=4, name=pn, create=True)
-        try:
-            w = SLAMWorker(
-                name="slam",
-                input_buffer=fb,
-                output_buffer=pb,
-            )
-            w._logger = MagicMock()
-            w._frame_buf = fb
-            w._pose_buf = pb
-            w._slam = None
-            w._last_seq = 0
-
-            for i in range(5):
-                rgb = np.random.randint(0, 255, (400, 640, 3), dtype=np.uint8)
-                depth = np.random.uniform(0.5, 3.0, (400, 640)).astype(np.float32)
-                fb.write(rgb, depth)
-                w.step()
-
-            # stub mode publishes identity poses
-            result = pb.read_latest()
-            assert result is not None
-            _, pose, _, _ = result
-            np.testing.assert_allclose(pose, np.eye(4, dtype=np.float32), atol=1e-7)
-        finally:
-            fb.unlink()
-            pb.unlink()
-
-    def test_slam_to_mapping_pipeline(self):
-        from workers import MappingWorker, SLAMWorker
-
-        fn = f"sm_f_{_uid()}"
         pn = f"sm_p_{_uid()}"
         sn = f"sm_s_{_uid()}"
         pcn = f"sm_pc_{_uid()}"
         bn = f"sm_b_{_uid()}"
-        fb = FrameBuffer(slots=4, name=fn, create=True)
         pb = PoseBuffer(slots=4, name=pn, create=True)
         sb = SegmentationBuffer(slots=4, name=sn, create=True)
         pcb = PointCloudBuffer(slots=4, name=pcn, create=True)
@@ -138,15 +102,6 @@ class TestSyntheticPipeline:
         loop_ev = ctx.Event()
         done_ev = ctx.Event()
         try:
-            slam = SLAMWorker(
-                name="slam", input_buffer=fb, output_buffer=pb,
-            )
-            slam._logger = MagicMock()
-            slam._frame_buf = fb
-            slam._pose_buf = pb
-            slam._slam = None
-            slam._last_seq = 0
-
             mapper = MappingWorker(
                 name="mapping",
                 pose_buffer=pb,
@@ -161,10 +116,7 @@ class TestSyntheticPipeline:
             mapper.setup()
 
             for i in range(10):
-                rgb = np.random.randint(0, 255, (400, 640, 3), dtype=np.uint8)
-                depth = np.random.uniform(0.5, 3.0, (400, 640)).astype(np.float32)
-                fb.write(rgb, depth)
-                slam.step()
+                pb.write(np.eye(4, dtype=np.float32), ts=time.monotonic())
 
                 # ring of wall points
                 theta = np.linspace(0, 2 * np.pi, 50) + i * 0.1
@@ -183,14 +135,13 @@ class TestSyntheticPipeline:
             assert len(mapper._bev_trajectory) > 0
             assert len(mapper._bev_wall_pts) > 0
         finally:
-            fb.unlink()
             pb.unlink()
             sb.unlink()
             pcb.unlink()
             bb.unlink()
 
     def test_full_mapping_to_track_control_pipeline(self):
-        """mapping -> boundary extraction -> pure pursuit, end to end on synthetic data."""
+        """mapping -> boundary extraction -> pure pursuit, end to end on generated data."""
         from workers import ControlWorker, MappingWorker
 
         pn = f"fp_p_{_uid()}"
@@ -394,7 +345,7 @@ class TestPipelineRaceConditions:
         pb.unlink()
 
     def test_concurrent_frame_slam_chain(self):
-        """Interleaved frame writes and SLAM steps, single process."""
+        """Interleaved frame writes and SLAM steps, single process (fake ORB-SLAM3, tracking OK)."""
         from workers import SLAMWorker
 
         fn = f"chain_f_{_uid()}"
@@ -402,11 +353,15 @@ class TestPipelineRaceConditions:
         fb = FrameBuffer(slots=4, name=fn, create=True)
         pb = PoseBuffer(slots=4, name=pn, create=True)
         try:
-            w = SLAMWorker(name="slam", input_buffer=fb, output_buffer=pb)
+            w = SLAMWorker(name="slam", input_buffer=fb, output_buffer=pb, level_world=False)
             w._logger = MagicMock()
             w._frame_buf = fb
             w._pose_buf = pb
-            w._slam = None
+            w._slam = MagicMock()
+            w._slam.track_rgbd.return_value = np.eye(4, dtype=np.float32)
+            w._slam.get_tracking_state.return_value = 2
+            w._slam.map_changed.return_value = False
+            w._slam.map_info.return_value = (0, 0, 10)
             w._last_seq = 0
 
             for i in range(50):
@@ -417,6 +372,7 @@ class TestPipelineRaceConditions:
 
             result = pb.read_latest()
             assert result is not None
+            assert w._slam.track_rgbd.call_count == 50
         finally:
             fb.unlink()
             pb.unlink()
@@ -508,52 +464,9 @@ class TestOAKDIntegration:
         finally:
             fb.unlink()
 
-    def test_camera_to_slam_realtime(self):
-        """Real camera into the SLAM stub for 2 s at 30 fps."""
-        from workers import CameraWorker, SLAMWorker
-
-        fn = f"oakd_s_{_uid()}"
-        pn = f"oakd_p_{_uid()}"
-        fb = FrameBuffer(slots=8, name=fn, create=True)
-        pb = PoseBuffer(slots=8, name=pn, create=True)
-        try:
-            cam = CameraWorker(
-                name="camera", output_buffer=fb, fps=30, resolution=[640, 400]
-            )
-            cam._logger = MagicMock()
-            cam._logger.info = print
-            cam.setup()
-
-            slam = SLAMWorker(
-                name="slam", input_buffer=fb, output_buffer=pb,
-            )
-            slam._logger = MagicMock()
-            slam._frame_buf = fb
-            slam._pose_buf = pb
-            slam._slam = None
-            slam._last_seq = 0
-
-            pose_count = 0
-            t0 = time.time()
-            while time.time() - t0 < 2.0:
-                cam.step()
-                slam.step()
-                result = pb.read_latest()
-                if result is not None:
-                    h, pose, _, _ = result
-                    if h.seq_no > pose_count:
-                        pose_count = h.seq_no
-                time.sleep(0.01)
-
-            cam.teardown()
-            assert pose_count >= 10, f"Only got {pose_count} poses in 2s"
-        finally:
-            fb.unlink()
-            pb.unlink()
-
     def test_full_oakd_pipeline_with_resnet18_mask(self):
-        """OAK-D frames, a fake seg mask in place of ResNet18, SLAM stub, then mapping."""
-        from workers import CameraWorker, MappingWorker, SLAMWorker
+        """OAK-D frames, a fake seg mask in place of ResNet18, then mapping (poses fed in place of SLAM)."""
+        from workers import CameraWorker, MappingWorker
 
         fn = f"full_{_uid()}_f"
         pn = f"full_{_uid()}_p"
@@ -576,17 +489,6 @@ class TestOAKDIntegration:
             cam._logger.info = print
             cam.setup()
 
-            slam = SLAMWorker(
-                name="slam", input_buffer=fb, output_buffer=pb,
-                pointcloud_buffer=pcb,
-            )
-            slam._logger = MagicMock()
-            slam._frame_buf = fb
-            slam._pose_buf = pb
-            slam._pc_buf = pcb
-            slam._slam = None
-            slam._last_seq = 0
-
             mapper = MappingWorker(
                 name="mapping",
                 pose_buffer=pb, segment_buffer=sb,
@@ -601,7 +503,7 @@ class TestOAKDIntegration:
             t0 = time.time()
             while time.time() - t0 < 2.0:
                 cam.step()
-                slam.step()
+                pb.write(np.eye(4, dtype=np.float32), ts=time.monotonic())
 
                 result = fb.read_latest()
                 if result is not None:

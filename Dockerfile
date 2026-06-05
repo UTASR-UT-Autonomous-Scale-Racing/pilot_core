@@ -1,5 +1,5 @@
 # Car runtime image (Jetson Orin, JetPack 6 / L4T r36 for Python 3.10; host must run JetPack 6.x).
-# Stages: deps -> noslam (SLAM stub) | slam-build (needs scripts/setup.sh --with-slam) -> runtime (default).
+# Stages: deps -> noslam (no ORB-SLAM3: map-free control modes) | slam-build (needs scripts/setup.sh --with-slam) -> runtime (default).
 #   docker build -t utasr-image -f Dockerfile [--target noslam] .
 
 ARG L4T_BASE=nvcr.io/nvidia/l4t-jetpack:r36.4.0

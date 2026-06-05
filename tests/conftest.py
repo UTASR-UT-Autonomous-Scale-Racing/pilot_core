@@ -1,4 +1,4 @@
-"""Shared fixtures: synthetic sensor data and shm buffers that get unlinked on teardown."""
+"""Shared fixtures: generated sensor data and shm buffers that get unlinked on teardown."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def _uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
-# synthetic data
+# generated data
 
 @pytest.fixture()
 def rgb_frame() -> np.ndarray:

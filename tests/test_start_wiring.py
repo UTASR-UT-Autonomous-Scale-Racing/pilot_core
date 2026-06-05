@@ -12,7 +12,7 @@ import pytest
 import start
 from tests.conftest import REPO_ROOT
 
-CONFIGS = ["config.yaml", "config_cpu.yaml", "config_dev_local.yaml", "config_autodrive.yaml"]
+CONFIGS = ["config.yaml", "config_cpu.yaml", "config_autodrive.yaml"]
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +57,7 @@ def test_every_config_builds(config_name, recording):
 
 
 def test_workstation_configs_never_write_i2c():
-    for name in ("config_cpu.yaml", "config_dev_local.yaml", "config_autodrive.yaml"):
+    for name in ("config_cpu.yaml", "config_autodrive.yaml"):
         config = start.load_config(os.path.join(REPO_ROOT, name))
         assert config.get("i2c_address") is None, name
 
@@ -75,7 +75,7 @@ def test_sim_pose_without_a_map_is_rejected():
 
 def test_zmq_bridge_keys_are_rejected():
     with pytest.raises(SystemExit, match="direct sim link"):
-        _build("config_dev_local.yaml", use_zmq=True, zmq_sensor_port=5555)
+        _build("config_cpu.yaml", use_zmq=True, zmq_sensor_port=5555)
 
 
 def test_autodrive_wiring():
@@ -111,7 +111,7 @@ def test_autodrive_wiring():
 def test_removed_modes_are_rejected():
     for mode in ("pid", "ftg", "lidar_pid"):
         with pytest.raises(SystemExit):
-            _build("config_dev_local.yaml", control_mode=mode)
+            _build("config_cpu.yaml", control_mode=mode)
 
 
 def test_shipped_files_resolve_from_any_directory(tmp_path, monkeypatch):
@@ -120,7 +120,7 @@ def test_shipped_files_resolve_from_any_directory(tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)
     assert os.path.isfile(resolve_path("orbslam_oakd_rgbd.yaml"))
-    Intrinsics.from_orbslam_settings("synthetic_slam_settings.yaml")
+    Intrinsics.from_orbslam_settings("orbslam_oakd_rgbd.yaml")
     VehicleParams.load()
     assert "control_mode" in start.load_config("config.yaml")
     (tmp_path / "config.yaml").write_text("control_mode: local\n")      # a local file wins

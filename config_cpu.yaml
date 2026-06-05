@@ -7,7 +7,6 @@ resolution: [640, 400]        # [width, height]
 threads_per_worker: 1         # BLAS/OpenMP/OpenCV threads per worker process
 
 # sensors
-synthetic: false              # true = fake frames/depth/IMU instead of the OAK-D
 use_oakd_imu: true            # IMU comes through the camera worker
 i2c_address: null             # dummy actuator, no writes
 i2c_bus: null

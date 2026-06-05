@@ -44,7 +44,7 @@ Homepage = "https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_core"
 
 [tool.setuptools]
 # explicit list so submodules (ORB_SLAM3, firmware) aren't discovered
-packages = ["control", "vision", "workers", "shared_buffer", "synthetic", "rl"]
+packages = ["control", "vision", "workers", "shared_buffer", "rl"]
 py-modules = ["start"]
 
 [tool.pytest.ini_options]

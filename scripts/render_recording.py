@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Render README figures (car_view, frames, map, track, timeline, demo.gif) from a recording.
+"""Render figures (car_view, frames, map, track, timeline, demo.gif) from a recording.
 
     python scripts/render_recording.py /tmp/pilot_recordings/<run> --out docs/images
-    python scripts/render_recording.py <run> --out docs/images --truth config_dev_local.yaml
     python scripts/render_recording.py <run> --out out --config config_autodrive.yaml   # sim (Z-up) axes
 """
 
@@ -69,54 +68,6 @@ def _intrinsics(settings: str, w: int, h: int):
     K = Intrinsics.from_orbslam_settings(settings)
     sw, sh = w / (2 * K.cx), h / (2 * K.cy)       # settings are for the recorded size in practice
     return Intrinsics(K.fx * sw, K.fy * sh, K.cx * sw, K.cy * sh)
-
-
-# ---------------------------------------------------------------- ground truth
-
-class Truth:
-    """Synthetic ground truth aligned to the SLAM BEV frame."""
-
-    def __init__(self, config_path: str, frames, poses):
-        import yaml
-        from synthetic.closed_loop_generator import ClosedLoopFrameGenerator
-
-        from control.types import resolve_path
-
-        with open(resolve_path(config_path)) as f:
-            cfg = yaml.safe_load(f)
-        w, h = cfg.get("resolution", [640, 400])
-        self.gen = ClosedLoopFrameGenerator(width=w, height=h, **cfg.get("synthetic_track", {}))
-
-        # pose ts == its frame's capture ts; frame seq n shows generator frame n - 1
-        frame_seq = {round(r.produced_ts, 6): r.seq_no for r in frames}
-        slam, true = [], []
-        for r in poses:
-            seq = frame_seq.get(round(r.produced_ts, 6))
-            if seq is not None:
-                slam.append(r.value[0][[0, 2], 3])
-                true.append(self.gen.pose_at(seq - 1)[[0, 2], 3])
-        self.slam_xy, true_xy = np.array(slam), np.array(true)
-        self.R, self.t = _rigid_2d(true_xy, self.slam_xy)       # truth -> SLAM frame
-        self.ate = np.linalg.norm(self.to_slam(true_xy) - self.slam_xy, axis=1)
-        outer, inner, path = self.gen.walls_xz(800)
-        self.outer, self.inner, self.path = (self.to_slam(p) for p in (outer, inner, path))
-
-    def to_slam(self, xy: np.ndarray) -> np.ndarray:
-        return xy @ self.R.T + self.t
-
-    def wall_error(self, outer: np.ndarray, inner: np.ndarray) -> tuple:
-        """Distance (m) of each extracted boundary point to its true wall."""
-        d = lambda pts, ref: np.min(np.linalg.norm(pts[:, None] - ref[None], axis=2), axis=1)
-        return d(outer, self.outer), d(inner, self.inner)
-
-
-def _rigid_2d(src: np.ndarray, dst: np.ndarray):
-    """Least-squares rotation + translation mapping src onto dst (Umeyama, no scale)."""
-    ms, md = src.mean(0), dst.mean(0)
-    U, _, Vt = np.linalg.svd((dst - md).T @ (src - ms))
-    D = np.diag([1.0, np.sign(np.linalg.det(U @ Vt))])
-    R = U @ D @ Vt
-    return R, md - R @ ms
 
 
 # ---------------------------------------------------------------- figures
@@ -213,17 +164,12 @@ def frames_sheet(frames, controls, out_dir, stride, t0, n=8):
     _save(fig, out_dir, "frames.png")
 
 
-def map_figure(poses, clouds, boundaries, truth, out_dir):
+def map_figure(poses, clouds, boundaries, out_dir):
     fig, ax = plt.subplots(figsize=(9, 6.4))
     if clouds:
         pts = _bev(clouds[-1].value)
         keep = np.random.default_rng(0).choice(len(pts), min(len(pts), 6000), replace=False)
         ax.scatter(pts[keep, 0], pts[keep, 1], s=2, color=MUTED, lw=0, label=f"{MAP_SOURCE['points']} ({len(pts)})")
-    if truth is not None:
-        for wall in (truth.outer, truth.inner):
-            c = np.vstack([wall, wall[:1]])
-            ax.plot(c[:, 0], c[:, 1], color=INK2, lw=1, ls=(0, (4, 3)))
-        ax.plot([], [], color=INK2, lw=1, ls=(0, (4, 3)), label="true walls")
     traj = np.array([r.value[0][BEV_AXES, 3] for r in poses]) if poses else np.zeros((0, 2))
     if len(traj):
         ax.plot(traj[:, 0], traj[:, 1], color=AQUA, lw=2, label=MAP_SOURCE["trajectory"])
@@ -238,18 +184,13 @@ def map_figure(poses, clouds, boundaries, truth, out_dir):
     ax.set_xlabel("x (m)")
     ax.set_ylabel("z (m), forward at start" if BEV_AXES == [0, 2] else "y (m)")
     title = f"Track mapping: {MAP_SOURCE['title']}, driven lap and extracted boundaries"
-    if truth is not None and boundaries:
-        eo, ei = truth.wall_error(*boundaries[-1].value)
-        title += (f"\ntrajectory error vs truth: RMS {100 * np.sqrt(np.mean(truth.ate ** 2)):.1f} cm; "
-                  f"boundary error: median {100 * np.median(np.r_[eo, ei]):.1f} cm, "
-                  f"95th pct {100 * np.percentile(np.r_[eo, ei], 95):.1f} cm")
     ax.set_title(title, loc="left")
     ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0))
     fig.tight_layout()
     _save(fig, out_dir, "map.png")
 
 
-def track_figure(boundaries, truth, out_dir):
+def track_figure(boundaries, out_dir):
     from control import VehicleParams
     from control.controllers import build_track_follower
     from control.sim import make_follower_factory, run_closed_loop
@@ -281,20 +222,10 @@ def track_figure(boundaries, truth, out_dir):
 
     ax = axes[1]
     ax.fill(np.r_[ring[:, 0], hole[:, 0]], np.r_[ring[:, 1], hole[:, 1]], color=GRID, lw=0)
-    if truth is not None:
-        for wall in (truth.outer, truth.inner):
-            c = np.vstack([wall, wall[:1]])
-            ax.plot(c[:, 0], c[:, 1], color=INK2, lw=1, ls=(0, (4, 3)))
-        ax.plot([], [], color=INK2, lw=1, ls=(0, (4, 3)), label="true walls")
     ax.plot(log[:, 1], log[:, 2], color=BLUE, lw=1.6, label="bicycle-model bench car (pure_pursuit)")
     ax.set_aspect("equal")
     title = (f"Bicycle-model bench on the mapped track ({result.laps:.1f} laps)\n"
              f"cross-track RMS {100 * result.xtrack_rms:.1f} cm, mean {result.mean_speed:.2f} m/s")
-    if truth is not None:
-        from matplotlib.path import Path
-
-        inside = Path(truth.outer).contains_points(log[:, 1:3]) & ~Path(truth.inner).contains_points(log[:, 1:3])
-        title += f", inside the true walls {100 * inside.mean():.0f}% of the time"
     ax.set_title(title, loc="left")
     ax.set_xlabel("x (m)")
     ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0))
@@ -396,8 +327,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("recording", help="recording directory")
     ap.add_argument("--out", default="docs/images", help="output directory (default docs/images)")
-    ap.add_argument("--truth", help="config with a synthetic_track section (synthetic runs only)")
-    ap.add_argument("--settings", default=os.path.join(REPO_ROOT, "synthetic_slam_settings.yaml"),
+    ap.add_argument("--settings", default=os.path.join(REPO_ROOT, "orbslam_oakd_rgbd.yaml"),
                     help="ORB-SLAM3 settings with the camera intrinsics (for the depth_ftg scan)")
     ap.add_argument("--stride", type=int,
                     help="frame sampling for frames.png (default: 8 frames spread over the run)")
@@ -424,15 +354,14 @@ def main() -> int:
     frames, segs, poses = load("frame"), load("segmentation"), load("pose")
     clouds, boundaries, controls, states = load("pointcloud"), load("boundary"), load("control"), load("state")
 
-    truth = Truth(args.truth, frames, poses) if args.truth and poses else None
     # one time origin for every figure: the first recorded sample of any buffer
     t0 = min(b[0].produced_ts for b in (frames, segs, poses, clouds, boundaries, controls, states) if b)
     if frames:
         car_view(frames, segs, args.settings, args.out, args.frame)
         frames_sheet(frames, controls, args.out, args.stride or max(1, len(frames) // 8), t0)
     if poses or clouds:
-        map_figure(poses, clouds, boundaries, truth, args.out)
-    result = track_figure(boundaries, truth, args.out) if boundaries else None
+        map_figure(poses, clouds, boundaries, args.out)
+    result = track_figure(boundaries, args.out) if boundaries else None
     if controls or states:
         timeline(controls, states, boundaries, args.out, t0)
     if args.gif and frames and poses:
@@ -443,12 +372,6 @@ def main() -> int:
         span = (s["last_ts"] - s["first_ts"]) if s["records"] > 1 else 0.0
         rate = (s["records"] - 1) / span if span > 0 else 0.0
         print(f"| `{name}` | {s['records']} | {rate:.1f} | {s['bytes'] / 1e6:.1f} |")
-    if truth is not None:
-        print(f"\ntrajectory error RMS {100 * np.sqrt(np.mean(truth.ate ** 2)):.1f} cm over {len(truth.ate)} poses")
-        if boundaries:
-            eo, ei = truth.wall_error(*boundaries[-1].value)
-            print(f"boundary error median {100 * np.median(np.r_[eo, ei]):.1f} cm, "
-                  f"95th pct {100 * np.percentile(np.r_[eo, ei], 95):.1f} cm, max {100 * np.max(np.r_[eo, ei]):.1f} cm")
     if result is not None:
         print(f"bicycle-model bench on the mapped track (not the recorded drive): {result.summary()}")
     return 0

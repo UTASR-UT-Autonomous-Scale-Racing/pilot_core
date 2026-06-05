@@ -1,5 +1,5 @@
 """
-Arduino IMU over I2C (or synthetic) -> IMUBuffer vectors
+Arduino IMU over I2C -> IMUBuffer vectors
 [qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw], accel in m/s^2,
 stamped with host time.monotonic() at the read. The OAK-D IMU is streamed by CameraWorker.
 """
@@ -53,14 +53,13 @@ def parse_i2c_frame(raw: bytes) -> np.ndarray | None:
 
 class IMUWorker(BaseWorker):
     """IMU worker. I2C errors are retried with back-off (up to 1 s), never fatal.
-    Without synthetic or a full I2C address/bus it idles: no fake data when a
-    real sensor is expected.
+    Without a full I2C address/bus it idles: no fake data when a real sensor is
+    expected.
 
     Config kwargs:
       output_buffer   IMUBuffer
       i2c_address     Arduino I2C address
       i2c_bus         I2C bus number
-      synthetic       use the synthetic generator
       poll_hz         I2C polling rate, default 100
     """
 
@@ -69,25 +68,12 @@ class IMUWorker(BaseWorker):
         self._imu_buf: IMUBuffer | None = None
         self._bus = None
         self._dummy = False
-        self._synthetic = False
-        self._synth_gen = None
         self._errors = 0
         self._period = 0.01
         self._next_poll = 0.0
 
     def setup(self) -> None:
-        import os
-
         self._imu_buf = self.config["output_buffer"]
-
-        use_synthetic = (
-            self.config.get("synthetic", False)
-            or os.environ.get("PILOT_SYNTHETIC", "") == "1"
-        )
-
-        if use_synthetic:
-            self._setup_synthetic()
-            return
 
         i2c_address = self.config.get("i2c_address")
         i2c_bus = self.config.get("i2c_bus")
@@ -144,23 +130,8 @@ class IMUWorker(BaseWorker):
             return
         self._imu_buf.write(vec, ts=ts)
 
-    def _setup_synthetic(self) -> None:
-        from synthetic import SyntheticIMUGenerator
-
-        self._synth_gen = SyntheticIMUGenerator()
-        self._synthetic = True
-        self._dummy = False
-        self.logger.info("Synthetic IMU ready")
-
-    def _step_synthetic(self) -> None:
-        vec = self._synth_gen.next()
-        self._imu_buf.write(vec)
-        time.sleep(0.005)  # ~200 Hz
-
     def step(self) -> None:
-        if self._synthetic:
-            self._step_synthetic()
-        elif self._dummy:
+        if self._dummy:
             time.sleep(0.1)
         else:
             self._step_i2c()

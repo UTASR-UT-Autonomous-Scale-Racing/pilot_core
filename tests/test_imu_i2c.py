@@ -66,7 +66,6 @@ class _FakeSMBus2:
 def _worker(monkeypatch, frames):
     fake = _FakeSMBus2(frames)
     monkeypatch.setattr(imu_mod, "smbus2", fake)
-    monkeypatch.delenv("PILOT_SYNTHETIC", raising=False)
     ib = IMUBuffer(slots=8, name=f"imu_i2c_{uuid.uuid4().hex[:8]}", create=True)
     w = IMUWorker(name="imu", output_buffer=ib, i2c_address=0x08, i2c_bus=1, poll_hz=1000)
     w._logger = MagicMock()

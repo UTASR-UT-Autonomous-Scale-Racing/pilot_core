@@ -1,4 +1,4 @@
-"""scripts/recording_to_dataset.py on a synthetic recording made by the real recorder."""
+"""scripts/recording_to_dataset.py on a generated recording made by the real recorder."""
 
 from __future__ import annotations
 

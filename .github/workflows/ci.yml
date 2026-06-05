@@ -1,4 +1,4 @@
-# CI: pyflakes + hardware-free tests on synthetic sensors (oakd / slam tests deselected).
+# CI: pyflakes + hardware-free tests (oakd / slam tests deselected).
 name: CI
 
 on:
@@ -41,9 +41,7 @@ jobs:
 
       - name: pyflakes
         run: |
-          python -m pyflakes control vision workers shared_buffer synthetic rl scripts tests start.py
+          python -m pyflakes control vision workers shared_buffer rl scripts tests start.py
 
       - name: pytest
-        env:
-          PILOT_SYNTHETIC: "1"
         run: python -m pytest -m "not oakd and not slam" -ra

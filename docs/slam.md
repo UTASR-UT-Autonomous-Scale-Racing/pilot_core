@@ -47,11 +47,11 @@ It is used automatically; `ORB_SLAM3_CUDA=0` switches back to the CPU. `SLAMWork
 the mean tracking time every 30 frames, and `scripts/slam_replay.py` replays a TUM RGB-D
 sequence through it (tracking time and ATE). On an RTX 4080 / i7-13700, RGB-D tracking
 takes 8.0-8.7 ms per frame with CUDA vs 12.3-13.1 ms on the CPU at the same accuracy
-(TUM fr1_xyz / fr1_desk), and the dev-simulator pipeline's SLAM 9.3 ms vs 14.0 ms.
+(TUM fr1_xyz / fr1_desk).
 
 Check with `python -c "import orbslam3_python"`. The wrapper has an RPATH to the
-ORB-SLAM3 libraries, so `LD_LIBRARY_PATH` isn't needed. Without the build SLAM only
-runs as an identity-pose stub in synthetic runs.
+ORB-SLAM3 libraries, so `LD_LIBRARY_PATH` isn't needed. Without the build `SLAMWorker`
+refuses to start: use a map-free control mode, or the AutoDRIVE sim's ground-truth pose.
 
 ## Camera settings
 

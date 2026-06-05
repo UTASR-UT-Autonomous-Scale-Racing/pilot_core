@@ -64,14 +64,12 @@ def intrinsics_mismatch(settings: dict, K, tol: float = 0.02) -> list[str]:
 
 
 class CameraWorker(BaseWorker):
-    """OAK-D RGB + depth capture; synthetic frames if depthai is missing,
-    synthetic=True, or PILOT_SYNTHETIC=1.
+    """OAK-D RGB + depth capture.
 
     Config kwargs:
       output_buffer        FrameBuffer
       fps                  default 30
       resolution           [w, h] for RGB and depth, default [640, 400]
-      synthetic            force synthetic frames
       imu_buffer           stream the on-board IMU into it if given
       imu_rate_hz          default 100
       max_exposure_us      auto-exposure limit, default 4000 (0 = DepthAI default)
@@ -81,8 +79,6 @@ class CameraWorker(BaseWorker):
       startup_timeout_s    same for the first frame after (re)opening, default 5.0
       max_step_errors      consecutive step errors before re-opening, default 5
       max_reopen_attempts  failed re-opens before exiting, default 3
-      synthetic_scene      "corridor" or "track" (ray-cast closed track)
-      synthetic_track      ClosedLoopFrameGenerator overrides
     """
 
     def __init__(self, name: str = "camera", **kwargs: Any) -> None:
@@ -91,10 +87,6 @@ class CameraWorker(BaseWorker):
         self._pipeline = None
         self._sync_q = None
         self._frame_count: int = 0
-        self._synthetic = False
-        self._synth_gen = None
-        self._synth_scene = "corridor"
-        self._next_frame_t = 0.0
         self._imu_buf = None
         self._imu_q = None
         self._has_rotation_vector = False
@@ -105,15 +97,8 @@ class CameraWorker(BaseWorker):
         self._intrinsics_checked = False
 
     def setup(self) -> None:
-        use_synthetic = (
-            self.config.get("synthetic", False)
-            or os.environ.get("PILOT_SYNTHETIC", "") == "1"
-            or dai is None
-        )
-        if use_synthetic:
-            self._setup_synthetic()
-            return
-
+        if dai is None:
+            raise RuntimeError("depthai is not installed; CameraWorker needs it for the OAK-D")
         self._frame_buf = self.config["output_buffer"]
         self._imu_buf = self.config.get("imu_buffer")
         self._frame_timeout = float(self.config.get("frame_timeout_s", 1.0))
@@ -329,9 +314,6 @@ class CameraWorker(BaseWorker):
                 self._imu_buf.write(vec, ts=acc.getTimestamp().total_seconds())
 
     def step(self) -> None:
-        if self._synthetic:
-            self._step_synthetic()
-            return
         try:
             got = self._step_device()
             self._step_errors = 0
@@ -382,52 +364,7 @@ class CameraWorker(BaseWorker):
             )
         return True
 
-    # synthetic mode (no hardware)
-
-    def _setup_synthetic(self) -> None:
-        fps = self.config.get("fps", 30)
-        width, height = self.config.get("resolution", [640, 400])
-        self._frame_buf = self.config["output_buffer"]
-        self._synthetic = True
-        self._synth_scene = self.config.get("synthetic_scene", "corridor")
-        if self._synth_scene == "track":
-            # true projection, so SLAM, mapping and the depth modes all work on it
-            from synthetic.closed_loop_generator import ClosedLoopFrameGenerator
-
-            self._synth_gen = ClosedLoopFrameGenerator(
-                width=width, height=height, **self.config.get("synthetic_track", {}))
-        elif self._synth_scene == "corridor":
-            from synthetic import SyntheticFrameGenerator
-
-            self._synth_gen = SyntheticFrameGenerator(width=width, height=height)
-        else:
-            raise ValueError(f"Unknown synthetic_scene {self._synth_scene!r}; options: corridor, track")
-        self._target_dt = 1.0 / fps
-        self._next_frame_t = time.monotonic()
-        self.logger.info(
-            f"Synthetic camera ready ({self._synth_scene}) @ up to {fps} FPS, {width}×{height}"
-        )
-
-    def _step_synthetic(self) -> None:
-        if self._synth_scene == "track":
-            rgb, depth = self._synth_gen.render(self._frame_count)
-        else:
-            rgb, depth = self._synth_gen.next_fast()
-        self._frame_buf.write(rgb, depth)
-        self._frame_count += 1
-        if self._frame_count % 100 == 1:
-            self.logger.debug(
-                f"synth frame #{self._frame_count}  rgb={rgb.shape}  "
-                f"depth range=[{depth.min():.2f}, {depth.max():.2f}]m"
-            )
-        # hold the frame rate; rendering the track can be slower than that
-        self._next_frame_t = max(self._next_frame_t + self._target_dt, time.monotonic())
-        time.sleep(max(self._next_frame_t - time.monotonic(), 0.0))
-
     def teardown(self) -> None:
-        if self._synthetic:
-            self.logger.info("Synthetic camera stopped")
-            return
         if self._pipeline is not None:
             self._stop_pipeline()
             self.logger.info("OAK-D pipeline stopped")

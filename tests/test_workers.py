@@ -2,7 +2,7 @@
 Per-worker unit tests, stepped in-process over real shm buffers.
 
 Camera capture tests need OAKD_AVAILABLE=1. The real-SLAM test also needs the
-ORB-SLAM3 binding and vocabulary; everything else runs SLAM in stub mode.
+ORB-SLAM3 binding and vocabulary; the other SLAM tests need neither.
 """
 
 from __future__ import annotations
@@ -177,7 +177,7 @@ class TestIMUWorker:
 
 # VisionWorker, with a mocked model
 
-# SLAMWorker in stub mode (no orbslam3_python needed)
+# SLAMWorker without the ORB-SLAM3 build (orbslam3_python not needed)
 
 class TestSLAMWorker:
 
@@ -194,14 +194,13 @@ class TestSLAMWorker:
                 output_buffer=pb,
                 vocab_path="nonexistent.txt",
                 settings_path="nonexistent.yaml",
-                synthetic=True,          # the stub is only allowed in synthetic runs
             )
             assert w.name == "slam"
         finally:
             fb.unlink()
             pb.unlink()
 
-    def test_setup_stub_mode(self):
+    def test_setup_without_bindings_fails(self):
         from workers import SLAMWorker
         fn = f"slam_f_{_uid()}"
         pn = f"slam_p_{_uid()}"
@@ -214,43 +213,12 @@ class TestSLAMWorker:
                 output_buffer=pb,
                 vocab_path="nonexistent.txt",
                 settings_path="nonexistent.yaml",
-                synthetic=True,          # the stub is only allowed in synthetic runs
             )
             w._logger = MagicMock()
             # make `import orbslam3_python` fail
             with patch.dict("sys.modules", {"orbslam3_python": None}):
-                w.setup()
-            assert w._slam is None
-        finally:
-            fb.unlink()
-            pb.unlink()
-
-    def test_step_stub_writes_identity(self, rgb_frame, depth_frame):
-        from workers import SLAMWorker
-        fn = f"slam_f_{_uid()}"
-        pn = f"slam_p_{_uid()}"
-        fb = FrameBuffer(slots=4, name=fn, create=True)
-        pb = PoseBuffer(slots=4, name=pn, create=True)
-        try:
-            w = SLAMWorker(
-                name="slam",
-                input_buffer=fb,
-                output_buffer=pb,
-            )
-            w._logger = MagicMock()
-            w._frame_buf = fb
-            w._pose_buf = pb
-            w._slam = None
-            w._last_seq = 0
-
-            fb.write(rgb_frame, depth_frame)
-
-            w.step()
-
-            result = pb.read_latest()
-            assert result is not None
-            _, pose, _, _ = result
-            np.testing.assert_allclose(pose, np.eye(4, dtype=np.float32), atol=1e-7)
+                with pytest.raises(RuntimeError, match="orbslam3_python"):
+                    w.setup()
         finally:
             fb.unlink()
             pb.unlink()
@@ -302,7 +270,11 @@ class TestSLAMWorker:
             w._pc_buf = pcb
             w._loop_event = loop_ev
             w._localize_event = loc_ev
-            w._slam = None
+            w._slam = MagicMock()     # fake ORB-SLAM3, tracking OK
+            w._slam.track_rgbd.return_value = np.eye(4, dtype=np.float32)
+            w._slam.get_tracking_state.return_value = 2
+            w._slam.map_changed.return_value = False
+            w._slam.map_info.return_value = (0, 0, 10)
             w._last_seq = 0
             w._localization_activated = False
 
@@ -310,8 +282,8 @@ class TestSLAMWorker:
             fb.write(rgb_frame, depth_frame)
             w.step()
 
-            # stub has nothing to switch but the flag still has to flip
             assert w._localization_activated
+            w._slam.activate_localization_mode.assert_called_once()
         finally:
             fb.unlink()
             pb.unlink()

@@ -48,7 +48,7 @@ def imu_vector() -> np.ndarray:
 
 @pytest.fixture()
 def segmentation_mask() -> np.ndarray:
-    """Fake ResNet18 output. Classes: 0=background, 1=road, 2=wall."""
+    """Generated 3-class mask: 0 = background, 1 = road, 2 = wall, with noise."""
     rng = np.random.default_rng(42)
     mask = np.zeros((400, 640), dtype=np.int32)
     # road in the middle, wall top and bottom

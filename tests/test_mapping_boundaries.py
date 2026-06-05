@@ -137,7 +137,7 @@ def test_worker_uses_keyframe_trajectory_and_clockwise_lap(monkeypatch):
     try:
         outer, inner = _walls()
         pcb.write(_to3d(np.vstack([outer, inner]), y=-0.1))  # 0.25 m above the floor
-        # live poses are junk (drifted); the keyframes are the corrected lap
+        # live poses have drifted; the keyframes are the corrected lap
         for k in range(5):
             T = np.eye(4, dtype=np.float32)
             T[0, 3] = 20.0 + k

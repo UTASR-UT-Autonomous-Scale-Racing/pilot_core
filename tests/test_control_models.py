@@ -182,7 +182,7 @@ class TestPolicy:
 
         side = os.path.splitext(path)[0] + ".json"
         data = json.load(open(side))
-        data["observation"]["n_ahead"] = 12           # obs_dim no longer (n_ahead+1)*4+1
+        data["observation"]["n_ahead"] = 12           # obs_dim then differs from the model's input
         json.dump(data, open(side, "w"))
         with pytest.raises(ValueError, match="obs_dim"):
             PolicyMeta.load(path)

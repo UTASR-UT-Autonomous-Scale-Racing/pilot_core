@@ -10,7 +10,7 @@ use_oakd_imu: false           # true = OAK-D IMU through the camera worker, fals
 i2c_address: 0x08             # Arduino address. null -> actuator/IMU run as dummies
 i2c_bus: 1                    # /dev/i2c-<bus>
 
-# drivable-track segmentation; off: nothing consumes seg_buf yet
+# drivable-track segmentation; feeds the seg_scan mapping drive
 vision:
   enabled: false
   model: ground_plane           # ground_plane | onnx
@@ -60,7 +60,7 @@ track_control:
     accel: 1.5                  # m/s^2
     decel: 1.0                  # m/s^2, coasting plus a bit of reverse
     longitudinal:
-      speed_per_throttle: 3.0   # m/s per unit throttle. TODO calibrate on the car
+      speed_per_throttle: 3.0   # m/s per unit throttle, needs calibrating on the car
       kp: 0.25                  # speed PI
       ki: 0.15
       max_backward: 0.3         # max reverse input used for braking

@@ -1,7 +1,7 @@
 """
 test_vision.py — drivable-track segmentation (vision/): candidate networks,
 dataset/loss/metric, training + ONNX export, the training-free ground-plane
-segmenter, legacy-output conversion and the VisionWorker modes.
+segmenter and the VisionWorker modes.
 
 The network tests need torch and torchvision; the ONNX tests also need onnx
 and onnxruntime.  They are skipped when those are missing.

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Run pilot_core (start.py) against the live AutoDRIVE sim and score it: single runs and
-the benchmark matrix (docs/autodrive.md, step 3).
+the benchmark matrix (docs/autodrive.md "Benchmark").
 
     # one run: map with LiDAR, then race N laps on pure_pursuit, recording on
     python scripts/autodrive_bench.py run --out runs/map --laps 3 --set enable_slam=true
 
     # the matrix: stages A..D from bench/matrix.yaml, 3 repeats per cell
-    python scripts/autodrive_bench.py matrix bench/matrix.yaml --stage A --out bench/2026-10-19
-    python scripts/autodrive_bench.py summary bench/2026-10-19        # results.csv -> chart + results.md
+    python scripts/autodrive_bench.py matrix bench/matrix.yaml --stage A --out bench/<date>
+    python scripts/autodrive_bench.py summary bench/<date>            # results.csv -> chart + results.md
 
 A run: start.py with stdin piped (KeyboardControl reads one key per line), the sim is
 connected through its HUD (scripts/autodrive_sim_ctl.py), reset (r), armed (a); laps are

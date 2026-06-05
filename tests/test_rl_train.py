@@ -106,7 +106,7 @@ def test_merge_path_trains(tmp_path):
         src = vsd if (k.startswith("mlp_extractor.value_net") or k.startswith("value_net.")) else psd
         assert torch.equal(sd[k].cpu(), src[k].cpu()), k
 
-    # this is where SB3 used to crash on a float clip_range
+    # SB3 crashes here if clip_range was left a float
     model.learn(32, reset_num_timesteps=False)
     assert model.num_timesteps > 5000
 

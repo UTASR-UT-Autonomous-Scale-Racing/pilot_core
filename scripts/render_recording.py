@@ -25,7 +25,7 @@ from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
 
 from read_recording import load_buffer, summarize  # noqa: E402
 
-# reference light palette (dataviz skill): first three categorical slots + neutrals
+# light palette: three categorical colours + neutrals
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 INK, INK2, MUTED, GRID, SURFACE = "#0b0b0b", "#52514e", "#b9b8b3", "#e6e5e1", "#fcfcfb"
 SEQ = LinearSegmentedColormap.from_list("seq_blue", ["#dcebfb", "#2a78d6", "#0b3b75"])

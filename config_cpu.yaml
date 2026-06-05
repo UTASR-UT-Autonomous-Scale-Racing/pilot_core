@@ -11,7 +11,7 @@ use_oakd_imu: true            # IMU comes through the camera worker
 i2c_address: null             # dummy actuator, no writes
 i2c_bus: null
 
-# drivable-track segmentation; off: nothing consumes seg_buf yet
+# drivable-track segmentation; feeds the seg_scan mapping drive
 vision:
   enabled: false
   model: ground_plane           # ground_plane | onnx

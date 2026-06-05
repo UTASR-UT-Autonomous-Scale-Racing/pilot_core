@@ -63,7 +63,7 @@ The protocol spike is `scripts/autodrive_spike.py`; the live probes are in
   pilot_core speaks this subset directly over `websockets`.
 - **Rate.** The sim emits on its own clock and also re-sends its last snapshot when a
   command arrives. Only messages whose sim clock (`V1 Lap Time`) has moved are new
-  frames. On the vast box that is 10–18 new frames/s.
+  frames. On a cloud GPU (vast.ai) that is 10–18 new frames/s.
 - **Keys.** `V1 Throttle`, `V1 Steering`, `V1 Encoder Ticks`, `V1 Encoder Angles`,
   `V1 Position`, `V1 Orientation Quaternion` (x y z w), `V1 Orientation Euler Angles`,
   `V1 Linear Velocity`, `V1 Angular Velocity`, `V1 Linear Acceleration`,
@@ -73,7 +73,7 @@ The protocol spike is `scripts/autodrive_spike.py`; the live probes are in
   The stock build has no depth camera and no checkpoint counter.
 - **Units.** `V1 Linear Velocity` is in the body frame: x is the signed speed. The
   `V1 Steering` echo is the wheel angle in rad, with ±1 mapping to ±30°.
-- **Throttle is a speed set-point**, about **24.8 m/s per unit** (step 2e below). At
+- **Throttle is a speed set-point**, about **24.8 m/s per unit** ("Calibration" below). At
   neutral the car stops in about 0.3 s from 1.5 m/s; it does not coast. Negative
   throttle drives in reverse.
 - **Reset.** A one-message `V1 Reset: True` is usually ignored, so the worker holds it
@@ -96,7 +96,7 @@ The protocol spike is `scripts/autodrive_spike.py`; the live probes are in
 ## Known limitations
 
 - **Sim freezes on a shared GPU.** When other jobs load the GPU, the sim freezes for up
-  to several seconds; 0–90 % of wall time per run on the vast box (`stalled_pct`). During a freeze
+  to several seconds; 0–90 % of wall time per run on a shared cloud GPU (`stalled_pct`). During a freeze
   its graphics thread sits in the NVIDIA kernel driver (`D` state, `os_acquire_rwlock_read`).
   The sim clock pauses with it, so its lap times stay valid. pilot_core's state goes
   stale (0.5 s), the watchdog sends neutral, and control resumes when frames return.

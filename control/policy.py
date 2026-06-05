@@ -25,7 +25,7 @@ class PolicyMeta:
     boundary_spacing: float
     boundary_smooth_window: int
     obs_dim: int
-    policy_hz: Optional[float] = None   # training rate, Hz (None in old sidecars)
+    policy_hz: Optional[float] = None   # training rate, Hz (None if not recorded)
     safety: Optional[dict] = field(default=None)   # training SafetyConfig fields, if recorded
 
     @classmethod

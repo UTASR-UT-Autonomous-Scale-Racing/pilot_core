@@ -33,7 +33,7 @@ Vulkan, Low quality, on a shared-GPU cloud box. Full tables: [bench/2026-10-20/r
   ORB-SLAM3: **FAILED** (below).
 - **Track.** Practice best lap 12.89 s; compete best lap 19.53 s; 0 collisions on both.
 - **Sim stalls.** 0–89.8 % of a run's wall time in controller × v_max, when other GPU jobs
-  shared the box; 0 % in every other stage. Each run reports `stalled_pct`.
+  shared the GPU; 0 % in every other stage. Each run reports `stalled_pct`.
 
 ## Learned components
 

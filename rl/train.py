@@ -1,4 +1,4 @@
-"""PPO training on the AutoDRIVE track env (needs stable-baselines3, autodrive_bridge, sim running).
+"""PPO training on the AutoDRIVE track env (needs stable-baselines3 and the sim running).
 
     python rl/train.py                            # new run, auto-numbered PPO_N
     python rl/train.py --resume PPO_1 --step 50000
@@ -184,11 +184,10 @@ def safety_from_pilot_config(path: str | None) -> dict:
 
 
 def resolve_env_kwargs(base: dict[str, Any], safety: dict) -> dict[str, Any]:
-    """Env kwargs to build (and save) the env with, safety filled in if the
-    saved config predates it (older runs also saved vis_zmq_port and the ZMQ bridge's
-    zmq_* ports, which the direct sim link replaced)."""
-    legacy = ("vis_zmq_port", "zmq_host", "zmq_sensor_port", "zmq_control_port")
-    kwargs = {k: v for k, v in base.items() if k not in legacy}
+    """Env kwargs to build (and save) the env with: safety filled in if the saved config
+    has none, and keys TrackEnv doesn't take (vis_zmq_port, zmq_*) dropped."""
+    unused = ("vis_zmq_port", "zmq_host", "zmq_sensor_port", "zmq_control_port")
+    kwargs = {k: v for k, v in base.items() if k not in unused}
     if kwargs.get("safety") is None:
         kwargs["safety"] = dict(safety)
     elif kwargs["safety"] != safety:

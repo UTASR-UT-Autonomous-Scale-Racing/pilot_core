@@ -144,7 +144,7 @@ class ControlWorker(BaseWorker):
 
             model = cfg.get("policy", {}).get("model", "policy.onnx")
             self._follower = PolicyFollower(model, outer, inner)
-            # step at the rate the policy was trained at (TrackEnv's 10 Hz for old sidecars)
+            # step at the rate the policy was trained at (10 Hz if the sidecar doesn't record it)
             hz = self._follower.policy_hz or 10.0
             self._policy_period = 1.0 / hz
             self.logger.info(f"Policy loaded: {model} (obs_dim={self._follower.meta.obs_dim}, {hz:g} Hz)")

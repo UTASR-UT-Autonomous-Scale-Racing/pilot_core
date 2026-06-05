@@ -1,5 +1,5 @@
 """Throttle -> steady-state speed and steering -> curvature calibration on the live sim
-(validation step 2e), used by scripts/autodrive_validate.py calibrate.
+used by scripts/autodrive_validate.py calibrate (docs/autodrive.md "Calibration").
 
 Each throttle level starts from the reset pose and holds that throttle while pure_pursuit
 on the saved map steers; the steady-state speed is the median sim speed once the first

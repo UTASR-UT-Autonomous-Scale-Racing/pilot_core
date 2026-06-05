@@ -5,7 +5,7 @@
 # then connect the sim: HUD menu -> "Disconnected" toggle, or
 #   python scripts/autodrive_sim_ctl.py connect
 # Keys: [a] arm, [SPACE] disarm, [r] reset the sim, [l] end the mapping lap, [q] quit.
-# Setup on a vast.ai box: scripts/vast_autodrive_setup.sh; details in docs/autodrive.md.
+# Setup on a cloud GPU box (vast.ai): scripts/vast_autodrive_setup.sh; details in docs/autodrive.md.
 
 sim: autodrive
 sim_host: "0.0.0.0"
@@ -21,7 +21,7 @@ use_oakd_imu: false
 resolution: [192, 108]          # sim front camera, [width, height]
 fps: 15
 
-depth_max_meters: 15.0          # Joshua's build: far clip of DepthCamera.cs (stock build has no depth)
+depth_max_meters: 15.0          # Joshua Choi's modified build: far clip of DepthCamera.cs (stock build has no depth)
 depth_raw_scale: null
 
 vision:
@@ -41,12 +41,12 @@ vehicle_params: "vehicle_params_roboracer.yaml"
 
 # runtime safety (ActuatorWorker). In the stock sim throttle behaves like a speed
 # set-point of ~25 m/s per unit (0.06 -> 1.5 m/s), so every throttle bound is small;
-# speed_per_throttle is the steady-state fit from docs/autodrive.md (step 2e)
+# speed_per_throttle is the steady-state fit from docs/autodrive.md (Calibration)
 safety:
   command_timeout: 0.150        # s; also the age after which AutoDRIVEWorker sends neutral
   speed_cap: 2.0                # m/s
   cap_margin: 0.2               # m/s
-  speed_per_throttle: 24.8      # m/s per unit throttle, steady state (2e: 0.02..0.10 -> 0.50..2.45 m/s)
+  speed_per_throttle: 24.8      # m/s per unit throttle, steady state (0.02..0.10 -> 0.50..2.45 m/s)
   max_throttle_no_speed: 0.04   # forward bound with no speed estimate (1 m/s)
   max_reverse_throttle: 0.06    # -1.5 m/s
   throttle_rate: 0.5            # signed units/s (12 m/s^2 of set-point)

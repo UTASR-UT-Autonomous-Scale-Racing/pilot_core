@@ -58,11 +58,10 @@ def export(model, vec_normalize, env_kwargs: dict, out_path: str) -> str:
 
     safety = env_kwargs.get("safety")
     meta = {
-        # env steps per second during training; TrackEnv defaulted to 10 Hz
+        # env steps per second during training (10 Hz if the run didn't record it)
         "policy_hz": float(env_kwargs.get("policy_hz", 10.0)),
-        # SafetyConfig fields of the training actuator. None = trained before
-        # this was recorded (those envs capped forward throttle at
-        # max_throttle_no_speed, 0.4, since they had no speed source)
+        # SafetyConfig fields of the training actuator; None if the run didn't record
+        # them (forward throttle was then capped at max_throttle_no_speed, 0.4)
         "safety": dict(safety) if safety is not None else None,
         "observation": {
             "n_ahead": int(env_kwargs["n_ahead"]),

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Scripted checks of the pilot_core <-> AutoDRIVE sim link against the live Unity sim
-(docs/autodrive.md, validation step 2).
+(docs/autodrive.md).
 
 Runs pilot_core's own AutoDRIVEWorker and ActuatorWorker (the full safety chain) as
 processes and writes scripted commands into ctrl_buf, as ControlWorker would; the sim
 connects to the worker, the screen is recorded, and every phase is scored from the
 worker's sim_messages.csv (what the sim reported, what was sent back).
 
-    python scripts/autodrive_validate.py commands --out /workspaces/proof/runs/2bcd
+    python scripts/autodrive_validate.py commands --out runs/commands
     python scripts/autodrive_validate.py calibrate --out ... --map maps/autodrive_practice
 
 commands: disarmed hold, armed constant command + echo, steering sign (left / right),
@@ -127,7 +127,7 @@ class SimSession:
             max_gap = max(max_gap, now - t_seq)
             nxt += period
             time.sleep(max(0.0, nxt - time.monotonic()))
-        # the sim freezes for seconds on this box (docs/autodrive.md): flag the phase
+        # the sim freezes for seconds when other jobs share the GPU (docs/autodrive.md): flag the phase
         ph = {"name": name, "t0": t0, "t1": time.monotonic(), "steering": steering, "throttle": throttle,
               "armed": armed, "max_pose_gap": max_gap, **info}
         self.phases.append(ph)

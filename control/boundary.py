@@ -1,6 +1,6 @@
 """
 Closed track boundaries: smoothing, uniform resampling and the RL boundary observation.
-Single implementation shared by training, deployment and RViz so observations match.
+Single implementation shared by training and deployment so observations match.
 Boundaries are closed (N, 2) loops; a trailing copy of the first point is dropped.
 """
 

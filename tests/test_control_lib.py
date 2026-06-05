@@ -241,7 +241,7 @@ class TestLidarGap:
     @staticmethod
     def _hairpin_scan():
         """A wide, shallow pocket on the right and a narrower, deep lane on the left,
-        with a wall ahead: the scans before the compete-track hairpin collisions."""
+        with a wall ahead, as beside the compete track's hairpins."""
         from control.lidar_gap import ANGLE_INCREMENT, ANGLE_MIN
 
         ang = np.degrees(ANGLE_MIN + np.arange(1080) * ANGLE_INCREMENT)

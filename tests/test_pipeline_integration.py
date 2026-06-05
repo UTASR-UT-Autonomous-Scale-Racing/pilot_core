@@ -464,8 +464,8 @@ class TestOAKDIntegration:
         finally:
             fb.unlink()
 
-    def test_full_oakd_pipeline_with_resnet18_mask(self):
-        """OAK-D frames, a fake seg mask in place of ResNet18, then mapping (poses fed in place of SLAM)."""
+    def test_full_oakd_pipeline_with_stand_in_mask(self):
+        """OAK-D frames, a stand-in segmentation mask, then mapping (poses fed in place of SLAM)."""
         from workers import CameraWorker, MappingWorker
 
         fn = f"full_{_uid()}_f"
@@ -508,7 +508,7 @@ class TestOAKDIntegration:
                 result = fb.read_latest()
                 if result is not None:
                     _, rgb, depth = result
-                    # stand-in for ResNet18: threshold on depth
+                    # stand-in segmentation: threshold on depth
                     mask = np.zeros((400, 640), dtype=np.int32)
                     mask[depth < 2.0] = 1   # road
                     mask[depth >= 2.0] = 2  # wall

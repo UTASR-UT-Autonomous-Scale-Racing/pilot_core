@@ -6,7 +6,7 @@ post-safety command (ActuatorWorker's output buffer) back on every message.
 The stock 2026-iros client is an old Socket.IO component on an Engine.IO v4 URL: it
 pings from the client side ("2" -> we answer "3"), never sends a namespace CONNECT and
 only starts streaming after the server has sent a first 'Bridge'. It emits on its own
-clock (~10-15 Hz on the vast box) and also echoes its current state whenever it gets a
+clock (~10-15 Hz on a cloud GPU) and also echoes its current state whenever it gets a
 command, so every message is answered but only new sim frames (sim clock advanced) go
 into the buffers. Speaks that subset directly over websockets (scripts/autodrive_spike.py).
 """
@@ -86,7 +86,7 @@ def autodrive_to_internal(msg: dict) -> dict:
         out["lidar"] = decode_lidar(msg["V1 LIDAR Range Array"]).tolist()   # the decoder truth-tests it
     if msg.get("V1 Front Camera Image"):
         out["front_camera"] = {"data": msg["V1 Front Camera Image"], "encoding": "jpeg"}
-    # Joshua's build: depth camera + checkpoint counter (key names unconfirmed, no build yet)
+    # Joshua Choi's modified build: depth camera + checkpoint counter (key names unconfirmed)
     for key in ("V1 Depth Camera Image", "V1 Front Depth Image"):
         if msg.get(key):
             out["depth_camera"] = {"data": msg[key], "encoding": "png"}

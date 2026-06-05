@@ -94,7 +94,7 @@ def test_track_env_against_fake_sim():
 def test_reset_waits_out_the_respawn_pause():
     # the stock sim streams a few poses after a reset, then pauses ~2 s while it
     # respawns the car: reset() must not return into that pause, or every episode
-    # ends on its first step as a stale pose (what live fine-tuning hit)
+    # ends on its first step as a stale pose
     from rl.track_env import TrackEnv
 
     port = _free_port()
@@ -104,7 +104,7 @@ def test_reset_waits_out_the_respawn_pause():
                    safety={"speed_cap": 1.5, "cap_margin": 0.2, "speed_per_throttle": None,
                            "command_timeout": 0.5})
     sim = FakeAutoDRIVE(port, rate_hz=25.0, lidar=False, camera=False)
-    sim.reset_pause = (0.6, 1.0)        # starts after the old reset() had returned
+    sim.reset_pause = (0.6, 1.0)        # begins after the respawn's first few poses
     try:
         env.load_boundaries(outer, inner)
         env.start()

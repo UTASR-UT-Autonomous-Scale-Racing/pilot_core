@@ -7,7 +7,7 @@ same reward terms and termination as TrackEnv, so a model pretrained here can be
 ``rl/train.py --resume`` on the live sim and exported for the on-car ``policy`` mode.
 
 Plant (SimPlant): rear-axle kinematic bicycle fitted to the AutoDRIVE RoboRacer
-(docs/autodrive.md "Calibration", proof/runs/2e_calibration): throttle is a speed
+(docs/autodrive.md "Calibration"): throttle is a speed
 set-point of 24.8 m/s per unit, reached with an acceleration-limited first-order response
 (~5.5 m/s^2 up, ~6 m/s^2 down to a neutral set-point of 0), wheelbase 0.342 m, +-30 deg
 steering, plus a friction cap on yaw rate (|v * r| <= a_lat_max).
@@ -62,7 +62,7 @@ _SIM_ONLY_KWARGS = ("sim_host", "sim_port", "shm_prefix", "stale_timeout", "rese
 
 @dataclass
 class SimPlantConfig(PlantConfig):
-    """PlantConfig for the AutoDRIVE RoboRacer (fit to the 2e calibration run)."""
+    """PlantConfig for the AutoDRIVE RoboRacer (fit to the sim calibration)."""
     speed_per_throttle: float = 24.8   # m/s set-point per unit throttle
     tau: float = 0.05                  # s, set-point tracking time constant
     coast_decel: float = 6.0           # m/s^2 (neutral = set-point 0: the sim brakes)

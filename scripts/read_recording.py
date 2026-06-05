@@ -44,7 +44,7 @@ class Record:
 
 def _parse_name(path: str):
     """<buffer>_<session>_<part>.bin -> (buffer, session, part); also accepts
-    the old <buffer>_<session>.bin naming."""
+    single-part <buffer>_<session>.bin names."""
     stem = os.path.basename(path)[: -len(".bin")]
     parts = stem.rsplit("_", 2)
     if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():

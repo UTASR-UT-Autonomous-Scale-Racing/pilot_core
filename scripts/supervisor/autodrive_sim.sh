@@ -2,9 +2,9 @@
 # Stock AutoDRIVE RoboRacer sim on :99. Settings come from $AUTODRIVE_ROOT/autodrive_sim/sim.env
 # (SIM_VARIANT=practice|compete, SIM_W, SIM_H, SIM_GFX, SIM_ARGS, SIM_NICE, SIM_VK_ICD)
 # so they can be changed without touching supervisor. The stock build ships Vulkan
-# shaders only (-force-glcore fails). SIM_VK_ICD=/usr/share/vulkan/icd.d/lvp_icd.json
-# renders on the CPU with Mesa lavapipe: no NVIDIA driver, so no stalls behind other
-# GPU jobs' driver locks (docs/autodrive.md).
+# shaders only (-force-glcore fails); SIM_VK_ICD picks the Vulkan driver. Mesa lavapipe
+# (/usr/share/vulkan/icd.d/lvp_icd.json) renders the stock build magenta, so the sim needs
+# the NVIDIA driver (docs/autodrive.md).
 ROOT="${AUTODRIVE_ROOT:-/workspaces}"
 SIM_VARIANT=practice; SIM_W=640; SIM_H=360; SIM_GFX=vulkan; SIM_ARGS=""; SIM_NICE=0; SIM_VK_ICD=""
 [ -f "$ROOT/autodrive_sim/sim.env" ] && . "$ROOT/autodrive_sim/sim.env"

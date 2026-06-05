@@ -83,7 +83,7 @@ def test_autodrive_wiring():
     try:
         by = {w.name: w for w in p.workers}
         sim, act, ctrl = by["autodrive"], by["actuator"], by["control"]
-        # the supervised command is what goes to the sim, nothing over ZMQ
+        # the supervised command is what goes to the sim
         assert act.config["output_buffer"] is sim.config["command_buffer"] is not None
         assert sim.config["reset_event"] is p.reset_event is not None
         assert sim.config["lap_counter"] is p.counters["lap"]

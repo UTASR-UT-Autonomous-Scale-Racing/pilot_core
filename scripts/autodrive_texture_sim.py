@@ -12,7 +12,7 @@ enough to show a glare that moves with the camera. This copies the build to
   - replaces the floor texture (diffuse) the same way, one tile per `--floor-tile` metres,
     and sets the floor's smoothness to 0 (no view-dependent glare).
 
-    python scripts/autodrive_texture_sim.py [--variant practice] [--root /workspaces/autodrive_sim]
+    python scripts/autodrive_texture_sim.py [--variant practice] [--root <sim dir>]
     # then SIM_VARIANT=practice_textured in sim.env, supervisorctl restart autodrive_sim
 
 Needs UnityPy and Pillow (`pip install UnityPy pillow`), kept out of pilot_core's

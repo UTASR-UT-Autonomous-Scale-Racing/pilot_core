@@ -463,6 +463,7 @@ class TestMappingHelpers:
 
 # needs a real OAK-D (OAKD_AVAILABLE=1)
 
+@pytest.mark.oakd
 @pytest.mark.skipif(
     not os.environ.get("OAKD_AVAILABLE", ""),
     reason="OAK-D camera not available (set OAKD_AVAILABLE=1)"

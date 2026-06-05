@@ -76,6 +76,7 @@ class TestCameraWorker:
         finally:
             fb.unlink()
 
+    @pytest.mark.oakd
     @pytest.mark.skipif(
         not os.environ.get("OAKD_AVAILABLE", ""),
         reason="OAK-D camera not flagged as available (set OAKD_AVAILABLE=1)"
@@ -110,6 +111,7 @@ class TestCameraWorker:
         finally:
             fb.unlink()
 
+    @pytest.mark.oakd
     @pytest.mark.skipif(
         not os.environ.get("OAKD_AVAILABLE", ""),
         reason="OAK-D camera not flagged as available"
@@ -315,6 +317,7 @@ class TestSLAMWorker:
             pb.unlink()
             pcb.unlink()
 
+    @pytest.mark.oakd
     @pytest.mark.skipif(
         not os.environ.get("OAKD_AVAILABLE", ""),
         reason="OAK-D + ORB_SLAM3 not available"

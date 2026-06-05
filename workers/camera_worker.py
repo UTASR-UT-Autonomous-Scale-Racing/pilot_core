@@ -197,6 +197,20 @@ class CameraWorker(BaseWorker):
             f"AE limit {max_exp_us} µs"
             + (" + on-board IMU" if self._imu_q is not None else "")
         )
+        self._warn_slow_link(device, fps)
+
+    def _warn_slow_link(self, device, fps: int) -> None:
+        """Log a warning on a USB 2 link above 15 FPS: RGB-D frames drop and lag there."""
+        try:
+            speed = device.getUsbSpeed()
+            slow = speed in (dai.UsbSpeed.LOW, dai.UsbSpeed.FULL, dai.UsbSpeed.HIGH)
+        except Exception:  # RVC4 over Ethernet, or a mocked device
+            return
+        if slow and fps > 15:
+            self.logger.warning(
+                f"OAK-D link is {speed.name}, not USB 3: {fps} FPS RGB-D will drop frames and lag "
+                "(measured 25 Hz, ~320 ms at 30 FPS). Use a USB 3 port/cable or fps: 15."
+            )
 
     def _open_pipeline(self, attempts: int = 5, backoff_s: float = 1.0):
         """dai.Pipeline() with retries.

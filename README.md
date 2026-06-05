@@ -1,10 +1,33 @@
 # pilot_core
 
+[![CI](https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_core/actions/workflows/ci.yml/badge.svg)](https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_core/actions/workflows/ci.yml)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![Platform: Jetson / Linux](https://img.shields.io/badge/platform-Jetson%20%7C%20Linux-lightgrey)
+
 On-vehicle software for UTASR's autonomous scale race car: camera, IMU, SLAM,
 mapping, control and actuation, run as Python processes that share data through
-shared-memory ring buffers.
+shared-memory ring buffers. The same pipeline drives the real car (OAK-D, Jetson,
+Arduino) and the AutoDRIVE RoboRacer simulator.
 
-![Camera and map over a dev-simulator run](docs/images/demo.gif)
+![Telemetry HUD: a mapping lap, then a racing lap, in the AutoDRIVE RoboRacer sim](docs/images/hud.gif)
+
+The AutoDRIVE RoboRacer sim at 5× speed. A LiDAR follow-the-gap lap maps the track and closes
+the loop, then `pure_pursuit` races the boundary it just extracted (16.73 s, 0 collisions).
+Every panel is drawn from the recorded buffers on one clock:
+
+- sim chase view
+- car camera with the live Fast-SCNN segmentation
+- map built from LiDAR, with the trail coloured by speed
+- controller command vs. what the safety supervisor actually sent
+
+Rendered by [`scripts/render_hud.py`](#telemetry-hud). Full-resolution frame: [hud_frame.png](docs/images/hud_frame.png).
+
+| | |
+| --- | --- |
+| **Sim validation** | link, arming, steering, reset, stop and map-then-race checks pass; 84 benchmark runs, 0 errors ([results](docs/results.md)) |
+| **Controllers** | `pure_pursuit`: 12.89 s best practice lap, 0 collisions; `mpc` about 0.25 s per lap slower, with the lowest cross-track error |
+| **Vision** | sim track segmentation IoU 0.94 on an unseen track, live in the loop |
+| **Safety** | neutral until armed; 150 ms command watchdog; speed cap and slew limits; RC override on the car |
 
 ## Quick start
 
@@ -12,7 +35,7 @@ shared-memory ring buffers.
 git clone https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_core.git && cd pilot_core
 scripts/setup.sh                                   # submodules; --with-slam adds ORB-SLAM3 (docs/slam.md)
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[test]"                           # ,train for torch models, ,rl for RL
+pip install -e ".[test]"                           # ,sim AutoDRIVE, ,plot HUD/figures, ,train torch, ,rl RL
 
 python start.py --config config_cpu.yaml           # OAK-D + map-free control, no actuator output
 python start.py --config config_dev_local.yaml     # no hardware: simulated track
@@ -96,6 +119,8 @@ the ground.
 
 ## Dev simulator run
 
+![Camera and map over a dev-simulator run](docs/images/demo.gif)
+
 The dev simulator (`config_dev_local.yaml`, `synthetic_scene: track`) ray-casts a
 closed track with the camera 0.15 m up and pitched 12° down, and drives a scripted lap
 through the same workers as the car. The camera path is scripted (open loop); closed
@@ -170,15 +195,70 @@ and the benchmark are in [docs/autodrive.md](docs/autodrive.md).
 python start.py --config config_autodrive.yaml      # then: python scripts/autodrive_sim_ctl.py connect
 ```
 
+Validation and benchmark results: [docs/results.md](docs/results.md).
+
+## Telemetry HUD
+
+Any recorded run can be exported to plain files on one clock and rendered as the HUD
+above. In the sim, the screen video is included too; without it, the depth image takes
+that panel.
+
+```bash
+python scripts/export_recording.py <run> --out <run>/export     # CSV / PNG / NPZ, one clock
+python scripts/render_hud.py <run>/export --out hud.mp4         # real time, 1280×720
+python scripts/render_hud.py <run>/export --out hud.gif --speed 5 --fps 6 --gif-width 800
+```
+
+The export format is documented in [docs/autodrive.md](docs/autodrive.md#telemetry-export-and-hud).
+The README run's export is in the `telemetry-showcase` bundle ([docs/datasets.md](docs/datasets.md)).
+
+## Data and models
+
+Trained models and datasets are kept out of git. The ONNX models, RL checkpoints, sim
+segmentation dataset and showcase telemetry are packaged as release bundles. Their
+contents, checksums, rebuild commands and the data still to collect are in
+[docs/datasets.md](docs/datasets.md).
+
+## Repository layout
+
+| Path | Contents |
+| ---- | -------- |
+| `start.py` | Entry point: builds the pipeline from a config, supervises workers, handles keys |
+| `workers/` | One process per stage (camera, IMU, SLAM, LiDAR, state, mapping, vision, control, actuator, AutoDRIVE link, recorder) |
+| `shared_buffer/` | Shared-memory ring buffers, one typed buffer per stream |
+| `control/` | Controllers, EKF, safety supervisor, bicycle-model sim (plain library) |
+| `vision/` | Track segmentation models, training and inference |
+| `rl/` | PPO training: bicycle-model pretraining and the live-sim `TrackEnv` |
+| `synthetic/` | Synthetic sensors for the hardware-free dev simulator |
+| `scripts/` | Setup, benchmark, calibration, training, recording and rendering tools |
+| `tests/` | pytest suite; `fake_autodrive.py` stands in for the sim |
+| `bench/` | Benchmark matrix and dated result tables |
+| `maps/` | Saved track boundaries for the sim tracks |
+| `sim_camera/` | Sim camera intrinsics, car-body mask, ORB-SLAM3 settings |
+| `config*.yaml`, `vehicle_params*.yaml` | Run configs and vehicle models (see Configuration) |
+| `docs/` | Guides, results, roadmap |
+| `ORB_SLAM3/`, `firmware/` | Submodules: the SLAM fork and the Arduino firmware |
+
 ## Development
 
 ```bash
-PILOT_SYNTHETIC=1 python -m pytest            # hardware-free suite (CI)
-OAKD_AVAILABLE=1 python -m pytest tests/test_workers.py tests/test_pipeline_integration.py
+PILOT_SYNTHETIC=1 python -m pytest -m "not oakd and not slam"   # hardware-free suite (CI)
+OAKD_AVAILABLE=1 python -m pytest -m oakd                       # with an OAK-D on USB 3
+python -m pyflakes control vision workers shared_buffer synthetic rl scripts tests start.py
 ```
 
-SLAM build: [docs/slam.md](docs/slam.md). Jetson deployment: [docs/deployment.md](docs/deployment.md).
-Firmware interface: `firmware/README.md`.
+## Documentation
+
+| Guide | |
+| ----- | - |
+| [docs/autodrive.md](docs/autodrive.md) | AutoDRIVE sim: setup, protocol, calibration, benchmark, vision, telemetry export |
+| [docs/results.md](docs/results.md) | Sim validation and benchmark results |
+| [docs/oakd.md](docs/oakd.md) | OAK-D bench check, USB 3 requirement, open camera items |
+| [docs/slam.md](docs/slam.md) | ORB-SLAM3 build and the Python wrapper |
+| [docs/deployment.md](docs/deployment.md) | Running on the Jetson, natively or in Docker |
+| [docs/datasets.md](docs/datasets.md) | Data and model bundles, and what is still to collect |
+| [docs/roadmap.md](docs/roadmap.md) | What is next |
+| `firmware/README.md` | Arduino firmware and the I2C interface |
 
 ## License
 

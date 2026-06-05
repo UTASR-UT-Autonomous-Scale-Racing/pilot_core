@@ -1,9 +1,10 @@
-# CI: pyflakes + hardware-free tests (oakd / slam tests deselected).
+# CI: pyflakes + hardware-free tests (oakd / slam tests deselected), on pull requests only
+# (not again when a PR is merged); run it by hand from the Actions tab if needed.
 name: CI
 
 on:
-  push:
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}

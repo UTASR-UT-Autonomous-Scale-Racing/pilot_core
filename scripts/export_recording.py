@@ -62,9 +62,16 @@ def _video_frame_times(run: str) -> list[float]:
         return []
     with open(meta) as f:
         t0 = float(json.load(f)["t0_monotonic"])
+    # ffprobe 4.x leaves frame pts_time empty; best_effort_timestamp_time is the same pts there
     out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                          "frame=pts_time", "-of", "csv=p=0", mp4], capture_output=True, text=True, check=True)
-    return [t0 + float(x.strip(",")) for x in out.stdout.split() if x.strip(",")]
+                          "frame=pts_time,best_effort_timestamp_time", "-of", "csv=p=0", mp4],
+                         capture_output=True, text=True, check=True)
+    times = []
+    for line in out.stdout.splitlines():
+        vals = [v for v in line.strip().split(",") if v and v != "N/A"]
+        if vals:
+            times.append(t0 + float(vals[0]))
+    return times
 
 
 def _latest_index(t_ref: np.ndarray, t_query: np.ndarray) -> np.ndarray:

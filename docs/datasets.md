@@ -28,7 +28,7 @@ SHA-256:
 ```
 b0a6b929f41f5a60e5d47a459657be4f5bd450017464aa406a5a4016c730e09e  pilot_core-models-v1.tar.zst
 d7ac7edd1d590c170699478e61acb6066754f559790566d782a45d38d12df57b  pilot_core-dataset-sim_track_seg-v1.tar.zst
-fc1c8d945c592bad55f21a2c593b95bbb6dfe4a378c8e181294c40d5cc74fe53  pilot_core-telemetry-showcase-v1.tar.zst
+efcb62577c7d00e9e67429a4b3f19de8d67359d00a4432a39169552d5aaace0b  pilot_core-telemetry-showcase-v1.tar.zst
 ```
 
 ## Models

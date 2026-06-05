@@ -147,6 +147,15 @@ class Run:
         return min(ts), max(ts)
 
 
+def car_polygon(center_px: np.ndarray, yaw: float, length: float = 9.0) -> np.ndarray:
+    """Car marker in pixels, nose along yaw (rad, ccw from the panel's +x). Pixel y points
+    down, so a world heading (cos, sin) is drawn as (cos, -sin)."""
+    tri = np.array([[length, 0.0], [-length * 0.6, length * 0.55], [-length * 0.6, -length * 0.55]])
+    c, s = np.cos(yaw), np.sin(yaw)
+    # vehicle (forward a, left b) -> pixels (a c - b s, -(a s + b c))
+    return center_px + tri @ np.array([[c, -s], [-s, -c]])
+
+
 class MapLayer:
     """World -> pixel transform and the layers that only grow (wall points, trail)."""
 
@@ -335,10 +344,12 @@ class HUD:
             m.add_trail(run, i, run.v_scale)
             sel = m.trail_mask > 0
             img[sel] = m.trail[sel]
-            x, y, yaw = run.pose["x"][i], run.pose["y"][i], run.pose["yaw"][i]
             if run.lidar is not None:
                 li = _latest(run.lidar["t_mono"], t)
-                if li >= 0:
+                pj = _latest(run.pose["t_mono"], run.lidar["t_mono"][li]) if li >= 0 else -1
+                if li >= 0 and pj >= 0:
+                    # place the scan with the pose at the scan's own time
+                    x, y, yaw = run.pose["x"][pj], run.pose["y"][pj], run.pose["yaw"][pj]
                     r = run.lidar["ranges"][li]
                     ang = float(run.lidar["angle_min"]) + np.arange(len(r)) * float(run.lidar["angle_increment"])
                     ok = np.isfinite(r) & (r > 0.05)
@@ -346,12 +357,9 @@ class HUD:
                     for u, v in m.px(wp[::2]).astype(int):
                         if 0 <= u < MAP_W and 0 <= v < BOT_H:
                             cv2.circle(img, (u, v), 1, SCAN, -1, cv2.LINE_AA)
+            x, y, yaw = run.pose["x"][i], run.pose["y"][i], run.pose["yaw"][i]
             c = m.px(np.array([x, y]))[0]
-            yaw = yaw + (np.pi / 2 if m.rot else 0.0)
-            L = 9.0
-            tri = np.array([[L, 0], [-L * 0.6, L * 0.55], [-L * 0.6, -L * 0.55]])
-            R = np.array([[np.cos(yaw), np.sin(yaw)], [-np.sin(yaw), np.cos(yaw)]])  # y down in pixels
-            pts = np.round((c + tri @ R) * 4).astype(np.int32)
+            pts = np.round(car_polygon(c, yaw + (np.pi / 2 if m.rot else 0.0)) * 4).astype(np.int32)
             cv2.fillPoly(img, [pts], (255, 255, 255), cv2.LINE_AA, shift=2)
             cv2.polylines(img, [pts], True, (0, 0, 0), 1, cv2.LINE_AA, shift=2)
         texts.append((12, HEADER + TOP_H + 10, "MAP  ·  LiDAR walls, trail coloured by speed", self.f_label, TEXT))

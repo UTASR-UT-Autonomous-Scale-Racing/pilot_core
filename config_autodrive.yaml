@@ -66,6 +66,15 @@ track_control:
     min_speed: 0.4
     gap_select: area            # widest-gap turns into the compete track's hairpin pockets
 
+# the mapping drive's scan from the segmentation mask's edge + depth (control/seg_scan.py), the
+# car's stand-in for a LiDAR. Here the LiDAR is used unless source: segmentation (needs
+# vision.enabled and sim_depth); scripts/seg_scan_eval.py scores it against the LiDAR offline
+seg_scan:
+  source: auto                  # auto: LiDAR if there is one | segmentation
+  camera_pitch: 0.1833          # rad, 10.5 deg down (sim_camera/camera.yaml)
+  camera_height: 0.17           # m
+  origin_forward: -0.2883       # m, camera behind the LiDAR (cam_x - lidar_x), so ranges match its tuning
+
 # LidarProjectionWorker (enable_slam + sim_pose); sim Hokuyo UST-10LX, 1081 rays, 0.06-10 m
 lidar:
   range_min: 0.1

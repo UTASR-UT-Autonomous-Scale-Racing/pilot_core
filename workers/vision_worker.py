@@ -76,7 +76,8 @@ class VisionWorker(BaseWorker):
 
         mask = self._segmenter.get_mask(depth, rgb)      # note the arg order: depth first
         if mask is not None:
-            self._seg_buf.write(mask)
+            # the frame's capture time, so a consumer can pair the mask with its depth
+            self._seg_buf.write(mask, ts=header.produced_ts)
 
     def teardown(self) -> None:
         self.logger.info("VisionWorker shutting down")

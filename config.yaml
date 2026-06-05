@@ -66,6 +66,13 @@ track_control:
       max_backward: 0.3         # max reverse input used for braking
       min_speed_for_backward: 0.3   # m/s, no reverse braking below this
 
+# no LiDAR on the car: a track_control.mapping_drive (follow-the-gap mapping lap, otherwise
+# driven by hand with RC) runs on a scan made from the segmentation mask's edge + depth
+# (control/seg_scan.py). Needs vision.enabled and a segmentation model trained on the real
+# track. camera_height / camera_pitch come from depth_ftg (one camera mount)
+seg_scan:
+  origin_forward: 0.0           # m, camera ahead of the scan origin
+
 # depth follow-the-gap, map-free (control_mode: depth_ftg, or as the track fallback)
 depth_ftg:
   camera_height: 0.12           # m above ground, needs measuring on the car (mapping uses it too)

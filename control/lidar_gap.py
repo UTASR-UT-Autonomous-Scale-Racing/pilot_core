@@ -53,25 +53,33 @@ class LidarGapFollower:
         self.last_target = 0.0
 
     def target_angle(self, ranges: np.ndarray) -> float:
+        """NaN beams are unknown (e.g. outside a camera's view, control/seg_scan.py): never
+        free, never the closest return, and left out of the smoothing."""
         c = self.cfg
-        r = np.nan_to_num(np.asarray(ranges, dtype=np.float64), nan=0.0, posinf=c.max_range)
-        r = np.clip(r, 0.0, c.max_range)
+        raw = np.asarray(ranges, dtype=np.float64)
+        known = ~np.isnan(raw)
+        r = np.clip(np.nan_to_num(raw, nan=0.0, posinf=c.max_range), 0.0, c.max_range)
         if c.smooth > 1:
-            r = np.convolve(r, np.ones(c.smooth) / c.smooth, mode="same")
+            k = np.ones(c.smooth) / c.smooth
+            weight = np.convolve(known.astype(np.float64), k, mode="same")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                r = np.where(weight > 0, np.convolve(r, k, mode="same") / weight, 0.0)
+            r = np.where(known, r, 0.0)
         ang = ANGLE_MIN + np.arange(len(r)) * ANGLE_INCREMENT
         r = np.where(np.abs(ang) <= c.fov, r, 0.0)
 
         # clear a bubble around the closest return (car width + margin)
-        valid = r > 0.05
+        valid = known & (r > 0.05)
         if not valid.any():
             return 0.0
         i_min = int(np.argmin(np.where(valid, r, np.inf)))
         half = np.arctan2(c.bubble, max(r[i_min], 1e-3))
+        deepest_known = float(ang[int(np.argmax(r))])
         r = np.where(np.abs(ang - ang[i_min]) <= half, 0.0, r)
 
         free = r > c.gap_threshold
         if not free.any():
-            return float(ang[int(np.argmax(r))])
+            return deepest_known
         # runs of free beams; take the longest, or the one with the most range in it
         edges = np.diff(np.concatenate([[0], free.astype(int), [0]]))
         starts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)

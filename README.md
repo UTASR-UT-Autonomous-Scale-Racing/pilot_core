@@ -62,6 +62,7 @@ flowchart LR
     state -- state_buf --> act
     ctrl -- ctrl_buf --> act[ActuatorWorker<br/>safety supervisor]
     act -- "PWM (I2C)" --> servo["Arduino<br/>servo + ESC"]
+    vis -- "seg_buf (mapping-lap scan)" --> ctrl
     vis -- seg_buf --> rec[(recorder)]
     imu -- imu_buf --> rec
 ```
@@ -90,6 +91,13 @@ All timestamps are on `time.monotonic()`. Controllers use signed units (steering
 | `policy` | PPO policy (ONNX) from `rl/train.py` | SLAM + mapped track + model |
 | `depth_ftg` | Follow-the-Gap on a depth scan | depth camera |
 | `bc`, `vae` | Behaviour cloning / VAE policy (ONNX) | depth camera + model |
+
+**No LiDAR on the car.** The follow-the-gap mapping drive (`track_control.mapping_drive`)
+takes a 2D scan. In the sim that is the LiDAR's; on the car it is built from the edge of
+the segmentation mask and the depth at that edge (`control/seg_scan.py`, `seg_scan:` in the
+configs, needs `vision.enabled`). On the sim's showcase run, inside the camera's view, it
+places walls within 0.9 cm median (10.9 cm p90) of the LiDAR, misses none within 3 m, and
+steers within 0.2° of the LiDAR-driven gap follower ([results](docs/results.md#segmentation-edge-scan)).
 
 Safety supervisor (`control/safety.py`): neutral until armed; commands older than
 150 ms, future-stamped or non-finite → neutral throttle; 1.5 m/s speed cap, reverse

@@ -39,10 +39,36 @@ Vulkan, Low quality, on a shared-GPU cloud box. Full tables: [bench/2026-10-20/r
 
 - **Track segmentation** (Fast-SCNN, ONNX, trained on sim runs): IoU 0.941 on the
   compete track it never saw, 0.939 live in `VisionWorker`, with lap times unchanged.
+- **Segmentation-edge scan** (the car's LiDAR stand-in, below).
 - **PPO policy** (bicycle-model pretrain, PPO_1): zero-shot on the live sim, lap 1 in 17.58 s
   against pure_pursuit's 18.09 s at the same 2.0 m/s cap. About 30 % of live episodes
   collide, most likely because the bicycle env's collision body (circles r = 0.14 m) is
   smaller than the car. A live fine-tune of 26.5k steps did not improve this.
+
+## Segmentation-edge scan
+
+The car has no LiDAR, so the mapping drive's scan is built from the drivable-track mask
+(`control/seg_scan.py`). For each column it finds the edge of the drivable area, then places
+it with the depth there. `scripts/seg_scan_eval.py` scored it against the sim LiDAR on 754
+frames of the showcase run, using the live Fast-SCNN masks and only the beams in the
+camera's view (about −33° to +36°):
+
+| | |
+| --- | --- |
+| range error, LiDAR wall within 3 m | median 0.9 cm, p90 10.9 cm, p99 34.7 cm (151k beams) |
+| missed walls (LiDAR return within 3 m, scan free or unknown) | 0.00 % |
+| phantom walls (scan return, LiDAR > 0.5 m farther) | 0.20 % of beams |
+| gap-follower target vs the LiDAR's, same view | median 0.2°, p90 0.8° |
+| gap-follower target vs the full 270° LiDAR | median 5.3°, p90 11.0° |
+
+- **Caveat.** In the stock sim the depth image is itself made from the LiDAR (`sim_depth`).
+  So this checks the mask edges and the geometry, not stereo depth.
+- **Real-car depth.** The OAK-D gave about 33 % valid depth in a dim room ([oakd.md](oakd.md)).
+  Where an edge has no depth, it is placed by intersecting its pixel ray with the flat floor
+  (`floor_fallback`).
+- **Gap follower fix.** On a scan that covers only part of the circle, its smoothing turned
+  the unknown beams at the edge of the view into phantom close walls. It now leaves unknown
+  beams out; on all 2261 recorded LiDAR scans its output is unchanged.
 
 ## What did not work
 

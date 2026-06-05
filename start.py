@@ -443,7 +443,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 )
             )
 
-    # segmentation: nothing consumes seg_buf yet, so off unless vision.enabled
+    # segmentation: the mapping drive's scan when there's no LiDAR (control/seg_scan.py); off unless vision.enabled
     if vision_cfg.get("enabled", False):
         workers.append(
             VisionWorker(
@@ -461,6 +461,23 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     # throttle bound defaults to the speed controller's drivetrain gain
     safety_cfg = dict(config.get("safety", {}))
     safety_cfg.setdefault("speed_per_throttle", speed_per_throttle)
+
+    # the mapping drive's scan: the LiDAR, or without one (the car) the segmentation-edge
+    # scan (control/seg_scan.py). seg_scan.source: segmentation forces it, e.g. in the sim
+    seg_scan_cfg = dict(config.get("seg_scan", {}))
+    scan_source = seg_scan_cfg.pop("source", "auto")
+    if scan_source not in ("auto", "segmentation"):
+        raise SystemExit(f"seg_scan.source must be auto or segmentation, not {scan_source!r}")
+    use_seg_scan = scan_source == "segmentation" or lidar_buf is None
+    if (control_mode in TRACK_MODES and config.get("track_control", {}).get("mapping_drive")
+            and use_seg_scan and not vision_cfg.get("enabled", False)):
+        raise SystemExit("track_control.mapping_drive without a LiDAR drives on the segmentation-edge "
+                         "scan, which needs vision.enabled: true")
+    seg_scan_cfg.setdefault("camera_settings", vision_cfg.get(
+        "camera_settings", slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml")))
+    for key in ("camera_height", "camera_pitch"):      # one camera mount, shared with depth_ftg
+        if key in depth_ftg_cfg:
+            seg_scan_cfg.setdefault(key, depth_ftg_cfg[key])
 
     # control: track modes need a pose source; depth_ftg / vae / bc only frame_buf
     armed_event = mp.Event()
@@ -480,7 +497,9 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 frame_buffer=frame_buf,
                 camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
                 depth_ftg_config=depth_ftg_cfg,
-                lidar_buffer=lidar_buf,
+                lidar_buffer=None if use_seg_scan else lidar_buf,
+                segment_buffer=seg_buf if vision_cfg.get("enabled", False) else None,
+                seg_scan=seg_scan_cfg,
             )
         )
     elif control_mode in ("depth_ftg", "vae", "bc"):

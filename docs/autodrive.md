@@ -160,6 +160,19 @@ Trained on 4 practice-track runs (1417 images; pure_pursuit / stanley / lqr / mp
 IoU 0.94, but its depth is the same LiDAR adapter the labels come from, so that number
 mostly checks the wiring.
 
+### The segmentation-edge scan (no LiDAR on the car)
+
+`seg_scan.source: segmentation` (with `vision.enabled` and `sim_depth`) makes the mapping
+drive use the scan built from the mask edge (`control/seg_scan.py`) instead of the LiDAR,
+as on the car. `seg_scan` in `config_autodrive.yaml` holds the sim camera's mount and its
+offset behind the LiDAR. Score it offline against the LiDAR on any export:
+
+```bash
+python scripts/seg_scan_eval.py runs/x/export          # range error, missed / phantom walls, gap target
+```
+
+Results: [results.md](results.md#segmentation-edge-scan). It has not been driven live yet.
+
 ## Telemetry export and HUD
 
 `scripts/export_recording.py` puts every buffer of a run (plus the sim screen video and

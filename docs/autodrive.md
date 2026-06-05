@@ -159,3 +159,25 @@ Trained on 4 practice-track runs (1417 images; pure_pursuit / stanley / lqr / mp
 2 laps of compete, IoU 0.939, with lap times unchanged. `ground_plane` live on practice:
 IoU 0.94, but its depth is the same LiDAR adapter the labels come from, so that number
 mostly checks the wiring.
+
+## Telemetry export and HUD
+
+`scripts/export_recording.py` puts every buffer of a run (plus the sim screen video and
+the sim's own messages) on one clock, `time.monotonic()` on the pilot_core machine, and
+writes plain CSV / PNG / NPZ. `scripts/render_hud.py` then draws the synchronised HUD
+at the top of the README from that export: sim view, car camera with the live
+segmentation, the map growing from LiDAR with the speed-coloured trail, and
+command vs. post-safety steering / throttle.
+
+```bash
+python scripts/autodrive_bench.py run --out runs/show --laps 1 --set use_saved_map=false \
+    --set mapping.boundary_save_path=null --set recording_config.frame.sample_k=1 [...]
+python scripts/export_recording.py runs/show --out runs/show/export
+python scripts/render_hud.py runs/show/export --out hud.mp4                     # real time, 15 fps
+python scripts/render_hud.py runs/show/export --out docs/images/hud.gif \
+    --start 12.5 --speed 5 --fps 6 --gif-width 800                             # the README GIF
+```
+
+The export of the README run is the `telemetry-showcase` bundle ([datasets.md](datasets.md));
+its `README.md` documents every file and column. Without `mapping.boundary_save_path=null`
+a mapping run overwrites the committed `maps/autodrive_practice`.

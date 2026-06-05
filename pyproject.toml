@@ -37,7 +37,7 @@ sim = ["websockets>=13"]
 train = ["torch", "torchvision", "onnx"]
 rl = ["stable-baselines3[extra]", "gymnasium", "torch", "onnx"]
 slam = ["pybind11"]
-plot = ["matplotlib"]  # scripts/sim_bench.py --plot
+plot = ["matplotlib", "pillow"]  # scripts/sim_bench.py --plot, scripts/render_hud.py
 
 [project.urls]
 Homepage = "https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_core"

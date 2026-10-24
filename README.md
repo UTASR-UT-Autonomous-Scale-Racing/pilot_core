@@ -230,4 +230,4 @@ python -m pyflakes control vision workers shared_buffer rl scripts tests start.p
 
 ## License
 
-Not chosen yet. ORB-SLAM3 (submodule, linked by `orbslam3_wrapper`) is GPLv3.
+[Apache-2.0](LICENSE). ORB-SLAM3 (submodule, linked by `orbslam3_wrapper`) is GPLv3.

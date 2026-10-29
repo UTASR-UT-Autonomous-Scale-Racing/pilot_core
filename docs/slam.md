@@ -92,7 +92,14 @@ between consecutive frames (waiting up to `imu_wait_s` for the IMU to catch up).
   tracking drops, the map is wiped, repeat. The fork (branch `inertial-depth-recovery`)
   changes this for `IMU_RGBD` / `IMU_STEREO`, where depth fixes the scale: a loss before
   initialisation is relocalised (then a new map) like the RGB-D mode, and weak tracking
-  asks for a keyframe. `IMU.UpstreamPolicy: 1` in the settings restores upstream.
+  asks for a keyframe. Until the IMU is initialised, frames are tracked with the RGB-D
+  mode's rules (upstream uses monocular-inertial ones, which lose a swerve at 4-5 m/s),
+  and before the second inertial BA a lost map is given up after `IMU.EarlyLostTimeout`
+  (0.5 s). `IMU.UpstreamPolicy: 1` in the settings restores upstream.
+- The map is only started once the IMU sees acceleration ("not enough acceleration" in
+  the log): standing still does not initialise anything; the IMU initialises ~1 s into
+  driving and is fully refined (inertial BA 2) ~15 s later. A tracking loss before then
+  starts a new map; after it, short featureless stretches are bridged by the IMU.
 - Some OAK-Ds store no IMU calibration (the OAK-D Lite in `ORB_SLAM3/calib_*.json` has
   none): `--imu` then stops and asks for the CAM_A -> IMU transform via
   `--imu-extrinsics` (a 4x4 matrix as a list of rows, p_imu = T p_cam, metres).

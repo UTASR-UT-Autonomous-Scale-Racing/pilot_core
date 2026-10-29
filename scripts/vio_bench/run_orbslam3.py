@@ -74,6 +74,8 @@ IMU_BLOCK = """IMU.T_b_c1: !!opencv-matrix
    data: [{T}]
 IMU.InsertKFsWhenLost: 0
 IMU.UpstreamPolicy: {upstream_policy}
+IMU.InitTime: {init_time:.3f}
+IMU.EarlyLostTimeout: {early_lost:.3f}
 IMU.NoiseGyro: {noise_gyro:g}
 IMU.NoiseAcc: {noise_acc:g}
 IMU.GyroWalk: {gyro_walk:g}
@@ -99,6 +101,11 @@ def main() -> int:
     ap.add_argument("--imu-noise-scale", type=float, default=1.0,
                     help="multiply calib.yaml's IMU noise densities and random walks (tuning)")
     ap.add_argument("--no-imu", action="store_true", help="RGBD instead of IMU_RGBD")
+    ap.add_argument("--imu-init-time", type=float, default=1.0,
+                    help="s of keyframes before the first IMU initialisation (IMU.InitTime; upstream 1.0)")
+    ap.add_argument("--early-lost-timeout", type=float, default=0.5,
+                    help="s lost before inertial BA 2 after which the map is given up (IMU.EarlyLostTimeout; "
+                         "upstream 5.0)")
     ap.add_argument("--upstream-policy", action="store_true",
                     help="upstream ORB-SLAM3's inertial policy (IMU.UpstreamPolicy: 1): reset the map on a "
                          "tracking loss before the IMU is initialised (and before inertial BA 2), no "
@@ -132,7 +139,8 @@ def main() -> int:
         if not args.no_imu:
             im = {k: (v * args.imu_noise_scale if k != "rate_hz" else v) for k, v in c["imu"].items()}
             f.write(IMU_BLOCK.format(T=", ".join(f"{v:.9f}" for v in seq.T_imu_cam.ravel()),
-                                     upstream_policy=int(args.upstream_policy), **im))
+                                     upstream_policy=int(args.upstream_policy),
+                                     init_time=args.imu_init_time, early_lost=args.early_lost_timeout, **im))
 
     inertial = not args.no_imu
     system = slam_mod.System(args.vocab, settings, slam_mod.IMU_RGBD if inertial else slam_mod.RGBD)
@@ -185,6 +193,7 @@ def main() -> int:
             "cpu": platform.processor() or platform.machine(), "features": args.features,
             "depth_baseline_m": baseline, "speed": args.speed, "cpus": cpulimit.CPUS,
             "imu_noise_scale": args.imu_noise_scale, "upstream_policy": args.upstream_policy,
+            "imu_init_time": args.imu_init_time, "early_lost_timeout": args.early_lost_timeout,
             "sequence": os.path.abspath(args.seq), "frames": len(rows), "tracked": len(poses_t)}
     with open(os.path.join(args.out, "meta.json"), "w") as f:
         json.dump(meta, f, indent=1)

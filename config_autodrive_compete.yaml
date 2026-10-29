@@ -1,0 +1,145 @@
+# AutoDRIVE RoboRacer sim, race settings: config_autodrive.yaml plus a saved map, the
+# racing line (scripts/make_raceline.py), the speeds validated on the stock 2026-iros
+# compete build (10 laps, 0 collisions, laps 10.5-10.7 s; docs/autodrive.md) and auto_arm,
+# so it drives as soon as the sim connects (competition container: no operator keys).
+# Practice track: saved_map_path / raceline_path -> maps/autodrive_practice.
+#   python start.py --config config_autodrive.yaml       # LiDAR mapping lap, then race
+#   (race on a saved map instead: enable_slam: false, use_saved_map: true below)
+# then connect the sim: HUD menu -> "Disconnected" toggle, or
+#   python scripts/autodrive_sim_ctl.py connect
+# Keys: [a] arm, [SPACE] disarm, [r] reset the sim, [l] end the mapping lap, [q] quit.
+# Setup on a cloud GPU box (vast.ai): scripts/vast_autodrive_setup.sh; details in docs/autodrive.md.
+
+sim: autodrive
+sim_host: "0.0.0.0"
+sim_port: 4567
+auto_arm: true                  # sim only: armed at start-up, no [a] needed
+sim_pose: true                  # ground-truth pose from the sim (Z-up world, X forward)
+sim_camera: true                # decode the 192x108 front camera into frame_buf
+
+# hardware, all unused in the sim
+i2c_address: null
+i2c_bus: null
+use_oakd_imu: false
+
+resolution: [192, 108]          # sim front camera, [width, height]
+fps: 15
+
+depth_max_meters: 15.0          # Joshua Choi's modified build: far clip of DepthCamera.cs (stock build has no depth)
+depth_raw_scale: null
+
+vision:
+  enabled: false
+  # needs sim_depth (frames upscaled x2, car body hidden, depth from the LiDAR): the
+  # intrinsics are the sim camera's at that resolution, not slam.settings
+  camera_settings: "sim_camera/orbslam_settings.yaml"
+  model: ground_plane           # ground_plane | onnx
+  # Fast-SCNN trained on sim runs (not tracked; regenerate, docs/autodrive.md "Vision"):
+  # unseen compete track, live: IoU 0.94
+  onnx_model: "sim_track_seg.onnx"
+
+control_mode: "pure_pursuit"    # pure_pursuit | stanley | lqr | mpc | policy
+control_rate_hz: 50             # StateWorker + ActuatorWorker loop rate
+
+vehicle_params: "vehicle_params_roboracer.yaml"
+
+# runtime safety (ActuatorWorker). In the stock sim throttle behaves like a speed
+# set-point of ~25 m/s per unit (0.06 -> 1.5 m/s), so every throttle bound is small;
+# speed_per_throttle is the steady-state fit from docs/autodrive.md (Calibration)
+safety:
+  command_timeout: 0.150        # s; also the age after which AutoDRIVEWorker sends neutral
+  speed_cap: 12.5               # m/s
+  cap_margin: 0.2               # m/s
+  speed_per_throttle: 24.8      # m/s per unit throttle, steady state (0.02..0.10 -> 0.50..2.45 m/s)
+  max_throttle_no_speed: 0.04   # forward bound with no speed estimate (1 m/s)
+  max_reverse_throttle: 0.06    # -1.5 m/s
+  throttle_rate: 0.5            # signed units/s (12 m/s^2 of set-point)
+
+track_control:
+  pure_pursuit:                 # shorter than the default: a long lookahead cuts the
+    lookahead_min: 0.5          # line's corners into the inside walls
+    k_v: 0.25
+    lookahead_max: 2.0
+  raceline_path: "maps/autodrive_compete/raceline.npy"   # margin 0.5 m
+  speed:
+    v_max: 12.0                 # m/s
+    lat_accel_fraction: 2.0     # profile a_lat = 2.0 * friction_coeff * g = 10.3 m/s^2
+    accel: 5.0                  # m/s^2
+    decel: 5.0
+    # speed also capped by the steered curvature at 5 m/s^2: the car slides wide at large
+    # steering long before the profile's a_lat (hairpins, zig-zag apexes)
+    steer_speed_limit: true
+    steer_lat_accel: 5.0
+    longitudinal:               # gains scaled to the sim's 25 m/s per unit throttle
+      speed_per_throttle: 24.8  # keep equal to safety.speed_per_throttle
+      kp: 0.01                  # throttle per m/s of error
+      ki: 0.006
+      integral_limit: 0.006
+      max_backward: 0.012
+  # drives the LiDAR mapping lap (on the car a human does that with the RC transmitter)
+  mapping_drive:
+    speed: 0.6                  # m/s
+    min_speed: 0.4
+    gap_select: area            # widest-gap turns into the compete track's hairpin pockets
+
+# the mapping drive's scan from the segmentation mask's edge + depth (control/seg_scan.py), the
+# car's stand-in for a LiDAR. Here the LiDAR is used unless source: segmentation (needs
+# vision.enabled and sim_depth); scripts/seg_scan_eval.py scores it against the LiDAR offline
+seg_scan:
+  source: auto                  # auto: LiDAR if there is one | segmentation
+  camera_pitch: 0.1833          # rad, 10.5 deg down (sim_camera/camera.yaml)
+  camera_height: 0.17           # m
+  origin_forward: -0.2883       # m, camera behind the LiDAR (cam_x - lidar_x), so ranges match its tuning
+
+# LidarProjectionWorker (enable_slam + sim_pose); sim Hokuyo UST-10LX, 1081 rays, 0.06-10 m
+lidar:
+  range_min: 0.1
+  range_max: 9.5
+  voxel_size: 0.10
+  move_threshold: 0.05
+
+# mapping. enable_slam here means LiDAR mapping on the ground-truth pose, not ORB-SLAM3
+enable_slam: false
+use_saved_map: true
+saved_map_path: "maps/autodrive_compete"
+slam:
+  vocabulary: "ORB_SLAM3/Vocabulary/ORBvoc.txt"
+
+mapping:
+  boundary_min_points: 50
+  bev_axes: [0, 1]              # sim world is Z-up so X, Y are horizontal
+  forward_axis: 0               # X forward in the sim vehicle frame
+  auto_loop_close: true         # end the mapping lap when the car is back at its start
+  auto_loop_min_length: 8.0     # m
+  lap_close_radius: 0.6         # m
+  auto_loop_overrun: 1.0        # m past the start before the lap is closed (covers the seam)
+  jump_threshold: 0.4           # m; longer pose steps are sim respawns after a wall hit
+  min_track_half_width: 0.2     # m; a narrower extracted track is rejected (bad lap), map again
+  boundary_save_path: "maps/autodrive_practice"   # null = don't save
+
+buffers:
+  frame:
+    slots: 8
+  imu:
+    slots: 32
+  segmentation:
+    slots: 4
+  pose:
+    slots: 8
+  control:
+    slots: 8
+  pointcloud:
+    slots: 4
+  boundary:
+    slots: 2
+  lidar:
+    slots: 16
+
+# recording (also start.py --recording): buffers + sim_messages.csv / sim_events.jsonl
+recording: false
+recording_path: "/tmp/pilot_recordings"
+recording_config:
+  sample_k: 1
+  top_n: 0                      # one file per buffer per run
+  frame:
+    sample_k: 2

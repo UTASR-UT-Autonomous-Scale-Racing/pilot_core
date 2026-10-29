@@ -20,6 +20,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cpulimit  # noqa: E402,F401  (before cv2 and the SLAM module: sizes their thread pools)
+
 import cv2
 import numpy as np
 
@@ -106,6 +109,10 @@ def main() -> int:
                          "calib.yaml's depth_baseline_m, else the OAK-D's 0.075. Smaller = depth trusted less")
     ap.add_argument("--close-depth", type=float, default=3.0,
                     help="m, depth below which points are 'close' (Stereo.ThDepth = this / baseline)")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="replay speed: frames are fed on the sequence's clock (1 = real time, as on the car), "
+                         "0 = as fast as tracking allows (the mapping threads then fall behind)")
+    ap.add_argument("--cpus", type=int, help="pin to this many cores (cpulimit.py); default the cgroup's CPU cap")
     ap.add_argument("--vocab", default=os.path.join(REPO_ROOT, "ORB_SLAM3/Vocabulary/ORBvoc.txt"))
     args = ap.parse_args()
 
@@ -137,6 +144,7 @@ def main() -> int:
     if inertial:                       # samples before the first frame are not used
         k = int(np.searchsorted(imu[:, 0], seq.t_ns[0], side="right"))
     poses_t, poses_T, rows = [], [], []
+    wall0 = time.perf_counter()
     for i, (t_ns, rp, dp) in enumerate(zip(seq.t_ns, seq.rgb, seq.depth)):
         rgb = cv2.cvtColor(cv2.imread(rp, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
         depth = cv2.imread(dp, cv2.IMREAD_UNCHANGED).astype(np.float32) * 1e-3
@@ -145,6 +153,11 @@ def main() -> int:
             j = int(np.searchsorted(imu[:, 0], t_ns, side="right"))
             batch = np.ascontiguousarray(imu_s[k:j])
             k = j
+        if args.speed > 0:                 # feed on the sequence's clock
+            due = wall0 + (t_ns - seq.t_ns[0]) * 1e-9 / args.speed
+            wait = due - time.perf_counter()
+            if wait > 0:
+                time.sleep(wait)
         t0 = time.perf_counter()
         Tcw = system.track_rgbd(rgb, depth, t_ns * 1e-9, batch) if inertial else \
             system.track_rgbd(rgb, depth, t_ns * 1e-9)
@@ -170,7 +183,7 @@ def main() -> int:
     meta = {"system": "ORB-SLAM3 (UTASR CUDA fork)", "mode": "IMU_RGBD" if inertial else "RGBD",
             "cuda": os.environ.get("ORB_SLAM3_CUDA", "1") != "0", "gpu": gpu_name(),
             "cpu": platform.processor() or platform.machine(), "features": args.features,
-            "depth_baseline_m": baseline,
+            "depth_baseline_m": baseline, "speed": args.speed, "cpus": cpulimit.CPUS,
             "imu_noise_scale": args.imu_noise_scale, "upstream_policy": args.upstream_policy,
             "sequence": os.path.abspath(args.seq), "frames": len(rows), "tracked": len(poses_t)}
     with open(os.path.join(args.out, "meta.json"), "w") as f:

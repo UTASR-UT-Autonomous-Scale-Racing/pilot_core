@@ -10,7 +10,8 @@ Per result (run_orbslam3.py / run_cuvslam.py output):
   coverage  tracked frames / all frames; time from the first frame to the first pose
   latency   per-frame tracking call, ms: mean, p50, p95, p99, max (the first frame, which
             builds the map, is left out)
-Writes summary.md, summary.json and trajectories.png.
+Without a groundtruth.csv (the real track) only coverage and latency are scored; the
+accuracy comes from markers.py. Writes summary.md, summary.json and trajectories.png.
 """
 
 from __future__ import annotations
@@ -126,6 +127,8 @@ def main() -> int:
         json.dump([{k: v for k, v in s.items() if not k.startswith("_")} for s in scores], fh, indent=1)
     print("\n".join(lines))
 
+    if len(seq.gt_T) == 0:
+        return 0                     # no ground truth (real track): accuracy is markers.py's
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt

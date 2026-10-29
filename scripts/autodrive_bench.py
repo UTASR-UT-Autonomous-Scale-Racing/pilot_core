@@ -648,6 +648,7 @@ def main() -> int:
     r.add_argument("--timeout", type=float, default=600)
     r.add_argument("--stop", choices=["quit", "term", "kill", "killall"], default="quit")
     r.add_argument("--drive-s", type=float, help="stop after this long racing instead of --laps")
+    r.add_argument("--max-collisions", type=int, help="stop once the run has more collisions than this")
     mxp = sub.add_parser("matrix")
     mxp.add_argument("matrix")
     mxp.add_argument("--stage", required=True)
@@ -678,7 +679,8 @@ def main() -> int:
         print(json.dumps(score_run(a.run_dir), indent=1, default=float))
         return 0
     if a.cmd == "run":
-        res = run_pilot(a.config, a.out, parse_sets(a.set), a.laps, a.timeout, a.stop, drive_s=a.drive_s)
+        res = run_pilot(a.config, a.out, parse_sets(a.set), a.laps, a.timeout, a.stop, drive_s=a.drive_s,
+                        max_collisions=a.max_collisions)
         laps = [e for e in res["events"] if e["event"] == "lap"]
         coll = [e for e in res["events"] if e["event"] == "collision"]
         print(json.dumps({"laps": [(round(e["t"] - res["t_armed"], 1), e.get("lap_time")) for e in laps],

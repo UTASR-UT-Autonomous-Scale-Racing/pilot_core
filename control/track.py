@@ -71,8 +71,15 @@ class TrackModel:
 
         self._set_centre(centre)
         # half-width is just distance to the nearest wall
-        walls = np.vstack([_resample_closed(outer, spacing / 2), _resample_closed(inner, spacing / 2)])
-        self.half_width, _ = cKDTree(walls).query(self.points)
+        self._walls = cKDTree(np.vstack([_resample_closed(outer, spacing / 2),
+                                         _resample_closed(inner, spacing / 2)]))
+        self.half_width, _ = self._walls.query(self.points)
+
+    def set_path(self, path: np.ndarray, spacing: float = 0.05) -> None:
+        """Follow another closed path between the same walls (a racing line) instead of the
+        centre-line; half_width becomes the distance from it to the nearest wall."""
+        self._set_centre(_resample_closed(np.asarray(path, dtype=np.float64)[:, :2], spacing))
+        self.half_width, _ = self._walls.query(self.points)
 
     def _set_centre(self, centre: np.ndarray) -> None:
         self.points = centre

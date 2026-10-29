@@ -714,6 +714,15 @@ def main() -> None:
     logger.info("Outputs are neutral until armed.")
     logger.info("=" * 60)
 
+    # unattended sim runs (competition container): armed from the start, re-armed after a
+    # critical worker restarts. Never on the car, where only the operator arms.
+    auto_arm = bool(config.get("auto_arm", False))
+    if auto_arm:
+        if config.get("sim") != "autodrive":
+            raise SystemExit("auto_arm is only allowed with sim: autodrive")
+        _armed_event.set()
+        logger.warning("ARMED automatically (auto_arm)")
+
     try:
         _mapping_announced = False
         _next_health_check = 0.0
@@ -788,6 +797,9 @@ def main() -> None:
                 new_p.start()
                 _processes[i] = new_p
                 logger.info(f"Restarted worker: {w.name} (new pid={new_p.pid})")
+                if auto_arm and w.name in CRITICAL_WORKERS and not _armed_event.is_set():
+                    _armed_event.set()
+                    logger.warning("Re-ARMED automatically (auto_arm)")
     except KeyboardInterrupt:
         pass
     finally:

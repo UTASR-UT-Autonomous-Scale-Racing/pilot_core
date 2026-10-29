@@ -137,6 +137,7 @@ class ControlWorker(BaseWorker):
     def _build_follower(self, outer: np.ndarray, inner: np.ndarray, state) -> None:
         from control.controllers import build_track_follower
         from control.track import TrackModel
+        from control.types import resolve_path
 
         cfg = self._track_cfg
         if self._mode == "policy":
@@ -154,6 +155,11 @@ class ControlWorker(BaseWorker):
                 self.logger.warning(f"Policy was trained with different safety settings: {trained}")
             return
         track = TrackModel(outer, inner, spacing=cfg.get("spacing", 0.05))
+        raceline = cfg.get("raceline_path")
+        if raceline:
+            # precomputed by scripts/make_raceline.py from the same map
+            track.set_path(np.load(resolve_path(raceline)), spacing=cfg.get("spacing", 0.05))
+            self.logger.info(f"Following the racing line {raceline}")
         reversed_ = track.align_direction(state.x, state.y, state.yaw)
         self._follower = build_track_follower(
             self._mode, track, self._vehicle, cfg.get(self._mode, {}), cfg.get("speed", {})

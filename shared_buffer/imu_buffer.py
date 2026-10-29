@@ -7,6 +7,10 @@ Orientation quaternion, accel in m/s^2, then the raw throttle/steering
 feedback from the Arduino (pulse widths in us). NB: the OAK-D IMU path has no
 such feedback, so it puts gyro x / y (rad/s) in the last two slots instead.
 read_latest() -> (header, (9,) float32); decode(payload) -> (9,) float32.
+
+RawIMUBuffer: 6 x float32 (24 bytes), ax, ay, az (m/s^2), gx, gy, gz (rad/s) in the
+IMU's own frame, stamped with the sample's capture time. Only the OAK-D path fills
+it; it feeds ORB-SLAM3's inertial modes, which need all three gyro axes.
 """
 
 from __future__ import annotations
@@ -50,3 +54,36 @@ class IMUBuffer(TypedRingBuffer):
     def decode(payload: bytes) -> np.ndarray:
         """payload -> (9,) float32 vector"""
         return np.frombuffer(payload, dtype=np.float32, count=_IMU_FLOATS).copy()
+
+
+_RAW_IMU_FLOATS = 6
+_RAW_PAYLOAD_SIZE = _RAW_IMU_FLOATS * 4  # 24 bytes
+
+
+class RawIMUBuffer(TypedRingBuffer):
+
+    def __init__(
+        self,
+        slots: int = 256,
+        name: str = "raw_imu_buf",
+        create: bool = True,
+    ) -> None:
+        self._rb = SharedRingBuffer(
+            name=name,
+            slots=slots,
+            slot_payload_size=_RAW_PAYLOAD_SIZE,
+            dtype_tag=DTypeTag.RAW_IMU,
+            create=create,
+        )
+
+    def write(self, sample: np.ndarray, ts: Optional[float] = None) -> SlotHeader:
+        """sample is (6,): ax, ay, az, gx, gy, gz."""
+        vec = np.asarray(sample, dtype=np.float32)
+        if vec.shape != (_RAW_IMU_FLOATS,):
+            raise ValueError(f"raw IMU sample must have shape ({_RAW_IMU_FLOATS},), got {vec.shape}")
+        return self._rb.write(vec.tobytes(), ts)
+
+    @staticmethod
+    def decode(payload: bytes) -> np.ndarray:
+        """payload -> (6,) float32 sample"""
+        return np.frombuffer(payload, dtype=np.float32, count=_RAW_IMU_FLOATS).copy()

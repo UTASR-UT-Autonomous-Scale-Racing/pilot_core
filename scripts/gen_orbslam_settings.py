@@ -6,6 +6,13 @@ Intrinsics match CameraWorker's undistorted CAM_A output; rerun if the camera is
     python scripts/gen_orbslam_settings.py                       # uses config.yaml
     python scripts/gen_orbslam_settings.py --config config_cpu.yaml
     python scripts/gen_orbslam_settings.py -o my_settings.yaml
+    python scripts/gen_orbslam_settings.py --imu                 # + IMU block (slam.inertial)
+
+--imu adds ORB-SLAM3's IMU block: the CAM_A -> IMU transform from the factory calibration,
+the IMU rate (camera.imu_rate_hz, default 100) and noise densities. The noise values are
+starting points (ORB-SLAM3's RealSense D435i example), not measured for this IMU; an Allan
+variance run on a still camera gives the real ones. With the camera level and still, the
+script also checks the transform against gravity.
 """
 
 from __future__ import annotations
@@ -84,6 +91,63 @@ Viewer.ViewpointZ: -1.8
 Viewer.ViewpointF: 500.0
 """
 
+IMU_TEMPLATE = """
+#--------------------------------------------------------------------------------------------
+# IMU (slam.inertial: ORB-SLAM3 IMU_RGBD on the OAK-D's own IMU, {imu_type})
+#--------------------------------------------------------------------------------------------
+# camera (CAM_A) -> IMU body frame, p_b = T_b_c1 p_c; from the factory calibration
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [{T}]
+
+IMU.InsertKFsWhenLost: 0
+
+# starting points (ORB-SLAM3's D435i example), not measured for this IMU
+IMU.NoiseGyro: {noise_gyro:g}   # rad/s^0.5
+IMU.NoiseAcc: {noise_acc:g}     # m/s^1.5
+IMU.GyroWalk: {gyro_walk:g}     # rad/s^1.5
+IMU.AccWalk: {acc_walk:g}       # m/s^2.5
+IMU.Frequency: {rate:.1f}
+"""
+
+
+def gravity_check(dai, R_b_c, seconds: float = 1.0) -> None:
+    """With the camera level and still, the accelerometer's reaction to gravity, taken into
+    the camera frame, should point up (-Y, image rows grow downwards). A large angle means
+    T_b_c1 is wrong or inverted (or the camera is not level)."""
+    import time
+
+    import numpy as np
+
+    with dai.Pipeline() as pipeline:
+        imu = pipeline.create(dai.node.IMU)
+        imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER], 100)
+        imu.setBatchReportThreshold(1)
+        imu.setMaxBatchReports(10)
+        q = imu.out.createOutputQueue(maxSize=50, blocking=False)
+        pipeline.start()
+        acc = []
+        t_end = time.monotonic() + seconds
+        while time.monotonic() < t_end:
+            for data in q.tryGetAll():
+                acc.extend([p.acceleroMeter.x, p.acceleroMeter.y, p.acceleroMeter.z] for p in data.packets)
+            time.sleep(0.01)
+        pipeline.stop()
+    if not acc:
+        print("gravity check: no IMU samples", file=sys.stderr)
+        return
+    a_b = np.mean(np.array(acc), axis=0)
+    a_c = np.asarray(R_b_c).T @ a_b
+    up_c = np.array([0.0, -1.0, 0.0])
+    ang = float(np.degrees(np.arccos(np.clip(a_c @ up_c / np.linalg.norm(a_c), -1.0, 1.0))))
+    print(f"gravity check: |a| {np.linalg.norm(a_b):.2f} m/s^2, angle to camera up {ang:.1f} deg "
+          f"({len(acc)} samples)")
+    if ang > 25.0:
+        print("warning: more than 25 deg off. If the camera was level and still, T_b_c1 is wrong "
+              "(inverted?)", file=sys.stderr)
+
 
 def live_intrinsics(dai, width: int, height: int, fps: float):
     """(K, source, device_id, calib) for CAM_A's output as CameraWorker requests it."""
@@ -111,6 +175,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", default="config.yaml", help="pilot_core config to read resolution/fps from")
     parser.add_argument("-o", "--output", default="orbslam_oakd_rgbd.yaml", help="output settings file")
+    parser.add_argument("--imu", action="store_true", help="add the IMU block for slam.inertial")
+    parser.add_argument("--noise-gyro", type=float, default=1e-2)
+    parser.add_argument("--noise-acc", type=float, default=1e-1)
+    parser.add_argument("--gyro-walk", type=float, default=1e-6)
+    parser.add_argument("--acc-walk", type=float, default=1e-4)
+    parser.add_argument("--no-gravity-check", action="store_true",
+                        help="skip the check of T_b_c1 against gravity (needs the camera level and still)")
     args = parser.parse_args()
 
     try:
@@ -135,12 +206,28 @@ def main() -> int:
     # left/right stereo baseline, cm -> m
     baseline = abs(calib.getBaselineDistance(dai.CameraBoardSocket.CAM_B, dai.CameraBoardSocket.CAM_C)) / 100.0
 
+    text = TEMPLATE.format(
+        device_id=device_id, width=width, height=height, fps=fps, source=source,
+        fx=K[0][0], fy=K[1][1], cx=K[0][2], cy=K[1][2], baseline=baseline,
+    )
+    if args.imu:
+        T = calib.getCameraToImuExtrinsics(dai.CameraBoardSocket.CAM_A, False, dai.LengthUnit.METER)
+        rate = float(cfg.get("camera", {}).get("imu_rate_hz", 100))
+        with dai.Device() as device:
+            imu_type = str(device.getConnectedIMU())
+        text += IMU_TEMPLATE.format(
+            imu_type=imu_type, T=", ".join(f"{v:.6f}" for row in T for v in row), rate=rate,
+            noise_gyro=args.noise_gyro, noise_acc=args.noise_acc,
+            gyro_walk=args.gyro_walk, acc_walk=args.acc_walk,
+        )
+        print(f"IMU {imu_type} at {rate:g} Hz, T_b_c1 translation "
+              f"{[round(T[i][3], 4) for i in range(3)]} m")
+        if not args.no_gravity_check:
+            gravity_check(dai, [row[:3] for row in T[:3]])
+
     out_path = os.path.join(REPO_ROOT, args.output)
     with open(out_path, "w") as f:
-        f.write(TEMPLATE.format(
-            device_id=device_id, width=width, height=height, fps=fps, source=source,
-            fx=K[0][0], fy=K[1][1], cx=K[0][2], cy=K[1][2], baseline=baseline,
-        ))
+        f.write(text)
     print(f"Wrote {out_path}  (fx={K[0][0]:.1f} fy={K[1][1]:.1f} cx={K[0][2]:.1f} cy={K[1][2]:.1f}, b={baseline:.3f} m)")
     return 0
 

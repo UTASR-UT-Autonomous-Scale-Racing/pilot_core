@@ -125,6 +125,10 @@ enable_slam: true               # ORB-SLAM3 + mapping, same as start.py --enable
 slam:
   vocabulary: ORB_SLAM3/Vocabulary/ORBvoc.txt
   settings: orbslam_oakd_rgbd.yaml    # regenerate with scripts/gen_orbslam_settings.py
+  # RGB-D-inertial ORB-SLAM3 on the OAK-D's own accel + gyro (separate from use_oakd_imu,
+  # which picks the IMU for imu_buf). Needs the settings' IMU block: generate them with
+  # scripts/gen_orbslam_settings.py --imu, at the camera's imu_rate_hz (default 100)
+  inertial: false
 
 # mapping / BEV boundaries
 mapping:

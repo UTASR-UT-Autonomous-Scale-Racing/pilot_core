@@ -20,6 +20,7 @@ class DTypeTag(IntEnum):
     STATE = 7          # estimated vehicle state (BEV)
     POINTCLOUD = 8     # N x 3 float32 SLAM map points
     BOUNDARY = 9       # outer + inner track polylines
+    RAW_IMU = 10       # accel xyz + gyro xyz, 6 floats (ORB-SLAM3 inertial modes)
 
 
 # seq_no, produced_ts, read_ts, payload_size, schema_version, dtype_tag, reserved.

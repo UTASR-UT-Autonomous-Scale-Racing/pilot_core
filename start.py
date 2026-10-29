@@ -29,6 +29,7 @@ from shared_buffer import (
     LidarBuffer,
     PointCloudBuffer,
     PoseBuffer,
+    RawIMUBuffer,
     SegmentationBuffer,
     StateBuffer,
     TrackBoundaryBuffer,
@@ -288,6 +289,20 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
 
     buffers.extend([frame_buf, imu_buf, seg_buf, pose_buf, ctrl_buf])
 
+    # ORB-SLAM3 RGB-D-inertial: the OAK-D's own accel + gyro, apart from imu_buf (which
+    # keeps whichever IMU use_oakd_imu picks, e.g. the external one for vehicle dynamics)
+    slam_inertial = bool(enable_slam and config.get("slam", {}).get("inertial", False))
+    raw_imu_buf = None
+    if slam_inertial:
+        if autodrive:
+            raise SystemExit("slam.inertial needs the OAK-D's IMU; the AutoDRIVE sim has none for it")
+        raw_imu_buf = RawIMUBuffer(
+            slots=buf_cfg.get("raw_imu", {}).get("slots", 256),
+            name="raw_imu_buf",
+            create=True,
+        )
+        buffers.append(raw_imu_buf)
+
     pc_buf = None
     kf_buf = None
     boundary_buf = None
@@ -427,9 +442,10 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 fps=fps,
                 resolution=resolution,
                 imu_buffer=imu_buf if oakd_imu_via_camera else None,
+                raw_imu_buffer=raw_imu_buf,
                 settings_path=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
                 **{k: v for k, v in config.get("camera", {}).items()
-                   if k in ("max_exposure_us", "extended_disparity", "frame_timeout_s")},
+                   if k in ("max_exposure_us", "extended_disparity", "frame_timeout_s", "imu_rate_hz")},
             )
         )
         if not oakd_imu_via_camera:
@@ -591,6 +607,8 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 loop_event=loop_event,
                 localize_event=localize_event,
                 warmup_frames=slam_cfg.get("warmup_frames", 15),
+                inertial=slam_inertial,
+                raw_imu_buffer=raw_imu_buf,
             )
         )
 

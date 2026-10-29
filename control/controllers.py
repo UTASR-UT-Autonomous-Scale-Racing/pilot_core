@@ -81,6 +81,11 @@ class SpeedConfig:
     accel: float = 1.5            # m/s² used by the profile (well below the car's limit)
     decel: float = 1.0            # m/s^2: coasting plus a little backward input
     preview: float = 0.5          # s, how far ahead to sample the speed ref
+    # also cap the ref by the curvature actually steered (v <= sqrt(a_lat_max / kappa_cmd)):
+    # the profile only knows the centre line, and on a hairpin exit the car is still turning
+    # tighter than that while the profile already lets it accelerate (sim: slides wide)
+    steer_speed_limit: bool = False
+    steer_lat_accel: float | None = None   # m/s^2 for that cap; None = the profile's a_lat_max
     longitudinal: LongitudinalConfig = field(default_factory=LongitudinalConfig)
 
 
@@ -103,10 +108,11 @@ class TrackFollower:
         self._last_t: float | None = None
         self._v_cmd: float | None = None
         self.last_projection: Projection | None = None
+        self._a_lat_max = self.speed.lat_accel_fraction * params.friction_coeff * G
         self.v_profile = speed_profile(
             track,
             v_max=min(self.speed.v_max, params.max_speed),
-            a_lat_max=self.speed.lat_accel_fraction * params.friction_coeff * G,
+            a_lat_max=self._a_lat_max,
             a_accel=self.speed.accel,
             a_decel=self.speed.decel,
         )
@@ -118,10 +124,15 @@ class TrackFollower:
         self._last_t = None
         self._v_cmd = None
 
-    def v_ref(self, proj: Projection, v: float, dt: float) -> float:
+    def v_ref(self, proj: Projection, v: float, dt: float, delta: float = 0.0) -> float:
         # profile speed a little ahead, ramped at `accel` so the ref can't run away from the car
         s_preview = proj.s + max(abs(v), 0.3) * self.speed.preview
         target = float(self.v_profile[self.track.index_at(s_preview)])
+        if self.speed.steer_speed_limit:
+            kappa = abs(np.tan(delta)) / self.params.wheelbase
+            if kappa > 1e-6:
+                a_lat = self.speed.steer_lat_accel or self._a_lat_max
+                target = min(target, float(np.sqrt(a_lat / kappa)))
         prev = self._v_cmd if self._v_cmd is not None else max(v, 0.0)
         self._v_cmd = min(target, prev + self.speed.accel * dt)
         return self._v_cmd
@@ -136,7 +147,7 @@ class TrackFollower:
         delta = self.lateral.steer(state, self.track, proj)
         steering = delta / self.params.max_steering_angle
         dt = min(dt, 0.2)
-        throttle = self.longitudinal.step(self.v_ref(proj, state.v, dt), state.v, dt)
+        throttle = self.longitudinal.step(self.v_ref(proj, state.v, dt, delta), state.v, dt)
         return Command(steering, throttle).clipped()
 
 

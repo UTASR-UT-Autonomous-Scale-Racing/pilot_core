@@ -62,6 +62,30 @@ the camera changes. `CameraWorker` warns if the connected camera doesn't match.
 python scripts/gen_orbslam_settings.py --config config.yaml
 ```
 
+## RGB-D-inertial mode (`slam.inertial`)
+
+ORB-SLAM3's `IMU_RGBD` sensor adds the OAK-D's own accelerometer and gyro to the RGB-D
+frames. Off by default; not yet tried on the car.
+
+```bash
+python scripts/gen_orbslam_settings.py --imu    # camera level and still: also checks T_b_c1 against gravity
+```
+
+then set `slam.inertial: true` (and `camera.imu_rate_hz` if not 100; regenerate the
+settings after changing it). `CameraWorker` streams accel + gyro (all three axes) into
+`raw_imu_buf`, apart from `imu_buf`, which keeps whichever IMU `use_oakd_imu` selects, so
+the external Arduino IMU can run alongside. `SLAMWorker` hands ORB-SLAM3 the samples
+between consecutive frames (waiting up to `imu_wait_s` for the IMU to catch up).
+
+- The noise values written by `--imu` are ORB-SLAM3's D435i example, not measured for
+  this IMU; an Allan-variance recording of the still camera gives the real ones.
+- While the IMU initialises, ORB-SLAM3 rotates its whole map to gravity (up to three
+  times in the first ~15 s). Poses and map points are published relative to the map's
+  origin keyframe, which rotates with it, so the published frame stays put; the frame
+  of each rotation is withheld.
+- The IMU initialisation needs varied motion; a car on a flat floor gives it little.
+  Check it on real laps (the log says when the IMU is initialised) before relying on it.
+
 ## Mapping lap
 
 1. Start with `--enable-slam` and keep the car still on the floor for a second:

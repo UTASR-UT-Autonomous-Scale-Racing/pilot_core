@@ -17,6 +17,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.optimize import lsq_linear
+from scipy.spatial import cKDTree
 
 from .track import TrackModel, _resample_closed, _smooth_closed
 
@@ -65,6 +66,8 @@ def min_curvature_line(
     walls = [_resample_closed(np.asarray(b, dtype=np.float64)[:, :2], 0.05) for b in (outer, inner)]
     seg_a = np.vstack([w for w in walls])
     seg_b = np.vstack([np.roll(w, -1, axis=0) for w in walls])
+    wall_pts = seg_a
+    wall_tree = cKDTree(wall_pts)
     pts = _resample_closed(track.points, spacing)
     for _ in range(passes):
         n = len(pts)
@@ -81,8 +84,21 @@ def min_curvature_line(
         # D (pts + a * nrm) = 0 in least squares, x and y rows stacked
         A = np.vstack([D * nrm[:, 0], D * nrm[:, 1]])
         b = -np.concatenate([D @ pts[:, 0], D @ pts[:, 1]])
-        a = lsq_linear(A, b, bounds=(lo, hi), method="bvls").x
-        pts = _resample_closed(pts + a[:, None] * nrm, spacing)
+        # the normal ray misses walls off to the side (a sharp inner corner): where the
+        # nearest wall is closer than the margin, pull that side's bound in and solve again
+        for _ in range(8):
+            a = lsq_linear(A, b, bounds=(lo, hi), method="bvls").x
+            new = pts + a[:, None] * nrm
+            d, j = wall_tree.query(new)
+            short = d < margin - 0.01
+            if not short.any():
+                break
+            side = np.sign(((wall_pts[j] - new) * nrm).sum(axis=1))
+            push = (margin - d + 0.02)[short]
+            left_wall, right_wall = short & (side > 0), short & (side <= 0)
+            hi[left_wall] = np.maximum(a[left_wall] - push[side[short] > 0], lo[left_wall] + 1e-6)
+            lo[right_wall] = np.minimum(a[right_wall] + push[side[short] <= 0], hi[right_wall] - 1e-6)
+        pts = _resample_closed(new, spacing)
     pts = _smooth_closed(pts, smooth_window)
     closed = np.vstack([pts, pts[:1]])
     s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(closed, axis=0), axis=1))])

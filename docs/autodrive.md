@@ -93,6 +93,36 @@ The protocol spike is `scripts/autodrive_spike.py`; the live probes are in
 - **Steering.** Curvature against yaw rate gives an effective wheelbase of 0.342 m
   (IQR 0.336–0.351), which is the value in `vehicle_params_roboracer.yaml`.
 
+## Racing (`config_autodrive_compete.yaml`)
+
+The race settings, validated on the stock `2026-iros` compete build (L40S, Low quality,
+640×360), 10 laps in one run: 0 collisions, first lap 12.61 s from a standing start, then
+10.53–10.71 s, 108.0 s in total. The October settings lapped it in 19.5 s.
+
+```bash
+python scripts/make_raceline.py maps/autodrive_compete --margin 0.5   # once per map
+python start.py --config config_autodrive_compete.yaml               # arms itself (auto_arm)
+```
+
+- **Racing line** (`control/raceline.py`). Minimum curvature between the mapped walls,
+  at least `--margin` from either wall (true nearest-wall distance, so sharp inner corners
+  count). Compete track: 46.5 m centre-line → 43.9 m line; the speed planner's estimate
+  goes from 10.3 s to 7.9 s per lap. The margin is 0.5 m because the car hits a wall about
+  0.3 m from the mapped one; on the centre-line it ran at 0.46 m without touching.
+- **Pure pursuit with a shorter lookahead** (0.5 + 0.25 v, at most 2 m). The default's
+  3 m lookahead cuts the line's corners into the inside walls. The MPC weaved on the
+  straight at this latency and was not used.
+- **Grip.** The planner may use 10.3 m/s² of lateral acceleration
+  (`lat_accel_fraction: 2.0`), but at large steering the car slides wide long before
+  that: out of the hairpins and at the zig-zag apexes, into the outer wall. The speed is
+  therefore also capped by the curvature actually steered, at 5 m/s²
+  (`steer_speed_limit`, `steer_lat_accel`). This cap is what keeps it clean: a lower planner
+  grip (down to 6 m/s²) without the cap, or the cap only above half steering, still hits
+  walls. Likely cause, not measured: the sim's tyres lose lateral grip under braking or
+  acceleration, which a fixed profile cannot see and the cap reacts to.
+- **Collisions** put the car back a short way; near a wall it can hit again repeatedly
+  (hundreds of collisions in one run of an early racing line).
+
 ## Known limitations
 
 - **Sim freezes on a shared GPU.** When other jobs load the GPU, the sim freezes for up

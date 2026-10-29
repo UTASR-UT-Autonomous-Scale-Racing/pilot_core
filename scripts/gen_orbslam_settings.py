@@ -104,7 +104,7 @@ IMU.T_b_c1: !!opencv-matrix
    dt: f
    data: [{T}]
 
-IMU.InsertKFsWhenLost: 0
+IMU.InsertKFsWhenLost: 1   # keyframes at the IMU-predicted pose while lost (fork: bridges featureless stretches)
 
 # starting points (ORB-SLAM3's D435i example), not measured for this IMU
 IMU.NoiseGyro: {noise_gyro:g}   # rad/s^0.5

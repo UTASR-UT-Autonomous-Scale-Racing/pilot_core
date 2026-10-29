@@ -19,6 +19,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cpulimit  # noqa: E402,F401  (before cv2 and cuvslam: sizes their thread pools)
+
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -48,6 +51,10 @@ def main() -> int:
                     help="multiply calib.yaml's IMU noise densities and random walks (tuning)")
     ap.add_argument("--no-imu", action="store_true", help="RGBD odometry, no IMU")
     ap.add_argument("--odom-only", action="store_true", help="no SLAM (no loop closure)")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="replay speed: frames are fed on the sequence's clock (1 = real time, as on the car), "
+                         "0 = as fast as tracking allows (the mapping threads then fall behind)")
+    ap.add_argument("--cpus", type=int, help="pin to this many cores (cpulimit.py); default the cgroup's CPU cap")
     args = ap.parse_args()
 
     import cuvslam as vslam
@@ -91,6 +98,7 @@ def main() -> int:
 
     k = int(np.searchsorted(seq.imu[:, 0], seq.t_ns[0], side="right")) if inertial else 0
     rows, odom_t, odom_T, slam_t, slam_T = [], [], [], [], []
+    wall0 = time.perf_counter()
     for t_ns, rp, dp in zip(seq.t_ns, seq.rgb, seq.depth):
         rgb = cv2.cvtColor(cv2.imread(rp, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
         depth = cv2.imread(dp, cv2.IMREAD_UNCHANGED).astype(np.uint16)
@@ -103,6 +111,11 @@ def main() -> int:
                 m.angular_velocities = np.asarray(r[4:7])
                 tracker.register_imu_measurement(0, m)
             k = j
+        if args.speed > 0:                 # feed on the sequence's clock
+            due = wall0 + (t_ns - seq.t_ns[0]) * 1e-9 / args.speed
+            wait = due - time.perf_counter()
+            if wait > 0:
+                time.sleep(wait)
         t0 = time.perf_counter()
         odom, slam = tracker.track(int(t_ns), [rgb], depths=[depth])
         ms = 1e3 * (time.perf_counter() - t0)
@@ -138,6 +151,7 @@ def main() -> int:
         gpu = "none"
     meta = {"system": f"cuVSLAM {vslam.get_version()}",
             "mode": ("Multisensor RGB-D + IMU" if inertial else "RGBD") + ("" if args.odom_only else " + SLAM"),
+            "speed": args.speed, "cpus": cpulimit.CPUS,
             "gpu": gpu, "imu_noise_scale": args.imu_noise_scale, "sequence": os.path.abspath(args.seq),
             "frames": len(rows), "tracked": len(main_t)}
     with open(os.path.join(args.out, "meta.json"), "w") as f:

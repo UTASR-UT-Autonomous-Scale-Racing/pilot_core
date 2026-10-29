@@ -81,3 +81,40 @@ over 100 ms. Its odometry alone stays at 3-4 ms.
 Use ORB-SLAM3 in RGB-D mode on the car for now. The inertial mode no longer destroys its
 map, but at race speeds it is less robust than RGB-D alone; check it on a real recording
 (real IMU, real depth) with `--imu-noise-scale` 1 and 10 before enabling `slam.inertial`.
+
+## Update: real-time replay, CPU budget, startup (fork 7cb97e4)
+
+Two benchmark-harness faults distorted everything above:
+
+- The runners fed frames as fast as tracking allowed (~3x real time for ORB-SLAM3): its
+  local-mapping thread (keyframes, IMU initialisation, inertial BA) fell behind. Now the
+  sequence's clock (`--speed 1`).
+- The container reports 255 cores but is capped at 30.6 CPUs: ORB-SLAM3's ~500 threads got
+  the process throttled, which was its 40-60 ms p95. Now pinned (`cpulimit.py`, `--cpus 8`).
+
+And a fork fix for the start: before the IMU is initialised the inertial modes used
+monocular-inertial frame tracking (10 px search window, poses accepted from any number of
+matches); through a 4-5 m/s swerve 0.8 s in it lost tracking in 2-7 of 9 runs. With depth,
+the RGB-D rules now apply until the IMU is initialised: 18 of 18 runs tracked the first
+10 s with no loss, IMU initialised at ~1.1 s. A young lost map (before inertial BA 2) is
+given up after 0.5 s instead of 5 s (`IMU.EarlyLostTimeout`).
+
+Same mode for both: RGB-D + IMU + SLAM. Real time, 8 pinned cores, 3 runs sharing the GPU.
+ORB-SLAM3 with IMU noise x10 (`--imu-noise-scale 10`; `gen_orbslam_settings.py --imu`
+writes values 35-60x the synthetic IMU's for the car).
+
+| sequence | system | tracked % | maps | ATE RMSE (m) | drift 1 s (%) | latency p50 / p95 (ms) |
+|---|---|---|---|---|---|---|
+| clean | ORB-SLAM3 CUDA (3 runs) | 100/100/100 | 1 | 0.12/0.10/0.17 | 0.7/0.7/0.6 | 7.8 / 9.9 |
+| clean | cuVSLAM | 100 | 1 | 0.24 | 1.8 | 7.0 / 1837 |
+| blackouts 20 s, 26 s | ORB-SLAM3 CUDA (3 runs) | 98/98/98 | 1 | 0.19/0.14/0.14 | 0.9/0.7/1.1 | 7.8 / 10.0 |
+| blackouts 20 s, 26 s | cuVSLAM | 100 | 1 | 1.84 | 4.7 | 4.0 / 7.1 |
+| blackouts 3 s, 9 s | ORB-SLAM3 CUDA (3 runs) | 96/96/96 | 3 | 6.45/6.44/6.50 | 1.1 | 7.7 / 10.0 |
+| blackouts 3 s, 9 s | cuVSLAM | 100 | 1 | 3.95 | 9.8 | 4.2 / 7.2 |
+
+- ORB-SLAM3's tracked % excludes the blank frames (it gives no pose there; cuVSLAM gives
+  IMU-only poses). A blackout before inertial BA 2 (~16 s) still costs it a new map, hence
+  the ATE over 3 maps; afterwards it rides through on the IMU.
+- With the true IMU noise (x1) it tracks 93-95 % in 3-4 maps: inflate the noise.
+- cuVSLAM's SLAM back end stalls its tracking call on this texture (p95 1.8 s on the clean
+  laps); its odometry alone: 7.4 / 15.2 ms, ATE 1.58 m.

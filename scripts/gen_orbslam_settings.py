@@ -12,7 +12,9 @@ Intrinsics match CameraWorker's undistorted CAM_A output; rerun if the camera is
 the IMU rate (camera.imu_rate_hz, default 100) and noise densities. The noise values are
 starting points (ORB-SLAM3's RealSense D435i example), not measured for this IMU; an Allan
 variance run on a still camera gives the real ones. With the camera level and still, the
-script also checks the transform against gravity.
+script also checks the transform against gravity. Some OAK-Ds have no IMU calibration in
+their EEPROM (getCameraToImuExtrinsics raises, or the stored rotation is zeros): give the
+transform with --imu-extrinsics, a YAML/JSON file holding the 4x4 matrix as a list of rows.
 """
 
 from __future__ import annotations
@@ -149,6 +151,32 @@ def gravity_check(dai, R_b_c, seconds: float = 1.0) -> None:
               "(inverted?)", file=sys.stderr)
 
 
+def imu_extrinsics(dai, calib, path: str | None):
+    """T_b_c1 (4x4 rows) from --imu-extrinsics or the device calibration; None (after an
+    explanation) when neither gives a rigid transform."""
+    import numpy as np
+
+    if path:
+        with open(path) as f:
+            T = np.asarray(yaml.safe_load(f), dtype=np.float64)
+        src = path
+    else:
+        try:
+            T = np.asarray(calib.getCameraToImuExtrinsics(dai.CameraBoardSocket.CAM_A, False,
+                                                          dai.LengthUnit.METER), dtype=np.float64)
+        except RuntimeError as e:
+            print(f"this OAK-D's calibration has no IMU extrinsics ({e}): measure or look up the "
+                  "CAM_A -> IMU transform and pass it with --imu-extrinsics", file=sys.stderr)
+            return None
+        src = "the device calibration"
+    R = T[:3, :3] if T.shape == (4, 4) else None
+    if R is None or not np.allclose(R @ R.T, np.eye(3), atol=1e-3) or abs(np.linalg.det(R) - 1.0) > 1e-3:
+        print(f"the CAM_A -> IMU transform from {src} is not a rigid transform:\n{T}\n"
+              "(an uncalibrated IMU stores zeros): pass a valid one with --imu-extrinsics", file=sys.stderr)
+        return None
+    return T.tolist()
+
+
 def live_intrinsics(dai, width: int, height: int, fps: float):
     """(K, source, device_id, calib) for CAM_A's output as CameraWorker requests it."""
     with dai.Pipeline() as pipeline:
@@ -180,6 +208,9 @@ def main() -> int:
     parser.add_argument("--noise-acc", type=float, default=1e-1)
     parser.add_argument("--gyro-walk", type=float, default=1e-6)
     parser.add_argument("--acc-walk", type=float, default=1e-4)
+    parser.add_argument("--imu-extrinsics",
+                        help="file with the 4x4 CAM_A -> IMU transform (p_imu = T p_cam, metres), rows; "
+                             "instead of the device calibration")
     parser.add_argument("--no-gravity-check", action="store_true",
                         help="skip the check of T_b_c1 against gravity (needs the camera level and still)")
     args = parser.parse_args()
@@ -211,7 +242,9 @@ def main() -> int:
         fx=K[0][0], fy=K[1][1], cx=K[0][2], cy=K[1][2], baseline=baseline,
     )
     if args.imu:
-        T = calib.getCameraToImuExtrinsics(dai.CameraBoardSocket.CAM_A, False, dai.LengthUnit.METER)
+        T = imu_extrinsics(dai, calib, args.imu_extrinsics)
+        if T is None:
+            return 1
         rate = float(cfg.get("camera", {}).get("imu_rate_hz", 100))
         with dai.Device() as device:
             imu_type = str(device.getConnectedIMU())

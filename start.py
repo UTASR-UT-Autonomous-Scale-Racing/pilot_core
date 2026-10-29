@@ -289,13 +289,14 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
 
     buffers.extend([frame_buf, imu_buf, seg_buf, pose_buf, ctrl_buf])
 
-    # ORB-SLAM3 RGB-D-inertial: the OAK-D's own accel + gyro, apart from imu_buf (which
-    # keeps whichever IMU use_oakd_imu picks, e.g. the external one for vehicle dynamics)
+    # the OAK-D's own accel + gyro (all three axes) in raw_imu_buf, apart from imu_buf (which
+    # keeps whichever IMU use_oakd_imu picks, e.g. the external one for vehicle dynamics):
+    # for ORB-SLAM3 RGB-D-inertial, or raw_imu: true to record it (scripts/vio_bench)
     slam_inertial = bool(enable_slam and config.get("slam", {}).get("inertial", False))
     raw_imu_buf = None
-    if slam_inertial:
+    if slam_inertial or config.get("raw_imu", False):
         if autodrive:
-            raise SystemExit("slam.inertial needs the OAK-D's IMU; the AutoDRIVE sim has none for it")
+            raise SystemExit("slam.inertial / raw_imu need the OAK-D's IMU; the AutoDRIVE sim has none")
         raw_imu_buf = RawIMUBuffer(
             slots=buf_cfg.get("raw_imu", {}).get("slots", 256),
             name="raw_imu_buf",
@@ -641,7 +642,8 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         # recording_config.<buffer>.{sample_k, top_n, on_full, keep_files} override per buffer
         rec_cfg = config.get("recording_config", {})
         candidates = {
-            "frame": frame_buf, "imu": imu_buf, "segmentation": seg_buf if vision_cfg.get("enabled", False) else None,
+            "frame": frame_buf, "imu": imu_buf, "raw_imu": raw_imu_buf,
+            "segmentation": seg_buf if vision_cfg.get("enabled", False) else None,
             "pose": pose_buf, "control": ctrl_buf, "actuation": act_buf, "pointcloud": pc_buf, "keyframes": kf_buf,
             "boundary": boundary_buf,
             "state": state_buf, "lidar": lidar_buf,

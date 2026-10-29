@@ -211,3 +211,22 @@ def test_markers_cli_on_a_rendered_sequence(tmp_path, monkeypatch):
     assert perfect["repeatability_m"]["rms"] < 0.01
     assert perfect["absolute_m"]["rmse"] < 0.02
     assert drift["drift_from_first_pass_m"]["1"] == pytest.approx(0.2, abs=0.02)
+
+
+def test_rendered_depth_is_exact():
+    """render_track.Scene: floor and wall depths along known rays, and a textured image."""
+    import render_track
+
+    inner = np.array([[30.0, -1.0], [31.0, -1.0], [31.0, 1.0], [30.0, 1.0]])     # out of the way
+    outer = np.array([[-5.0, -5.0], [5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]])       # wall 5 m ahead
+    scene = render_track.Scene(inner, outer)
+    T = np.eye(4)
+    T[:3, :3] = np.column_stack([[0, -1, 0], [0, 0, -1], [1, 0, 0]])   # optical z along world x, level
+    T[:3, 3] = [0.0, 0.0, 0.2]                                           # 0.2 m above the floor
+    K = (400.0, 400.0, 319.5, 199.5)
+    depth = scene.cast(T, K, 640, 400, colour=False)
+    assert depth[199 + 41, 319] == pytest.approx(0.2 * 400 / (41 - 0.5), rel=1e-9)   # floor
+    assert depth[199 - 4, 319] == pytest.approx(5.0, rel=1e-9)                       # wall
+    assert depth[0, 319] == 0.0                                                        # above the wall
+    img = scene.cast(T, K, 640, 400, colour=True)
+    assert img.shape == (400, 640) and img[250:].std() > 20                           # textured floor

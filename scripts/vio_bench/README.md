@@ -6,6 +6,7 @@ Both systems run offline on the same recorded sequence, in the same `rgbdi` form
 | step | script | runs in |
 | ---- | ------ | ------- |
 | sim run to sequence | `scripts/export_recording.py <run>`, then [sim_to_rgbdi.py](sim_to_rgbdi.py) | pilot_core env |
+| sim sequence re-rendered with exact depth (same track, trajectory, IMU) | [render_track.py](render_track.py) | pilot_core env |
 | car config for recording (frames + 6-axis IMU, nothing dropped) | [make_record_config.py](make_record_config.py) | pilot_core env |
 | car recording to sequence | [car_to_rgbdi.py](car_to_rgbdi.py) | pilot_core env |
 | ORB-SLAM3, `IMU_RGBD` (or `RGBD` with `--no-imu`) | [run_orbslam3.py](run_orbslam3.py) | pilot_core env, built `orbslam3_python` |
@@ -22,7 +23,14 @@ python scripts/vio_bench/run_orbslam3.py seq/vio --out res/orb_imu
 ORB_SLAM3_CUDA=0 python scripts/vio_bench/run_orbslam3.py seq/vio --out res/orb_cpu_imu
 /venv/cuvslam/bin/python scripts/vio_bench/run_cuvslam.py seq/vio --out res/cuv_imu
 python scripts/vio_bench/score.py seq/vio res/* --out res/score
+# the same laps rendered with exact depth (and with forced 0.3 s tracking losses)
+python scripts/vio_bench/render_track.py seq/vio runs/vio --out seq/vio_render
+python scripts/vio_bench/render_track.py seq/vio runs/vio --out seq/vio_blackout --blackout 3.0:0.3 --blackout 9.0:0.3
 ```
+
+`run_orbslam3.py --upstream-policy` runs upstream ORB-SLAM3's inertial policy (reset the
+map on a tracking loss before the IMU is initialised, keyframes by time only) instead of
+the fork's depth-inertial one (relocalise, keyframes also when visual tracking weakens).
 
 Metrics ([score.py](score.py)): ATE after one rigid (no scale) alignment, RPE over 1 s
 (translation in m and % of distance, rotation in deg), fraction of frames tracked, time to
@@ -93,6 +101,13 @@ growth lap by lap, absolute error against the survey, and start/end closure.
 - The IMU is synthesised from the ground-truth pose (low-passed at 6 Hz, then
   differentiated, plus consumer-MEMS noise): no vibration, no real bias behaviour.
 - The car-body region of the image is painted flat: it moves with the camera.
+- The LiDAR depth and the sim's images do not agree closely: between consecutive frames
+  only ~35-65 % of ORB matches fit the depth (more for the most distinctive matches), so
+  a tracker that builds its map from depth (ORB-SLAM3) loses it within a few frames in
+  every mode, while cuVSLAM, which tracks 2-D features and uses depth for scale, holds
+  on. [render_track.py](render_track.py) renders the same track and trajectory with a
+  non-repeating texture and exact depth, keeping the sequence's IMU and ground truth:
+  that one compares the trackers, not the sim's depth.
 
 The sim exercises the pipeline and gives comparable latency; the real-track recordings
 (markers + lap closure) are the accuracy verdict.

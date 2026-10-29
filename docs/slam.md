@@ -85,6 +85,17 @@ between consecutive frames (waiting up to `imu_wait_s` for the IMU to catch up).
   of each rotation is withheld.
 - The IMU initialisation needs varied motion; a car on a flat floor gives it little.
   Check it on real laps (the log says when the IMU is initialised) before relying on it.
+- Tracking losses: upstream ORB-SLAM3 resets the whole active map on any tracking loss
+  before the IMU is initialised and before its second inertial BA (~15 s), adds
+  keyframes only every 0.25 s until the IMU is initialised, and never for weak visual
+  tracking. At car speeds that loops: the local map falls behind within a few frames,
+  tracking drops, the map is wiped, repeat. The fork (branch `inertial-depth-recovery`)
+  changes this for `IMU_RGBD` / `IMU_STEREO`, where depth fixes the scale: a loss before
+  initialisation is relocalised (then a new map) like the RGB-D mode, and weak tracking
+  asks for a keyframe. `IMU.UpstreamPolicy: 1` in the settings restores upstream.
+- Some OAK-Ds store no IMU calibration (the OAK-D Lite in `ORB_SLAM3/calib_*.json` has
+  none): `--imu` then stops and asks for the CAM_A -> IMU transform via
+  `--imu-extrinsics` (a 4x4 matrix as a list of rows, p_imu = T p_cam, metres).
 
 ## Mapping lap
 

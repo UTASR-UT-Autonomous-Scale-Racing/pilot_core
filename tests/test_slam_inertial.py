@@ -139,3 +139,35 @@ def test_setup_picks_imu_rgbd_and_needs_the_raw_imu_buffer(bufs, monkeypatch):
     w._logger = MagicMock()
     with pytest.raises(RuntimeError, match="raw_imu_buffer"):
         w.setup()
+
+
+def test_imu_extrinsics_must_be_a_rigid_transform(tmp_path, capsys):
+    """gen_orbslam_settings --imu: devices without IMU calibration raise or store zeros;
+    neither may end up in the settings as T_b_c1."""
+    import os
+
+    import yaml
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+    import gen_orbslam_settings as g
+
+    class Calib:
+        def __init__(self, T=None, error=None):
+            self.T, self.error = T, error
+
+        def getCameraToImuExtrinsics(self, *args):
+            if self.error:
+                raise RuntimeError(self.error)
+            return self.T
+
+    dai = types.SimpleNamespace(CameraBoardSocket=types.SimpleNamespace(CAM_A=0),
+                                LengthUnit=types.SimpleNamespace(METER=1))
+    assert g.imu_extrinsics(dai, Calib(error="IMU calibration data is not available"), None) is None
+    assert "--imu-extrinsics" in capsys.readouterr().err
+    zeros = [[0.0] * 4] * 3 + [[0.0, 0.0, 0.0, 1.0]]
+    assert g.imu_extrinsics(dai, Calib(T=zeros), None) is None
+    good = _rigid("z", 90.0, [0.01, 0.02, 0.0]).astype(float).tolist()
+    np.testing.assert_allclose(g.imu_extrinsics(dai, Calib(T=good), None), good)
+    path = tmp_path / "T_b_c1.yaml"
+    path.write_text(yaml.safe_dump(good))
+    np.testing.assert_allclose(g.imu_extrinsics(dai, Calib(error="none stored"), str(path)), good)

@@ -45,8 +45,8 @@ Camera.height: {height}
 Camera.fps: {fps:.0f}
 Camera.RGB: 1
 RGBD.DepthMapFactor: 1.0
-Stereo.b: 0.075
-Stereo.ThDepth: 40.0
+Stereo.b: {baseline:.6f}
+Stereo.ThDepth: {th_depth:.3f}
 ORBextractor.nFeatures: {features}
 ORBextractor.scaleFactor: 1.2
 ORBextractor.nLevels: 8
@@ -70,6 +70,7 @@ IMU_BLOCK = """IMU.T_b_c1: !!opencv-matrix
    dt: f
    data: [{T}]
 IMU.InsertKFsWhenLost: 0
+IMU.UpstreamPolicy: {upstream_policy}
 IMU.NoiseGyro: {noise_gyro:g}
 IMU.NoiseAcc: {noise_acc:g}
 IMU.GyroWalk: {gyro_walk:g}
@@ -95,7 +96,16 @@ def main() -> int:
     ap.add_argument("--imu-noise-scale", type=float, default=1.0,
                     help="multiply calib.yaml's IMU noise densities and random walks (tuning)")
     ap.add_argument("--no-imu", action="store_true", help="RGBD instead of IMU_RGBD")
+    ap.add_argument("--upstream-policy", action="store_true",
+                    help="upstream ORB-SLAM3's inertial policy (IMU.UpstreamPolicy: 1): reset the map on a "
+                         "tracking loss before the IMU is initialised (and before inertial BA 2), no "
+                         "keyframes for weak visual tracking; default: the fork's depth-inertial one")
     ap.add_argument("--features", type=int, default=1000)
+    ap.add_argument("--depth-baseline", type=float,
+                    help="m, the virtual stereo baseline ORB-SLAM3 weighs depth with (Stereo.b); default "
+                         "calib.yaml's depth_baseline_m, else the OAK-D's 0.075. Smaller = depth trusted less")
+    ap.add_argument("--close-depth", type=float, default=3.0,
+                    help="m, depth below which points are 'close' (Stereo.ThDepth = this / baseline)")
     ap.add_argument("--vocab", default=os.path.join(REPO_ROOT, "ORB_SLAM3/Vocabulary/ORBvoc.txt"))
     args = ap.parse_args()
 
@@ -107,12 +117,15 @@ def main() -> int:
     c = seq.calib
     os.makedirs(args.out, exist_ok=True)
     settings = os.path.join(args.out, "orbslam3_settings.yaml")
+    baseline = args.depth_baseline or float(c.get("depth_baseline_m", 0.075))
     with open(settings, "w") as f:
         f.write(SETTINGS.format(fx=c["fx"], fy=c["fy"], cx=c["cx"], cy=c["cy"], width=c["width"],
-                                height=c["height"], fps=c.get("fps", 30.0), features=args.features))
+                                height=c["height"], fps=c.get("fps", 30.0), features=args.features,
+                                baseline=baseline, th_depth=args.close_depth / baseline))
         if not args.no_imu:
             im = {k: (v * args.imu_noise_scale if k != "rate_hz" else v) for k, v in c["imu"].items()}
-            f.write(IMU_BLOCK.format(T=", ".join(f"{v:.9f}" for v in seq.T_imu_cam.ravel()), **im))
+            f.write(IMU_BLOCK.format(T=", ".join(f"{v:.9f}" for v in seq.T_imu_cam.ravel()),
+                                     upstream_policy=int(args.upstream_policy), **im))
 
     inertial = not args.no_imu
     system = slam_mod.System(args.vocab, settings, slam_mod.IMU_RGBD if inertial else slam_mod.RGBD)
@@ -157,7 +170,8 @@ def main() -> int:
     meta = {"system": "ORB-SLAM3 (UTASR CUDA fork)", "mode": "IMU_RGBD" if inertial else "RGBD",
             "cuda": os.environ.get("ORB_SLAM3_CUDA", "1") != "0", "gpu": gpu_name(),
             "cpu": platform.processor() or platform.machine(), "features": args.features,
-            "imu_noise_scale": args.imu_noise_scale,
+            "depth_baseline_m": baseline,
+            "imu_noise_scale": args.imu_noise_scale, "upstream_policy": args.upstream_policy,
             "sequence": os.path.abspath(args.seq), "frames": len(rows), "tracked": len(poses_t)}
     with open(os.path.join(args.out, "meta.json"), "w") as f:
         json.dump(meta, f, indent=1)

@@ -13,7 +13,7 @@ sd. How the sequence is built and its limits: [scripts/vio_bench/README.md](../.
 | cuVSLAM, Multisensor RGB-D + IMU + SLAM | 100 % | 5.15 ± 0.91 | 0.86 m, 15.1 % | 7.2 | 4.0 / 3.6 / 5.7 / 8.8 / 190 |
 | cuVSLAM, `RGBD` + SLAM | 100 % | 4.87 ± 0.45 | 2.15 m, 17.5 % | 20.9 | 3.5 / 3.2 / 5.8 / 8.7 / 25.4 |
 
-- **ORB-SLAM3 `IMU_RGBD` never initialised its IMU.** Within ~1 s after starting it needs
+- **ORB-SLAM3 `IMU_RGBD` never initialised its IMU** (cause and fork fix: [inertial_fix.md](inertial_fix.md)). Within ~1 s after starting it needs
   50 inliers per frame; these images often give fewer, and in the inertial modes any
   tracking failure before IMU initialisation (and before inertial BA 2) resets the active
   map (`Tracking.cc`, "IMU is not or recently initialized"). ~150 resets per run; more

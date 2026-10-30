@@ -126,9 +126,11 @@ python start.py --config config_autodrive_compete.yaml               # arms itse
   restarts the EKF at the new pose, standing still, and resets the controllers.
 - **Re-run 2026-10-29** (scripts/autodrive_bench.py, L40S): qualifier on the practice track
   10 laps, 0 collisions, 9.19 s then 6.89-6.98 s per lap (~71.6 s); compete track 10 laps,
-  0 collisions, 109.07 s (13.39 s, then 10.52-10.76 s). Against the published 2026-iros
-  final (race time + 10 s per collision) that is 15th of 23: 14th 107.77 s, 1st 71.82 s
-  (best lap 7.16 s).
+  0 collisions, 109.07 s (13.39 s, then 10.52-10.76 s): 15th of 23 against the published
+  2026-iros final (race time + 10 s per collision; 14th 107.77 s, 1st 71.82 s, best lap
+  7.16 s). With accel / decel 8 m/s^2 (now the config) 107.17-107.62 s in 3 runs, 0
+  collisions: 14th; the qualifier still clean. A higher steering cap (5.5-8 m/s^2) hits the
+  bottom hairpin's exit and is no faster (bench/2026-10-29_autodrive/results.md).
 
 ## Known limitations
 

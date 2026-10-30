@@ -24,12 +24,18 @@ fps: 15
 depth_max_meters: 15.0          # Joshua Choi's modified build: far clip of DepthCamera.cs (stock build has no depth)
 depth_raw_scale: null
 
+# no LiDAR, as on the car: the drivable area comes from the camera's segmentation. sim_depth
+# prepares the frames it was trained on (upscaled x2, car body painted out) with depth: none
+sim_depth:
+  camera: "sim_camera/camera.yaml"
+  scale: 2
+  depth: none                   # none: no depth (lidar would synthesise it from the LiDAR)
+
 vision:
-  enabled: false
-  # needs sim_depth (frames upscaled x2, car body hidden, depth from the LiDAR): the
-  # intrinsics are the sim camera's at that resolution, not slam.settings
+  enabled: true
+  # the intrinsics are the sim camera's at sim_depth's resolution, not slam.settings
   camera_settings: "sim_camera/orbslam_settings.yaml"
-  model: ground_plane           # ground_plane | onnx
+  model: onnx                   # ground_plane needs depth | onnx
   # Fast-SCNN trained on sim runs (not tracked; regenerate, docs/autodrive.md "Vision"):
   # unseen compete track, live: IoU 0.94
   onnx_model: "sim_track_seg.onnx"
@@ -76,13 +82,15 @@ track_control:
 # car's stand-in for a LiDAR. Here the LiDAR is used unless source: segmentation (needs
 # vision.enabled and sim_depth); scripts/seg_scan_eval.py scores it against the LiDAR offline
 seg_scan:
-  source: auto                  # auto: LiDAR if there is one | segmentation
+  source: segmentation          # no LiDAR: track edges from the mask, placed on the floor (no depth)
   camera_pitch: 0.1833          # rad, 10.5 deg down (sim_camera/camera.yaml)
   camera_height: 0.17           # m
   origin_forward: -0.2883       # m, camera behind the LiDAR (cam_x - lidar_x), so ranges match its tuning
 
-# LidarProjectionWorker (enable_slam + sim_pose); sim Hokuyo UST-10LX, 1081 rays, 0.06-10 m
+# never used (the car has none): the mapping lap's walls come from the segmentation-edge scans,
+# projected like a LiDAR's (LidarProjectionWorker). range / voxel settings apply to those
 lidar:
+  enabled: false
   range_min: 0.1
   range_max: 9.5
   voxel_size: 0.10
@@ -96,6 +104,9 @@ slam:
   vocabulary: "ORB_SLAM3/Vocabulary/ORBvoc.txt"
 
 mapping:
+  # the segmentation scan's origin in the vehicle frame (camera x - seg_scan.origin_forward);
+  # z lifts the edge (a wall's base) into the wall-height band
+  scan_offset: [0.2733, 0.0, 0.10]
   boundary_min_points: 50
   bev_axes: [0, 1]              # sim world is Z-up so X, Y are horizontal
   forward_axis: 0               # X forward in the sim vehicle frame

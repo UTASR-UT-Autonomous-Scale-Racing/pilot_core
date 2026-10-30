@@ -45,6 +45,7 @@ from workers import (
     ControlWorker,
     IMUWorker,
     LidarProjectionWorker,
+    SegScanWorker,
     MappingWorker,
     SLAMWorker,
     StateWorker,
@@ -246,7 +247,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         # nothing would ever fill boundary_buf: the controller would wait (or crash) forever
         raise SystemExit(
             f"control_mode {control_mode_early!r} needs track boundaries: with the sim's ground-truth "
-            "pose, map a lap (--enable-slam, LiDAR mapping) or set use_saved_map")
+            "pose, map a lap (--enable-slam: LiDAR, or segmentation with lidar.enabled false) or set use_saved_map")
 
     # shared buffers
     buf_cfg = config.get("buffers", {})
@@ -338,8 +339,15 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             create=True,
         )
         buffers.extend([b for b in [pc_buf, boundary_buf] if b is not None])
-    # the AutoDRIVE link always fills it (recordings, the mapping drive)
-    needs_lidar = autodrive
+    # pilot_core never uses a LiDAR (the car has none): the sim's is ignored, the drivable area
+    # comes from the camera's segmentation. Asking for it is an error, not a silent fallback
+    if (config.get("lidar") or {}).get("enabled", False):
+        raise SystemExit("lidar.enabled: pilot_core never uses a LiDAR (the car has none); "
+                         "the sim maps from the segmentation (lidar.enabled: false)")
+    if str((config.get("sim_depth") or {}).get("depth", "none")) != "none":
+        raise SystemExit("sim_depth.depth: lidar would synthesise depth from the LiDAR; pilot_core never "
+                         "uses a LiDAR (sim_depth.depth: none)")
+    needs_lidar = False
     if needs_lidar:
         lidar_buf = LidarBuffer(
             slots=buf_cfg.get("lidar", {}).get("slots", 16),
@@ -475,8 +483,13 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 )
             )
 
-    # segmentation: the mapping drive's scan when there's no LiDAR (control/seg_scan.py); off unless vision.enabled
-    if vision_cfg.get("enabled", False):
+    # segmentation: the mapping drive's scan and the map's walls (control/seg_scan.py); off unless
+    # vision.enabled. In the sim only for a mapping lap: racing on a saved map nothing reads it
+    sim_mapping_lap = autodrive and enable_slam and not use_saved_map
+    run_vision = vision_cfg.get("enabled", False) and (not autodrive or sim_mapping_lap)
+    if vision_cfg.get("enabled", False) and not run_vision:
+        logger.info("Segmentation off: racing on a saved map, nothing would read it")
+    if run_vision:
         workers.append(
             VisionWorker(
                 name="vision",
@@ -497,7 +510,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     # the mapping drive's scan: the LiDAR, or without one (the car) the segmentation-edge
     # scan (control/seg_scan.py). seg_scan.source: segmentation forces it, e.g. in the sim
     seg_scan_cfg = dict(config.get("seg_scan", {}))
-    scan_source = seg_scan_cfg.pop("source", "auto")
+    scan_source = seg_scan_cfg.pop("source", "segmentation")
     if scan_source not in ("auto", "segmentation"):
         raise SystemExit(f"seg_scan.source must be auto or segmentation, not {scan_source!r}")
     use_seg_scan = scan_source == "segmentation" or lidar_buf is None
@@ -505,11 +518,24 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
             and use_seg_scan and not vision_cfg.get("enabled", False)):
         raise SystemExit("track_control.mapping_drive without a LiDAR drives on the segmentation-edge "
                          "scan, which needs vision.enabled: true")
+    seg_scan_memory_s = float(seg_scan_cfg.pop("memory_s", 1.5))
     seg_scan_cfg.setdefault("camera_settings", vision_cfg.get(
         "camera_settings", slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml")))
     for key in ("camera_height", "camera_pitch"):      # one camera mount, shared with depth_ftg
         if key in depth_ftg_cfg:
             seg_scan_cfg.setdefault(key, depth_ftg_cfg[key])
+
+    # without a LiDAR in the sim (ground-truth pose): one SegScanWorker builds the scan of the
+    # segmentation's track edge, with a short memory of edges that have left the camera's view;
+    # the mapping drive drives on it and the mapping lap's walls are projected from it
+    seg_scan_buf = None
+    scan_offset = list(mapping_cfg.get("scan_offset", [0.2733, 0.0, 0.10]))
+    if autodrive and lidar_buf is None and run_vision and sim_mapping_lap:
+        seg_scan_buf = LidarBuffer(slots=16, name="seg_scan_buf", create=True)
+        buffers.append(seg_scan_buf)
+        workers.append(SegScanWorker(name="seg_scan", segment_buffer=seg_buf, frame_buffer=frame_buf,
+                                     output_buffer=seg_scan_buf, seg_scan=seg_scan_cfg, pose_buffer=pose_buf,
+                                     memory_s=seg_scan_memory_s, scan_origin=scan_offset[:2]))
 
     # control: track modes need a pose source; depth_ftg / vae / bc only frame_buf
     armed_event = mp.Event()
@@ -530,7 +556,8 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 frame_buffer=frame_buf,
                 camera_settings=slam_cfg.get("settings", "orbslam_oakd_rgbd.yaml"),
                 depth_ftg_config=depth_ftg_cfg,
-                lidar_buffer=None if use_seg_scan else lidar_buf,
+                lidar_buffer=seg_scan_buf if seg_scan_buf is not None else (None if use_seg_scan else lidar_buf),
+                scan_name="segmentation-edge scan with edge memory (SegScanWorker)" if seg_scan_buf is not None else None,
                 segment_buffer=seg_buf if vision_cfg.get("enabled", False) else None,
                 seg_scan=seg_scan_cfg,
             )
@@ -567,7 +594,9 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 output_buffer=state_buf,
                 bev_axes=mapping_cfg.get("bev_axes", [0, 2]),
                 forward_axis=mapping_cfg.get("forward_axis", 2),
-                use_pose_speed=sim_pose,
+                # the sim's own velocity is not fused: the car has no speed sensor, its speed
+                # comes from the poses (PoseEKF) or the rear IMU (ImuEKF)
+                use_pose_speed=False,
                 estimator=config.get("estimator", {}),
                 rear_imu_buffer=rear_imu_buf,
                 rear_imu={k: v for k, v in rear_imu_cfg.items() if k != "enabled"},
@@ -593,21 +622,36 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
 
     # SLAM + mapping
     if enable_slam and sim_pose:
-        # ground-truth pose mode: 2D LIDAR scan -> world-frame 3D points
-        lidar_cfg = config.get("lidar", {})
+        # ground-truth pose mode: a 2-D scan -> world-frame 3D points: the LiDAR's, or without
+        # one the scan of the segmentation's track edge (SegScanWorker), from the camera
+        lidar_cfg = config.get("lidar", {}) or {}
+        scan_buf, scan_extra = lidar_buf, {}
+        if lidar_buf is None:
+            if seg_scan_buf is None:
+                raise SystemExit("mapping without a LiDAR (lidar.enabled: false) needs the segmentation: "
+                                 "vision.enabled: true")
+            scan_buf = seg_scan_buf
+            # the scan origin's mount in the vehicle frame; z lifts the edge (a wall's base) into
+            # MappingWorker's wall-height band. Floor-placed edges are good to ~2 m (5 cm median
+            # against the LiDAR's walls, 96 % within 15 cm; 66 % at any range)
+            scan_extra["scan_offset"] = scan_offset
+            scan_extra["range_max_override"] = float(mapping_cfg.get("scan_range_max", 2.0))
         workers.append(
             LidarProjectionWorker(
-                name="lidar_proj",
-                lidar_buffer=lidar_buf,
+                name="lidar_proj" if lidar_buf is not None else "seg_proj",
+                lidar_buffer=scan_buf,
                 pose_buffer=pose_buf,
                 output_buffer=pc_buf,
                 range_min=lidar_cfg.get("range_min", 0.1),
-                range_max=lidar_cfg.get("range_max", 9.5),
+                range_max=scan_extra.pop("range_max_override", lidar_cfg.get("range_max", 9.5)),
                 voxel_size=lidar_cfg.get("voxel_size", 0.10),
                 move_threshold=lidar_cfg.get("move_threshold", 0.05),
+                **scan_extra,
             )
         )
-        logger.info("Using the sim's ground-truth pose + LIDAR projection for the point cloud")
+        logger.info("Using the sim's ground-truth pose + "
+                    + ("LiDAR" if lidar_buf is not None else "segmentation-edge scans (no LiDAR)")
+                    + " for the point cloud")
     elif enable_slam:
         workers.append(
             SLAMWorker(

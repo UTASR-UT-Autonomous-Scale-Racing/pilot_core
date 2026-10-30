@@ -57,6 +57,8 @@ class LidarProjectionWorker(BaseWorker):
         self._last_lidar_seq: int = 0
         self._last_proj_pos: np.ndarray | None = None
         self._frame_count: int = 0
+        self._pose_seq = 0
+        self._poses: list = []          # (t, Twv) of the last second, to project a scan with its own pose
 
         # ray angles are fixed, precompute
         angles = _ANGLE_MIN + np.arange(_N_RAYS) * _ANGLE_INCREMENT
@@ -71,6 +73,9 @@ class LidarProjectionWorker(BaseWorker):
         self._range_max = float(self.config.get("range_max", 9.5))
         self._voxel_size = float(self.config.get("voxel_size", 0.10))
         self._move_threshold = float(self.config.get("move_threshold", 0.05))
+        # the scan origin in the vehicle frame: the LiDAR's mount, or the camera's for a scan
+        # built from the segmentation (SegScanWorker)
+        self._offset = np.asarray(self.config.get("scan_offset", _LIDAR_OFFSET), dtype=np.float32)
         self._pc_capacity = self._pc_buf.max_points
         self.logger.info(
             f"LidarProjectionWorker ready "
@@ -93,10 +98,9 @@ class LidarProjectionWorker(BaseWorker):
             return
         self._last_lidar_seq = lidar_header.seq_no
 
-        pose_result = self._pose_buf.read_latest()
-        if pose_result is None:
+        pose = self._pose_at(lidar_header.produced_ts)
+        if pose is None:
             return
-        pose = pose_result[1]  # 4x4 float32 Twv (world-from-vehicle)
 
         current_pos = pose[:2, 3]
         if self._last_proj_pos is not None:
@@ -132,6 +136,21 @@ class LidarProjectionWorker(BaseWorker):
                 f"frame={self._frame_count}"
             )
 
+    def _pose_at(self, t: float):
+        """Twv (4x4) nearest in time to t from the recent poses: a scan built from a camera frame
+        (SegScanWorker) is older than the latest pose by the segmentation's latency, which at
+        a hairpin's yaw rate smears the points. None without a pose."""
+        for header, pose, *_ in self._pose_buf.read_since(self._pose_seq):
+            self._pose_seq = header.seq_no
+            self._poses.append((header.produced_ts, pose))
+        if not self._poses:
+            res = self._pose_buf.read_latest()
+            return None if res is None else res[1]
+        cutoff = self._poses[-1][0] - 1.0
+        while len(self._poses) > 1 and self._poses[0][0] < cutoff:
+            self._poses.pop(0)
+        return min(self._poses, key=lambda p: abs(p[0] - t))[1]
+
     def _add_to_voxel_map(self, pts: np.ndarray) -> int:
         """Add the points whose voxel is still empty; returns how many were new.
 
@@ -163,9 +182,9 @@ class LidarProjectionWorker(BaseWorker):
         z_lidar = np.zeros(len(r), dtype=np.float32)
 
         # mount offset only, the LIDAR isn't rotated relative to the car
-        x_veh = x_lidar + _LIDAR_OFFSET[0]
-        y_veh = y_lidar + _LIDAR_OFFSET[1]
-        z_veh = z_lidar + _LIDAR_OFFSET[2]
+        x_veh = x_lidar + self._offset[0]
+        y_veh = y_lidar + self._offset[1]
+        z_veh = z_lidar + self._offset[2]
 
         pts_veh = np.stack([x_veh, y_veh, z_veh], axis=1)  # (N, 3)
 

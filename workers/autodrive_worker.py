@@ -139,6 +139,7 @@ class AutoDRIVEWorker(SimDecoder):
     def __init__(self, name: str = "autodrive", **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
         self._server = None
+        self._depth_source = "none"     # sim_depth.depth (setup); never the LiDAR
         self._server_thread: Optional[threading.Thread] = None
         self._ws = None
         self._ws_lock: Optional[threading.Lock] = None   # created in setup(): spawn pickles the worker
@@ -183,6 +184,7 @@ class AutoDRIVEWorker(SimDecoder):
         self._reset_started: Optional[float] = None
         self._dedupe = bool(cfg.get("sim_time_dedupe", True))
         self._depth_fn = None
+        self._depth_source = "none"
         self._frame_errors = 0
         sd = cfg.get("sim_depth")
         if sd and self._frame_buf is not None:
@@ -191,7 +193,13 @@ class AutoDRIVEWorker(SimDecoder):
             cam = CameraModel.from_yaml(sd.get("camera", "sim_camera/camera.yaml"), scale=float(sd.get("scale", 2.0)))
             self._depth_fn = LidarDepth(cam)
             self._depth_clahe = bool(sd.get("clahe", True))
-            self.logger.info(f"RGB-D from LiDAR: {cam.size[0]}x{cam.size[1]}, vfov {cam.vfov_deg:.1f} deg, "
+            # depth: lidar (synthesised from the 2-D LiDAR) or none (frames prepared the same way,
+            # depth all zero: no LiDAR is used; the segmentation scan places edges on the floor)
+            self._depth_source = str(sd.get("depth", "none"))
+            if self._depth_source not in ("lidar", "none"):
+                raise ValueError(f"sim_depth.depth must be lidar or none, not {self._depth_source!r}")
+            self.logger.info(f"{'RGB-D from LiDAR' if self._depth_source == 'lidar' else 'RGB, no depth (no LiDAR)'}: "
+                             f"{cam.size[0]}x{cam.size[1]}, vfov {cam.vfov_deg:.1f} deg, "
                              f"car mask {'on' if self._depth_fn.mask is not None else 'off'}")
 
         log_dir = cfg.get("log_dir")
@@ -321,7 +329,8 @@ class AutoDRIVEWorker(SimDecoder):
             # (and so the controller) or the other sensors
             try:
                 if self._frame_buf is not None:
-                    if self._depth_fn is not None and data.get("front_camera") and data.get("lidar"):
+                    if self._depth_fn is not None and data.get("front_camera") and (
+                            self._depth_source == "none" or data.get("lidar")):
                         self._write_rgbd(data)
                     else:
                         self._process_frame_data(data)
@@ -340,7 +349,8 @@ class AutoDRIVEWorker(SimDecoder):
         self._log_message(data, sim_time, new_frame, *sent)
 
     def _write_rgbd(self, data: dict) -> None:
-        """Sim camera + LiDAR depth -> frame_buf (see workers/lidar_depth.py)."""
+        """Sim camera (upscaled, car body painted out) + LiDAR depth, or none -> frame_buf
+        (see workers/lidar_depth.py)."""
         import cv2
 
         from .lidar_depth import mask_rgb
@@ -352,7 +362,10 @@ class AutoDRIVEWorker(SimDecoder):
         w, h = self._depth_fn.cam.size
         rgb = cv2.resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), (w, h), interpolation=cv2.INTER_LINEAR)
         rgb = mask_rgb(rgb, self._depth_fn.mask, clahe=self._depth_clahe)
-        depth = self._depth_fn(np.asarray(data["lidar"], dtype=np.float32))
+        if self._depth_source == "none":
+            depth = np.zeros((h, w), dtype=np.float32)
+        else:
+            depth = self._depth_fn(np.asarray(data["lidar"], dtype=np.float32))
         self._frame_buf.write(np.ascontiguousarray(rgb), depth)
 
     def _command(self, now: float) -> tuple[float, float, float]:

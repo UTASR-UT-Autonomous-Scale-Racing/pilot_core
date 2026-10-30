@@ -32,14 +32,22 @@ The script installs the stock `2026-iros` practice and compete builds under
 ## Running
 
 ```bash
-python start.py --config config_autodrive.yaml           # LiDAR mapping lap, then race
+python start.py --config config_autodrive.yaml           # segmentation mapping lap (no LiDAR), then race
 python scripts/autodrive_sim_ctl.py connect              # the sim has no CLI connect option
 ```
 
 Keys: `a` arm, `SPACE` disarm, `r` reset the sim, `l` end the mapping lap, `q` quit.
 
-- Once armed, `LidarGapFollower` (`track_control.mapping_drive`) drives the mapping lap.
-  On the car a human drives this lap with the RC transmitter.
+- Once armed, the gap follower (`track_control.mapping_drive`) drives the mapping lap on the
+  segmentation-edge scan (`SegScanWorker`), never the sim's LiDAR. On the car a human
+  drives this lap with the RC transmitter.
+
+**What the sim run still gets that the car won't.** pilot_core never uses a LiDAR:
+`lidar.enabled: true` or `sim_depth.depth: lidar` is refused at start-up. The sim's
+velocity is not fused into the state. The pose, though, is the sim's ground truth
+(`sim_pose`), standing in for ORB-SLAM3, which does not run in the sim; the mapping lap
+places the segmentation's edges with that pose too. The segmentation model's training
+labels came from the LiDAR depth and a LiDAR-built map (training only; it runs on RGB).
 - `MappingWorker` closes the lap on its own (`mapping.auto_loop_close`) once the car is
   back past its start. The control mode then takes over.
 - The map is saved to `maps/autodrive_practice`. To race on a saved map, set
@@ -175,8 +183,9 @@ per worker.
 
 ## Vision (`VisionWorker` in the sim)
 
-Needs `sim_depth` (frames upscaled ×2, car body painted out, depth from the LiDAR); the
-vision section of `config_autodrive.yaml` points it at the sim camera's intrinsics.
+Needs `sim_depth` (frames upscaled ×2, car body painted out; `depth: none`, no LiDAR); the
+vision section of `config_autodrive.yaml` points it at the sim camera's intrinsics. It runs
+only for a mapping lap: racing on a saved map nothing would read it.
 Ground truth comes from `scripts/autodrive_vision_labels.py`: a pixel is track when
 the LiDAR depth adapter puts its ray on the floor before any wall and that floor point,
 placed with the sim pose, lies between the mapped boundaries (car body ignored).
@@ -201,16 +210,29 @@ mostly checks the wiring.
 
 ### The segmentation-edge scan (no LiDAR on the car)
 
-`seg_scan.source: segmentation` (with `vision.enabled` and `sim_depth`) makes the mapping
-drive use the scan built from the mask edge (`control/seg_scan.py`) instead of the LiDAR,
-as on the car. `seg_scan` in `config_autodrive.yaml` holds the sim camera's mount and its
-offset behind the LiDAR. Score it offline against the LiDAR on any export:
+The mapping drive and the map's walls use the scan built from the mask edge
+(`control/seg_scan.py`, `workers/seg_scan_worker.py`), as on the car. With no depth each
+edge is placed where its pixel's ray meets the floor (`seg_scan.camera_height`,
+`camera_pitch`). Two things make it work for a camera's ~60 deg view:
+
+- **Edge memory** (`seg_scan.memory_s`, 1.5 s): edges seen recently, kept in the world frame,
+  fill the beams outside the current view, so the inside of a hairpin still bounds the gap
+  follower after it leaves the image (without it the mapping lap clipped both hairpin tips).
+- **Mapping only from near edges** (`mapping.scan_range_max`, 2 m), each scan projected with
+  the pose of its own frame: placing an edge on the floor gets worse with distance (replayed
+  masks against the old LiDAR walls: within 15 cm 96 % up to 2 m, 66 % at any range).
+
+Score it offline against the LiDAR on an old export (the LiDAR is not used live):
 
 ```bash
 python scripts/seg_scan_eval.py runs/x/export          # range error, missed / phantom walls, gap target
 ```
 
-Results: [results.md](results.md#segmentation-edge-scan). It has not been driven live yet.
+Results: [results.md](results.md#segmentation-edge-scan) (that table placed edges with
+LiDAR-synthesised depth). Driven live 2026-10-29: practice track mapped with 0 collisions,
+walls within 5 / 9 cm (median, inner / outer) of the LiDAR map, up to 0.8-1.0 m off where
+the camera saw little (both narrower than the real track); qualifier on it 10 laps, 0
+collisions, 7.1-7.2 s laps.
 
 ## Telemetry export and HUD
 

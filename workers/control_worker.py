@@ -130,7 +130,7 @@ class ControlWorker(BaseWorker):
             cfg.setdefault("speed_per_throttle", self._track_cfg.get("speed", {}).get(
                 "longitudinal", {}).get("speed_per_throttle", 3.0))
             self._mapping_driver = LidarGapFollower(self._vehicle, LidarGapConfig(**cfg))
-            source = "LiDAR" if self._lidar_buf is not None else "segmentation-edge scan"
+            source = self.config.get("scan_name") or ("LiDAR" if self._lidar_buf is not None else "segmentation-edge scan")
             self.logger.info(f"Mapping lap driven by follow-the-gap on the {source} ({cfg})")
         self.logger.info(
             f"ControlWorker ready — {self._mode} mode "

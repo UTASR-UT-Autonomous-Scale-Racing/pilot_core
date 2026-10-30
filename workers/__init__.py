@@ -12,6 +12,7 @@ from .mapping_worker import MappingWorker
 from .state_worker import StateWorker
 from .sim_decoder import SimDecoder
 from .lidar_projection_worker import LidarProjectionWorker
+from .seg_scan_worker import SegScanWorker
 from .autodrive_worker import AutoDRIVEWorker
 
 __all__ = [
@@ -27,5 +28,6 @@ __all__ = [
     "StateWorker",
     "SimDecoder",
     "LidarProjectionWorker",
+    "SegScanWorker",
     "AutoDRIVEWorker",
 ]

@@ -7,6 +7,8 @@ Both systems run offline on the same recorded sequence, in the same `rgbdi` form
 | ---- | ------ | ------- |
 | sim run to sequence | `scripts/export_recording.py <run>`, then [sim_to_rgbdi.py](sim_to_rgbdi.py) | pilot_core env |
 | sim sequence re-rendered with exact depth (same track, trajectory, IMU) | [render_track.py](render_track.py) | pilot_core env |
+| simulated rear-of-car IMU (ICM-20948, DLPF, I2C polling) | [make_rear_imu.py](make_rear_imu.py) | pilot_core env |
+| vehicle state from the rear IMU + SLAM (control.ImuEKF vs PoseEKF), causal replay | [fuse_rear_imu.py](fuse_rear_imu.py) | pilot_core env |
 | car config for recording (frames + 6-axis IMU, nothing dropped) | [make_record_config.py](make_record_config.py) | pilot_core env |
 | car recording to sequence | [car_to_rgbdi.py](car_to_rgbdi.py) | pilot_core env |
 | ORB-SLAM3, `IMU_RGBD` (or `RGBD` with `--no-imu`) | [run_orbslam3.py](run_orbslam3.py) | pilot_core env, built `orbslam3_python` |

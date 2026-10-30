@@ -20,7 +20,7 @@ def _unique_buffer_names(monkeypatch):
     # every buffer class takes name=...; give each test run its own names
     suffix = uuid.uuid4().hex[:6]
     for cls_name in ("FrameBuffer", "IMUBuffer", "SegmentationBuffer", "PoseBuffer", "ControlBuffer",
-                     "PointCloudBuffer", "TrackBoundaryBuffer", "LidarBuffer", "StateBuffer"):
+                     "PointCloudBuffer", "TrackBoundaryBuffer", "LidarBuffer", "StateBuffer", "RawIMUBuffer"):
         cls = getattr(start, cls_name)
 
         def make(*args, _cls=cls, **kwargs):
@@ -141,3 +141,26 @@ def test_sim_depth_frames_fit_and_vision_uses_the_sim_camera():
     finally:
         for b in p.buffers:
             b.unlink()
+
+
+def test_rear_imu_feeds_the_imu_worker_and_the_state_worker():
+    rear = {"enabled": True, "rotation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "lever_m": [-0.25, 0.0]}
+    p = _build("config.yaml", rear_imu=rear, use_oakd_imu=False, recording=True)
+    try:
+        imu = next(w for w in p.workers if w.name == "imu")
+        buf = imu.config["raw_output_buffer"]
+        assert buf is not None
+        state = [w for w in p.workers if w.name == "state"]
+        if state:
+            assert state[0].config["rear_imu_buffer"] is buf
+            assert state[0].config["rear_imu"]["lever_m"] == [-0.25, 0.0]
+        rec = next(w for w in p.workers if w.name == "recorder")
+        assert rec.config["buffers"]["rear_imu"]["buffer"] is buf
+    finally:
+        for b in p.buffers:
+            b.unlink()
+
+
+def test_rear_imu_needs_the_arduino_imu():
+    with pytest.raises(SystemExit):
+        _build("config.yaml", rear_imu={"enabled": True}, use_oakd_imu=True)

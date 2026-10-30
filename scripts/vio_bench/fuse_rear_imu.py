@@ -205,10 +205,12 @@ def main() -> int:
         report["estimators"][n] = r
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "ticks.csv"), "w") as f:      # per tick, for plots
-        f.write("t,map,in_gap,truth_x,truth_y,truth_yaw,truth_speed," + ",".join(f"{n}_x,{n}_y,{n}_yaw,{n}_v" for n in names) + "\n")
+        f.write("t,map,in_gap,truth_x,truth_y,truth_yaw,truth_speed,truth_yaw_rate,"
+                + ",".join(f"{n}_x,{n}_y,{n}_yaw,{n}_v,{n}_r" for n in names) + "\n")
         for i in np.nonzero(scored)[0]:
-            f.write(f"{rear_t[i]:.4f},{tick_map[i]},{int(in_gap[i])},{tr[i, 0]:.4f},{tr[i, 1]:.4f},{tr[i, 2]:.4f},{speed[i]:.3f},"
-                    + ",".join(f"{out[n][i, 0]:.4f},{out[n][i, 1]:.4f},{out[n][i, 2]:.4f},{out[n][i, 3]:.3f}" for n in names) + "\n")
+            f.write(f"{rear_t[i]:.4f},{tick_map[i]},{int(in_gap[i])},{tr[i, 0]:.4f},{tr[i, 1]:.4f},{tr[i, 2]:.4f},{speed[i]:.3f},{tr[i, 5]:.4f},"
+                    + ",".join(f"{out[n][i, 0]:.4f},{out[n][i, 1]:.4f},{out[n][i, 2]:.4f},{out[n][i, 3]:.3f},{out[n][i, 4]:.4f}"
+                               for n in names) + "\n")
     with open(os.path.join(args.out, "fusion.json"), "w") as f:
         json.dump(report, f, indent=1)
 

@@ -115,3 +115,21 @@ def test_a_pose_before_any_imu_then_a_late_pose():
         ekf.update_imu(k * 0.01, 0.0, 0.0, 0.0)
     ekf.update_pose(0.005, 0.0, 0.0, 0.0)          # late, between the first pose and the first IMU sample
     assert np.isfinite(ekf.x).all()
+
+
+def test_pose_ekf_restarts_standing_still_after_a_respawn_jump():
+    """A sim respawn moves the car 0.7 m back between two poses: differencing it gave a
+    huge speed and yaw rate, which steered the car into the wall again after every respawn."""
+    from control import EstimatorConfig
+
+    for jump_reset, expect_reset in ((None, False), (0.4, True)):
+        ekf = PoseEKF(EstimatorConfig(jump_reset_m=jump_reset))
+        for k in range(30):                               # 3 m/s straight along x
+            ekf.update_pose(k / 30, 3.0 * k / 30, 0.0, 0.0)
+        ekf.update_pose(30 / 30, 3.0 * 29 / 30 - 0.7, 0.05, -0.5)    # respawned back and turned
+        st = ekf.predict_to(30 / 30 + 0.02)
+        if expect_reset:
+            assert ekf.jumps == 1 and st.v == 0.0 and st.yaw_rate == 0.0
+            assert st.yaw == pytest.approx(-0.5)
+        else:
+            assert abs(st.yaw_rate) > 1.0 or abs(st.v - 3.0) > 1.0

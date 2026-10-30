@@ -41,6 +41,7 @@ class ControlWorker(BaseWorker):
       mode                one of TRACK_MODES, depth_ftg, vae, bc (default pure_pursuit)
       output_buffer       ControlBuffer
       armed_event         optional; controllers are reset on arming so nothing winds up
+      jump_reset_m        optional; a state this far from the last one resets them too (sim respawn)
       state_buffer, boundary_buffer, mapping_done_event   track modes
       track_config        track_control config section (fallback: depth_ftg;
                           mapping_drive: LidarGapConfig fields, drives the mapping lap)
@@ -109,6 +110,8 @@ class ControlWorker(BaseWorker):
         self._vehicle = VehicleParams.load(self.config.get("vehicle_params", "vehicle_params.yaml"))
         self._track_cfg = self.config.get("track_config", {})
         self._last_state_seq = 0
+        self._last_state_xy = None
+        self._jump_reset_m = self.config.get("jump_reset_m")
         self._last_state_time = time.monotonic()
         self._next_policy_step = 0.0
         if self._track_cfg.get("fallback") == "depth_ftg":
@@ -189,6 +192,14 @@ class ControlWorker(BaseWorker):
         header, state = result
         self._last_state_seq = header.seq_no
         self._last_state_time = time.monotonic()
+        if self._jump_reset_m is not None and self._last_state_xy is not None and \
+                np.hypot(state.x - self._last_state_xy[0], state.y - self._last_state_xy[1]) > self._jump_reset_m:
+            # the car was put somewhere else (sim respawn): nothing the controllers integrated applies
+            for follower in (self._follower, self._fallback):
+                if follower is not None:
+                    follower.reset()
+            self.logger.info("Pose jump (respawn?) — controllers reset")
+        self._last_state_xy = (state.x, state.y)
         if self._fallback is not None and self._fallback_active:
             self._fallback_active = False
             if self._follower is not None:

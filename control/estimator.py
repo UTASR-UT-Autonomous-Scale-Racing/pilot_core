@@ -22,6 +22,8 @@ class EstimatorConfig:
     accel_std: float = 2.0         # m/s^2, process noise on v
     yaw_accel_std: float = 4.0     # rad/s², process noise on yaw rate
     stale_after: float = 0.5       # s without a pose before the estimate is invalid
+    jump_reset_m: float | None = None   # a pose this far from the prediction restarts the filter
+                                        # there, standing still (a sim respawn after a collision)
 
 
 class PoseEKF:
@@ -31,6 +33,7 @@ class PoseEKF:
         self.P = np.eye(5)
         self.t: float | None = None
         self.last_pose_t: float | None = None
+        self.jumps = 0
 
     @property
     def initialized(self) -> bool:
@@ -83,6 +86,12 @@ class PoseEKF:
         if t < self.t:  # out of order, drop it
             return
         self._advance(t)
+        if self.cfg.jump_reset_m is not None and np.hypot(x - self.x[0], y - self.x[1]) > self.cfg.jump_reset_m:
+            # a respawn, not motion: differencing it would give a huge speed and yaw rate
+            self.x = None
+            self.jumps += 1
+            self.update_pose(t, x, y, yaw)
+            return
         H = np.zeros((3, 5))
         H[0, 0] = H[1, 1] = H[2, 2] = 1.0
         R = np.diag([self.cfg.pos_std ** 2] * 2 + [self.cfg.yaw_std ** 2])

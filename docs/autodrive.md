@@ -120,8 +120,15 @@ python start.py --config config_autodrive_compete.yaml               # arms itse
   grip (down to 6 m/s²) without the cap, or the cap only above half steering, still hits
   walls. Likely cause, not measured: the sim's tyres lose lateral grip under braking or
   acceleration, which a fixed profile cannot see and the cap reacts to.
-- **Collisions** put the car back a short way; near a wall it can hit again repeatedly
-  (hundreds of collisions in one run of an early racing line).
+- **Collisions** put the car back a short way. The EKF used to read that jump as speed and
+  yaw rate and the controller steered straight back into the wall, every respawn (2217
+  collisions in one run). With `estimator.jump_reset_m` (0.4 m in the sim configs) a jump
+  restarts the EKF at the new pose, standing still, and resets the controllers.
+- **Re-run 2026-10-29** (scripts/autodrive_bench.py, L40S): qualifier on the practice track
+  10 laps, 0 collisions, 9.19 s then 6.89-6.98 s per lap (~71.6 s); compete track 10 laps,
+  0 collisions, 109.07 s (13.39 s, then 10.52-10.76 s). Against the published 2026-iros
+  final (race time + 10 s per collision) that is 15th of 23: 14th 107.77 s, 1st 71.82 s
+  (best lap 7.16 s).
 
 ## Known limitations
 

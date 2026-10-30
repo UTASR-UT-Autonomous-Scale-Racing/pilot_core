@@ -523,6 +523,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 state_buffer=state_buf,
                 boundary_buffer=boundary_buf,
                 mapping_done_event=mapping_done_event,
+                jump_reset_m=(config.get("estimator") or {}).get("jump_reset_m"),
                 track_config=config.get("track_control", {}),
                 safety=safety_cfg,
                 vehicle_params=config.get("vehicle_params", "vehicle_params.yaml"),

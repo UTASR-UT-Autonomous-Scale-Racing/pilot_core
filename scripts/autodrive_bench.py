@@ -121,6 +121,9 @@ def run_pilot(base_config: str, out: str, overrides: dict, laps: int = 3, timeou
         set_path(cfg, k, v)
     cfg["recording"] = True
     cfg["recording_path"] = os.path.join(out, "rec")
+    # the run resets the sim and then arms: a config that arms itself on connect (the
+    # competition container) would start driving before that reset teleports it
+    cfg["auto_arm"] = False
     cfg_path = os.path.join(out, "config.yaml")
     with open(cfg_path, "w") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)

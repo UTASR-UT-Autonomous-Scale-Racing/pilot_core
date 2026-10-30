@@ -1,5 +1,12 @@
 # RGB-D-inertial, sim: ORB-SLAM3 (CUDA fork) vs cuVSLAM 17.0.1 (2026-10-29)
 
+> **Superseded.** These are the first runs: replayed ~3x faster than real time on an
+> unpinned, CPU-throttled container, with the upstream inertial policy. The ORB-SLAM3 numbers
+> below are not current; see [inertial_fix.md](inertial_fix.md) (real-time, pinned, fork fixes).
+> Caveats for all VIO numbers here: the sim and rendered sequences are synthetic (rendered
+> images, exact depth and the IMU all come from the same ground truth), ORB-SLAM3's IMU noise
+> scale was chosen on the sequences it is scored on, and cuVSLAM had one run per sequence.
+
 Sequence: textured AutoDRIVE compete track, 3 race laps (10.4-10.9 s each, up to ~8 m/s),
 31.7 s, 1297 RGB-D frames at ~53 fps (384x216: the sim camera upscaled, depth from the
 LiDAR), synthetic 200 Hz IMU. vast.ai box: NVIDIA L40S, AMD EPYC 7713. 3 repeats, mean ±

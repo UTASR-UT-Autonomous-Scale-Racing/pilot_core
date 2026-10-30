@@ -283,9 +283,10 @@ def test_actuator_output_buffer_is_neutral_until_armed():
 
 
 @pytest.mark.slow
-def test_closed_loop_mapping_lap_then_pure_pursuit(tmp_path, monkeypatch):
-    """start.build_pipeline(config_autodrive.yaml) + the fake sim: the LiDAR gap follower
-    drives the mapping lap, auto loop closure extracts the boundaries, pure_pursuit laps."""
+def test_closed_loop_pure_pursuit_on_a_saved_map(tmp_path, monkeypatch):
+    """start.build_pipeline(config_autodrive.yaml) + the fake sim, no LiDAR: pure_pursuit laps
+    on a saved map of the fake track, with the state estimated from the poses alone. (The
+    mapping lap needs the camera's segmentation model, not in the repo: it is checked live.)"""
     import start
 
     suffix = _uid()
@@ -296,13 +297,18 @@ def test_closed_loop_mapping_lap_then_pure_pursuit(tmp_path, monkeypatch):
                             lambda *a, _cls=cls, **kw: _cls(*a, **{**kw, "name": f"{kw['name']}_{suffix}"}))
     port = _free_port()
     config = start.load_config(os.path.join(REPO_ROOT, "config_autodrive.yaml"))
-    config.update(sim_host="127.0.0.1", sim_port=port, enable_slam=True, recording=True,
+    fake = FakeAutoDRIVE(port, rate_hz=20.0, camera=False, lidar=False)
+    os.makedirs(tmp_path / "map")
+    np.save(tmp_path / "map" / "outer_line.npy", fake.outer)
+    np.save(tmp_path / "map" / "inner_line.npy", fake.inner)
+    config.update(sim_host="127.0.0.1", sim_port=port, enable_slam=False, use_saved_map=True,
+                  saved_map_path=str(tmp_path / "map"), recording=True,
                   recording_path=str(tmp_path / "rec"), sim_camera=False)
-    config["mapping"]["boundary_save_path"] = str(tmp_path / "map")
+    config.setdefault("track_control", {}).pop("raceline_path", None)   # the centre-line
 
     p = start.build_pipeline(config)
+    assert p.mapping_done_event.is_set() and not any(w.name in ("vision", "seg_scan") for w in p.workers)
     procs = []
-    fake = FakeAutoDRIVE(port, rate_hz=20.0, camera=False)
     try:
         for w in p.workers:
             proc = mp.Process(target=w.run, name=w.name)
@@ -311,12 +317,10 @@ def test_closed_loop_mapping_lap_then_pure_pursuit(tmp_path, monkeypatch):
         fake.start()          # only after forking: a running client thread can deadlock a fork
         _wait(lambda: fake.stats.connected and fake.stats.sent > 10, 20.0, "sim connected")
         p.armed_event.set()
-        _wait(lambda: p.mapping_done_event.is_set(), 90.0, "mapping lap + boundaries")
         laps_at_mapping = fake.lap_count
         # counted on the pilot_core side: the sim's lap counter reached the shared value
         _wait(lambda: p.counters["lap"].value >= laps_at_mapping + 2, 90.0, "two pure_pursuit laps")
         assert fake.collisions == 0, f"{fake.collisions} collisions"
-        assert os.path.isfile(tmp_path / "map" / "outer_line.npy")
         with open(os.path.join(p.recording_dir, "sim_events.jsonl")) as f:
             assert sum(json.loads(line)["event"] == "lap" for line in f) >= 2
     finally:

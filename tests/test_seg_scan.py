@@ -239,19 +239,15 @@ def test_car_mapping_drive_runs_on_the_segmentation_scan(_unique_buffer_names):
             b.unlink()
 
 
-def test_sim_uses_the_lidar_unless_told_otherwise(_unique_buffer_names):
+def test_sim_never_uses_the_lidar(_unique_buffer_names):
+    """The mapping drive drives on SegScanWorker's segmentation-edge scan, never the sim's LiDAR."""
     p = _build("config_autodrive.yaml")
     try:
-        ctrl = next(w for w in p.workers if w.name == "control")
-        assert ctrl.config["lidar_buffer"] is not None
-    finally:
-        for b in p.buffers:
-            b.unlink()
-    p = _build("config_autodrive.yaml", seg_scan={"source": "segmentation"}, vision={"enabled": True})
-    try:
-        ctrl = next(w for w in p.workers if w.name == "control")
-        assert ctrl.config["lidar_buffer"] is None and ctrl.config["segment_buffer"] is not None
-        assert ctrl.config["seg_scan"]["origin_forward"] == pytest.approx(-0.2883)
+        by = {w.name: w for w in p.workers}
+        ctrl = by["control"]
+        assert ctrl.config["lidar_buffer"] is by["seg_scan"].config["output_buffer"]
+        assert by["autodrive"].config.get("lidar_buffer") is None
+        assert by["seg_scan"].config["seg_scan"]["origin_forward"] == pytest.approx(-0.2883)
     finally:
         for b in p.buffers:
             b.unlink()

@@ -1,5 +1,11 @@
 # AutoDRIVE re-run and steering-cap sweep (2026-10-29)
 
+> **Superseded: these runs used a LiDAR-built map and fused the sim's own velocity.** The
+> race map and racing line were made in June from a LiDAR mapping lap on the ground-truth
+> pose, and StateWorker fused the sim's exact speed. pilot_core no longer does either (no
+> LiDAR; no ground-truth speed): see the no-LiDAR runs below. The leaderboard comparison is
+> also not like-for-like: the track was known and settings were tuned on it, one run each.
+
 `scripts/autodrive_bench.py run --config config_autodrive_compete.yaml --laps 10`, stock 2026-iros
 builds, L40S. Scored like the published final: race time + 10 s per collision.
 

@@ -1,5 +1,11 @@
 # Dual IMU, sim: rear-of-car IMU + ORB-SLAM3 in a vehicle-state EKF (2026-10-29)
 
+> Since written: StateWorker runs ImuEKF on the car's rear IMU (`rear_imu`, d5a71c6), not yet
+> driven. Caveat: the rear IMU, the camera IMU and the truth come from one ground-truth
+> trajectory, so the time-offset estimate and the no-slip pseudo-measurement (the sim car
+> barely slips) are easier here than on a real car. The figures (plot_results.py) read the
+> box's /workspace/bench/results/ data, which is not in the repo.
+
 Option A of the dual-IMU plan: ORB-SLAM3 keeps the OAK-D's IMU (device-timestamped with the
 frames); the rear IMU (the Arduino's ICM-20948) drives `control.ImuEKF`, corrected by the
 SLAM poses, for the controller's pose, speed, yaw rate and sideslip.

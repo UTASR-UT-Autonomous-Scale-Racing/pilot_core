@@ -2,6 +2,13 @@
 Arduino IMU over I2C -> IMUBuffer vectors
 [qw, qx, qy, qz, ax, ay, az, throttle_raw, steering_raw], accel in m/s^2,
 stamped with host time.monotonic() at the read. The OAK-D IMU is streamed by CameraWorker.
+
+With a raw_output_buffer (RawIMUBuffer), also the 6-axis sample [ax, ay, az (m/s^2),
+gx, gy, gz (rad/s)] in the ICM-20948's axes, for the vehicle-state EKF (rear_imu in the
+config): the firmware sends accel in g and gyro in deg/s, bias-corrected at its start-up
+(it also forces accel to (0, 0, 1 g) at rest, so the mounting can't be seen at rest:
+scripts/check_rear_imu.py finds it from motion). The Jetson polls the latest sample, so a
+poll can return the one it already had: those repeats are not written.
 """
 
 from __future__ import annotations
@@ -22,8 +29,9 @@ except ImportError:
 
 G = 9.80665  # m/s^2 per g
 
-# Arduino frame (firmware jetson_i2c.cpp): quat wxyz, accel xyz (g), gyro xyz, mag xyz
-# (float32 each), Arduino ms (uint32), throttle, steering raw (uint16)
+# Arduino frame (firmware jetson_i2c.cpp): quat wxyz, accel xyz (g), gyro xyz (deg/s),
+# mag xyz (float32 each), micros() of the last DMP quaternion update (uint32, wraps every
+# ~71.6 min), throttle, steering raw (uint16)
 I2C_FRAME = struct.Struct("<4f3f3f3fIHH")
 I2C_FRAME_SIZE = I2C_FRAME.size  # 60
 
@@ -51,13 +59,28 @@ def parse_i2c_frame(raw: bytes) -> np.ndarray | None:
     )
 
 
+def parse_i2c_raw(raw: bytes) -> np.ndarray | None:
+    """60-byte Arduino frame -> (6,) [ax, ay, az (m/s^2), gx, gy, gz (rad/s)], sensor axes.
+    None if short, non-finite or out of the ICM-20948's ranges (16 g, 2000 deg/s)."""
+    if len(raw) < I2C_FRAME_SIZE:
+        return None
+    v = I2C_FRAME.unpack_from(raw)
+    acc_g, gyro_dps = np.array(v[4:7], dtype=np.float64), np.array(v[7:10], dtype=np.float64)
+    if not (np.all(np.isfinite(acc_g)) and np.all(np.isfinite(gyro_dps))):
+        return None
+    if np.abs(acc_g).max() > 16.5 or np.abs(gyro_dps).max() > 2050.0:
+        return None
+    return np.concatenate([acc_g * G, np.radians(gyro_dps)]).astype(np.float32)
+
+
 class IMUWorker(BaseWorker):
     """IMU worker. I2C errors are retried with back-off (up to 1 s), never fatal.
     Without a full I2C address/bus it idles: no fake data when a real sensor is
     expected.
 
     Config kwargs:
-      output_buffer   IMUBuffer
+      output_buffer       IMUBuffer
+      raw_output_buffer   RawIMUBuffer for the 6-axis sample (optional, rear_imu)
       i2c_address     Arduino I2C address
       i2c_bus         I2C bus number
       poll_hz         I2C polling rate, default 100
@@ -71,9 +94,15 @@ class IMUWorker(BaseWorker):
         self._errors = 0
         self._period = 0.01
         self._next_poll = 0.0
+        self._raw_buf = None
+        self._last_raw: bytes | None = None
+        self._raw_written = 0
+        self._raw_repeats = 0
+        self._stats_t = 0.0
 
     def setup(self) -> None:
         self._imu_buf = self.config["output_buffer"]
+        self._raw_buf = self.config.get("raw_output_buffer")
 
         i2c_address = self.config.get("i2c_address")
         i2c_bus = self.config.get("i2c_bus")
@@ -124,11 +153,32 @@ class IMUWorker(BaseWorker):
             self.logger.info(f"I2C reads back after {self._errors} errors")
             self._errors = 0
 
-        vec = parse_i2c_frame(bytes(msg))
+        data = bytes(msg)
+        vec = parse_i2c_frame(data)
         if vec is None:
             # e.g. the 4-byte handshake reply or a garbled transfer
             return
         self._imu_buf.write(vec, ts=ts)
+        if self._raw_buf is not None:
+            self._write_raw(data, ts)
+
+    def _write_raw(self, data: bytes, ts: float) -> None:
+        sample = parse_i2c_raw(data)
+        if sample is None:
+            return
+        key = data[16:40]                      # accel + gyro bytes: unchanged = the same sample
+        if key == self._last_raw:
+            self._raw_repeats += 1
+        else:
+            self._last_raw = key
+            self._raw_buf.write(sample, ts=ts)
+            self._raw_written += 1
+        if ts - self._stats_t >= 30.0:
+            if self._stats_t:
+                n = self._raw_written + self._raw_repeats
+                self.logger.info(f"rear IMU: {self._raw_written / (ts - self._stats_t):.0f} new samples/s, "
+                                 f"{100.0 * self._raw_repeats / max(n, 1):.0f} % of polls repeated the last one")
+            self._stats_t, self._raw_written, self._raw_repeats = ts, 0, 0
 
     def step(self) -> None:
         if self._dummy:

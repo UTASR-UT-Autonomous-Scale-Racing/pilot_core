@@ -112,6 +112,12 @@ def main() -> int:
         for t, a, b in frames:
             f.write(f"{t},{a},{b}\n")
     rgbdi.write_imu(os.path.join(args.out, "imu.csv"), imu_ns)
+    if "rear_imu" in names:          # the rear IMU, in its own axes, host-stamped (check_rear_imu.py)
+        rear = np.array([[r.produced_ts, *r.value.tolist()] for r in iter_records(args.recording, "rear_imu")])
+        rear = rear[np.argsort(rear[:, 0], kind="stable")]
+        rear = rear[(rear[:, 0] >= f_t[0] - 0.05) & (rear[:, 0] <= f_t[-1] + 0.05)]
+        rear[:, 0] = np.round(rear[:, 0] * 1e9)
+        rgbdi.write_imu(os.path.join(args.out, "rear_imu.csv"), rear)
     calib.update({"source": f"car recording {os.path.abspath(args.recording)}",
                   "notes": f"settings {os.path.abspath(args.settings)}"})
     if abs(rate - calib["imu"]["rate_hz"]) > 0.1 * calib["imu"]["rate_hz"]:

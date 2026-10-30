@@ -104,6 +104,27 @@ between consecutive frames (waiting up to `imu_wait_s` for the IMU to catch up).
   none): `--imu` then stops and asks for the CAM_A -> IMU transform via
   `--imu-extrinsics` (a 4x4 matrix as a list of rows, p_imu = T p_cam, metres).
 
+## Rear IMU state estimate (`rear_imu`)
+
+The Arduino's ICM-20948 at the back of the car can drive the state estimate:
+`StateWorker` then runs `control.ImuEKF` (gyro yaw rate, through SLAM gaps, poses applied
+at their capture time) instead of the pose-only EKF. The firmware already sends what it
+needs (accel in g, gyro in deg/s, bias-corrected at start-up); `IMUWorker` writes it to
+`rear_imu_buf`, dropping polls that repeat the last sample. In the sim this took position
+error through 0.3-0.5 s SLAM gaps from 0.3-0.8 m to ~0.1 m and the yaw-rate error from
+33-41 deg/s to 0.7 deg/s (`bench/2026-10-29_vio_sim/rear_imu_fusion.md`).
+
+1. On the car, motors off, `start.py` stopped: `python scripts/check_rear_imu.py`. Keep
+   still, then turn the car left ~90 deg by hand, then push it forward, when told. It
+   prints the sample rate and repeats, the gyro bias at rest, and a `rear_imu` block with
+   the mounting rotation (the firmware forces accel to (0, 0, 1 g) at rest whatever the
+   mounting, so only motion shows it). The turn should read ~90 deg.
+2. Measure `lever_m`: the IMU's position from the camera, in m, x forward, y left.
+3. Record with it on (`make_record_config.py`, `rear_imu.enabled: true`) and run
+   `python scripts/check_rear_imu.py --recording <dir>` for `delay_s` (its lag behind the
+   OAK-D's IMU from the angular-rate magnitudes; the sim's DLPF + read gave 8.5 ms).
+4. Paste the block into `config.yaml`. The published state stays the camera's point.
+
 ## Mapping lap
 
 1. Start with `--enable-slam` and keep the car still on the floor for a second:

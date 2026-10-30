@@ -304,6 +304,20 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         )
         buffers.append(raw_imu_buf)
 
+    # the rear-of-car IMU (the Arduino's ICM-20948) as a 6-axis stream for the vehicle-state
+    # EKF (StateWorker -> control.ImuEKF); rear_imu.enabled, Arduino IMU path only
+    rear_imu_cfg = config.get("rear_imu", {}) or {}
+    rear_imu_buf = None
+    if rear_imu_cfg.get("enabled", False):
+        if autodrive or config.get("use_oakd_imu", False):
+            raise SystemExit("rear_imu needs the Arduino IMU over I2C (use_oakd_imu: false, not the sim)")
+        rear_imu_buf = RawIMUBuffer(
+            slots=buf_cfg.get("rear_imu", {}).get("slots", 256),
+            name="rear_imu_buf",
+            create=True,
+        )
+        buffers.append(rear_imu_buf)
+
     pc_buf = None
     kf_buf = None
     boundary_buf = None
@@ -454,6 +468,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 IMUWorker(
                     name="imu",
                     output_buffer=imu_buf,
+                    raw_output_buffer=rear_imu_buf,
                     i2c_address=i2c_address,
                     i2c_bus=i2c_bus,
                     poll_hz=config.get("imu_poll_hz", 100.0),
@@ -553,6 +568,8 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 forward_axis=mapping_cfg.get("forward_axis", 2),
                 use_pose_speed=sim_pose,
                 estimator=config.get("estimator", {}),
+                rear_imu_buffer=rear_imu_buf,
+                rear_imu={k: v for k, v in rear_imu_cfg.items() if k != "enabled"},
                 rate_hz=config.get("control_rate_hz", 50.0),
             )
         )
@@ -642,7 +659,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         # recording_config.<buffer>.{sample_k, top_n, on_full, keep_files} override per buffer
         rec_cfg = config.get("recording_config", {})
         candidates = {
-            "frame": frame_buf, "imu": imu_buf, "raw_imu": raw_imu_buf,
+            "frame": frame_buf, "imu": imu_buf, "raw_imu": raw_imu_buf, "rear_imu": rear_imu_buf,
             "segmentation": seg_buf if vision_cfg.get("enabled", False) else None,
             "pose": pose_buf, "control": ctrl_buf, "actuation": act_buf, "pointcloud": pc_buf, "keyframes": kf_buf,
             "boundary": boundary_buf,

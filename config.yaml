@@ -104,6 +104,17 @@ estimator:
   yaw_std: 0.03                 # rad
   stale_after: 0.5              # s without a pose and we stop driving
 
+# rear-of-car IMU (the Arduino's ICM-20948 over I2C) for the state estimate: StateWorker runs
+# control.ImuEKF on it, corrected by the SLAM poses, instead of the pose-only EKF above (gyro
+# yaw rate, bridges SLAM gaps; docs/slam.md). Run scripts/check_rear_imu.py on the car first:
+# it measures the rate and finds rotation from a hand turn and a push, and prints this block
+rear_imu:
+  enabled: false
+  rotation: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]   # ICM-20948 axes -> car (x forward, y left, z up)
+  lever_m: [0.0, 0.0]           # m, the IMU from the camera in the car frame (x forward, y left)
+  delay_s: 0.0                  # s, the IMU's filter + read delay (check_rear_imu.py --recording)
+  estimator: {}                 # control.ImuEstimatorConfig overrides
+
 # safety supervisor, runs in ActuatorWorker
 safety:
   command_timeout: 0.150        # s, no fresh command -> neutral throttle

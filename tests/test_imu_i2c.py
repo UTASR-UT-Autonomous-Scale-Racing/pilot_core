@@ -116,3 +116,37 @@ def test_worker_survives_oserror(monkeypatch):
     finally:
         w.teardown()
         ib.unlink()
+
+
+def test_raw_parse_converts_units():
+    from workers.imu_worker import parse_i2c_raw
+
+    raw = parse_i2c_raw(_frame(acc_g=(0.5, -0.25, 1.0)))     # gyro in _frame: 0.1, 0.2, 0.3 deg/s
+    np.testing.assert_allclose(raw[:3], [0.5 * 9.80665, -0.25 * 9.80665, 9.80665], rtol=1e-6)
+    np.testing.assert_allclose(raw[3:], np.radians([0.1, 0.2, 0.3]), rtol=1e-6)
+    assert parse_i2c_raw(b"\x01\x02\x03\x04" + b"\xff" * 56) is None
+
+
+def test_worker_writes_each_new_rear_imu_sample_once(monkeypatch):
+    from shared_buffer import RawIMUBuffer
+
+    rb = RawIMUBuffer(slots=16, name=f"rear_{uuid.uuid4().hex[:8]}", create=True)
+    a, b = _frame(acc_g=(0.0, 0.0, 1.0)), _frame(acc_g=(0.1, 0.0, 1.0))
+    fake = _FakeSMBus2([a, a, b, b, b])          # the Jetson polls faster than new samples come
+    monkeypatch.setattr(imu_mod, "smbus2", fake)
+    ib = IMUBuffer(slots=8, name=f"imu_i2c_{uuid.uuid4().hex[:8]}", create=True)
+    w = IMUWorker(name="imu", output_buffer=ib, raw_output_buffer=rb, i2c_address=0x08, i2c_bus=1, poll_hz=1000)
+    w._logger = MagicMock()
+    w.setup()
+    try:
+        for _ in range(5):
+            w._next_poll = 0.0
+            w.step()
+        recs = rb.read_since(0)
+        assert len(recs) == 2
+        assert recs[1][1][0] == pytest.approx(0.1 * 9.80665, rel=1e-6)
+        assert len(ib.read_since(0)) == 5        # imu_buf keeps every poll, as before
+    finally:
+        w.teardown()
+        ib.unlink()
+        rb.unlink()

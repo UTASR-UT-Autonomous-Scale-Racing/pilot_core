@@ -70,8 +70,8 @@ track_control:
   speed:
     v_max: 12.0                 # m/s
     lat_accel_fraction: 2.0     # profile a_lat = 2.0 * friction_coeff * g = 10.3 m/s^2
-    accel: 5.0                  # m/s^2
-    decel: 5.0
+    accel: 8.0                  # m/s^2 (5 -> 8: compete 109.1 -> 107.2-107.6 s, still 0 collisions;
+    decel: 8.0                  # bench/2026-10-29_autodrive/results.md)
     # speed also capped by the steered curvature at 5 m/s^2: the car slides wide at large
     # steering long before the profile's a_lat (hairpins, zig-zag apexes)
     steer_speed_limit: true

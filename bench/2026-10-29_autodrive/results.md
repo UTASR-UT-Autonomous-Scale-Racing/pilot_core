@@ -12,6 +12,9 @@ builds, L40S. Scored like the published final: race time + 10 s per collision.
 | compete, steer_lat_accel 7.0 | 5 (stopped) | 11 | 10.78-11.75 | - | - |
 | compete, steer_lat_accel 8.0 | 5 (stopped) | 11 | 10.60-12.20 | - | - |
 
+| compete, accel / decel 8 m/s^2 (cap 5.0), 3 runs | 10 | 0 | 12.62, then 10.36-10.65 | **107.19 / 107.17 / 107.62** | **14** |
+| qualifier, accel / decel 8 m/s^2 | 10 | 0 | 9.03, then 6.86-6.91 | ~71.0 | qualified |
+
 Published final: 1st 71.82 s (best lap 7.16 s), 14th 107.77 s, 15th 113.19 s.
 
 - A higher cap hits the wall at the exit of the bottom hairpin, every time at the same spot
@@ -21,3 +24,7 @@ Published final: 1st 71.82 s (best lap 7.16 s), 14th 107.77 s, 15th 113.19 s.
 - Where the time goes, flying lap at 5.0: mean 4.1 m/s (the winners ~6.1 m/s); hairpins mean
   2.3 m/s (min 1.6), zig-zag 3.8 m/s, the long straight peaks at 8.8 m/s (v_max 12, accel and
   decel 5 m/s^2 never let it get there).
+
+accel / decel 8 m/s^2 is now in config_autodrive_compete.yaml: 1.5-1.9 s off the race, mostly the
+standing-start lap (13.39 -> 12.62 s). The straight still peaks at ~8.6 m/s, so the planner's
+acceleration is not what limits it there: the sim car does not accelerate faster than that.

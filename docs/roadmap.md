@@ -33,7 +33,6 @@ Where the work stands and what is next. Results so far: [results.md](results.md)
 
 ## Repository
 
-- **Sim location.** The sim scripts default to `/workspaces/autodrive_sim` and
-  `/workspaces/logs` (`autodrive_bench.py`, `autodrive_texture_sim.py`, the supervisor
-  scripts). Move these to one setting or environment variable.
+- **Sim location.** `autodrive_bench.py` and the sim's launcher read `AUTODRIVE_ROOT` and
+  `AUTODRIVE_LOG_DIR`; `autodrive_texture_sim.py` still hard-codes `/workspaces`.
 - Upload the data bundles ([datasets.md](datasets.md)).

@@ -4,6 +4,9 @@ pilot_core was validated end to end against the stock AutoDRIVE RoboRacer `2026-
 build over the direct link ([autodrive.md](autodrive.md)), then benchmarked. Sim at 640×360,
 Vulkan, Low quality, on a shared-GPU cloud box. Full tables: [bench/2026-10-20/results.md](../bench/2026-10-20/results.md).
 
+> These results used the LiDAR and the sim's speed, which pilot_core no longer does. The current
+> no-LiDAR race runs: [bench/2026-10-31_autodrive_nolidar/results.md](../bench/2026-10-31_autodrive_nolidar/results.md).
+
 ## Validation
 
 | check | result |

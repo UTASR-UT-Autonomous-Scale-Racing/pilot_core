@@ -37,6 +37,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 PY = sys.executable
+_ROOT = os.environ.get("AUTODRIVE_ROOT", "/workspaces")
+SIM_LOG = os.path.join(os.environ.get("AUTODRIVE_LOG_DIR", os.path.join(_ROOT, "logs")), "autodrive_sim.log")
+SIM_ENV = os.path.join(_ROOT, "autodrive_sim", "sim.env")
 
 
 def set_path(cfg: dict, dotted: str, value: Any) -> None:
@@ -426,7 +429,7 @@ def stage_cells(mx: dict, stage: str, out: str) -> list[dict]:
 
 def restart_sim() -> None:
     """Restart the supervisor-run sim and wait until it is up: the car back on its spawn."""
-    log = "/workspaces/logs/autodrive_sim.log"
+    log = SIM_LOG
     size = os.path.getsize(log) if os.path.exists(log) else 0
     subprocess.run(["supervisorctl", "restart", "autodrive_sim"], check=True, capture_output=True)
     deadline = time.monotonic() + 120
@@ -434,12 +437,13 @@ def restart_sim() -> None:
         if time.monotonic() > deadline:
             raise RuntimeError("the sim did not come up")
         time.sleep(1)
-    time.sleep(3)
+    import autodrive_sim_ctl as sim_ctl
+    sim_ctl.wait_scene()
 
 
 def ensure_sim_variant(variant: str) -> None:
     """Switch the supervisor-run sim between the practice and compete builds."""
-    env = "/workspaces/autodrive_sim/sim.env"
+    env = SIM_ENV
     with open(env) as f:
         lines = f.read().splitlines()
     cur = next((ln.split("=", 1)[1] for ln in lines if ln.startswith("SIM_VARIANT=")), "practice")
@@ -448,7 +452,7 @@ def ensure_sim_variant(variant: str) -> None:
     lines = [ln for ln in lines if not ln.startswith("SIM_VARIANT=")] + [f"SIM_VARIANT={variant}"]
     with open(env, "w") as f:
         f.write("\n".join(lines) + "\n")
-    log = "/workspaces/logs/autodrive_sim.log"
+    log = SIM_LOG
     size = os.path.getsize(log) if os.path.exists(log) else 0
     subprocess.run(["supervisorctl", "restart", "autodrive_sim"], check=True, capture_output=True)
     deadline = time.monotonic() + 120
@@ -456,7 +460,8 @@ def ensure_sim_variant(variant: str) -> None:
         if time.monotonic() > deadline:
             raise RuntimeError(f"sim ({variant}) did not come up")
         time.sleep(1)
-    time.sleep(3)
+    import autodrive_sim_ctl as sim_ctl
+    sim_ctl.wait_scene()
 
 
 def _summarise(runs: list[dict]) -> dict:

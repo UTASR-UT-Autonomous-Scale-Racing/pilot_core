@@ -1,8 +1,8 @@
 # AutoDRIVE RoboRacer sim, race settings: config_autodrive.yaml plus a saved map, the
 # racing line (scripts/make_raceline.py), the speeds validated on the stock 2026-iros
-# compete build (10 laps, 0 collisions, laps 10.5-10.7 s; docs/autodrive.md) and auto_arm,
+# compete build (10 laps, 0-1 collisions, laps 11.5-12.1 s; docs/autodrive.md) and auto_arm,
 # so it drives as soon as the sim connects (competition container: no operator keys).
-# Practice track: saved_map_path / raceline_path -> maps/autodrive_practice.
+# Practice track: saved_map_path / raceline_path -> maps/autodrive_practice_seg.
 #   python start.py --config config_autodrive.yaml       # LiDAR mapping lap, then race
 #   (race on a saved map instead: enable_slam: false, use_saved_map: true below)
 # then connect the sim: HUD menu -> "Disconnected" toggle, or
@@ -72,7 +72,7 @@ track_control:
     lookahead_min: 0.5          # line's corners into the inside walls
     k_v: 0.25
     lookahead_max: 2.0
-  raceline_path: "maps/autodrive_compete/raceline.npy"   # margin 0.5 m
+  raceline_path: "maps/autodrive_compete_seg/raceline.npy"   # margin 0.65 m
   speed:
     v_max: 12.0                 # m/s
     lat_accel_fraction: 2.0     # profile a_lat = 2.0 * friction_coeff * g = 10.3 m/s^2
@@ -115,7 +115,7 @@ lidar:
 # mapping. enable_slam here means LiDAR mapping on the ground-truth pose, not ORB-SLAM3
 enable_slam: false
 use_saved_map: true
-saved_map_path: "maps/autodrive_compete"
+saved_map_path: "maps/autodrive_compete_seg"
 slam:
   vocabulary: "ORB_SLAM3/Vocabulary/ORBvoc.txt"
 
@@ -132,7 +132,7 @@ mapping:
   auto_loop_overrun: 1.0        # m past the start before the lap is closed (covers the seam)
   jump_threshold: 0.4           # m; longer pose steps are sim respawns after a wall hit
   min_track_half_width: 0.2     # m; a narrower extracted track is rejected (bad lap), map again
-  boundary_save_path: "maps/autodrive_practice"   # null = don't save
+  boundary_save_path: "maps/autodrive_compete_seg"   # null = don't save
 
 buffers:
   frame:

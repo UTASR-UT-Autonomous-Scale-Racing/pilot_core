@@ -20,6 +20,10 @@ from shared_buffer import PoseBuffer
 from shared_buffer.pointcloud_buffer import PointCloudBuffer
 from shared_buffer.track_boundary_buffer import TrackBoundaryBuffer
 
+# m; the sim respawns to fixed checkpoints, up to 1.3 m off the path driven (compete build).
+# Further off than this the car was moved elsewhere and the lap starts again.
+RESPAWN_MAX_OFF_PATH = 2.0
+
 
 def _to_bev(points_3d: np.ndarray, axes: tuple = (0, 2)) -> np.ndarray:
     """3D -> BEV, just picks out the two horizontal axes."""
@@ -436,8 +440,8 @@ class MappingWorker(BaseWorker):
         traj = np.array(self._bev_trajectory, dtype=np.float32)[:, :2]
         lo = max(0, len(traj) - 300)                    # the last few metres only
         d = np.hypot(traj[lo:, 0] - x, traj[lo:, 1] - y)
-        if d.min() > self._jump:
-            # not put back onto the path just driven (a reset to the start, a teleport):
+        if d.min() > RESPAWN_MAX_OFF_PATH:
+            # not put back near the path just driven (a reset to the start, a teleport):
             # start the lap again from here; the wall map stays, it is the same world
             self.logger.warning(f"Pose jumped {step:.2f} m off the driven path — mapping lap restarts here")
             self._bev_trajectory.clear()

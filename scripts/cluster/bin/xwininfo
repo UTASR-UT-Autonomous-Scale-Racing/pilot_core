@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""xwininfo -id <window>: the geometry lines autodrive_sim_ctl.py parses (python-xlib)."""
+import os
+import sys
+
+from Xlib import display
+
+d = display.Display(os.environ.get("DISPLAY", ":99"))
+w = d.create_resource_object("window", int(sys.argv[2], 0))
+g = w.get_geometry()
+p = w.translate_coords(d.screen().root, 0, 0)
+print(f"  Absolute upper-left X:  {-p.x}\n  Absolute upper-left Y:  {-p.y}\n"
+      f"  Width: {g.width}\n  Height: {g.height}")

@@ -1,0 +1,3 @@
+#!/bin/bash
+# "supervisorctl restart autodrive_sim" for a batch job: the job's loop relaunches the sim
+pkill -f "AutoDRIVE Simulator.x86_64"

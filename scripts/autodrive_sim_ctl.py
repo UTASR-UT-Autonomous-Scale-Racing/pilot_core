@@ -92,6 +92,17 @@ def _click(xy) -> None:
     subprocess.run(["xdotool", "mousemove", str(px), str(py)], env=_env())   # park off the HUD
 
 
+def wait_scene(timeout: float = 90.0) -> None:
+    """Wait out Unity's splash (a flat dark window): the HUD ignores clicks until the scene
+    is up, which on a slow disk is well after the log's UnloadTime."""
+    deadline = time.monotonic() + timeout
+    while _grab().max() < 120:
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"no scene on {DISPLAY} after {timeout:.0f} s")
+        time.sleep(1)
+    time.sleep(2)
+
+
 def menu_open(img=None) -> bool:
     img = _grab() if img is None else img
     # threshold scales with the box area

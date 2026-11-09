@@ -1,4 +1,10 @@
 /*
+ * Copyright (C) 2024-2026 UTASR - UT Autonomous Scale Racing
+ *
+ * This file links ORB-SLAM3 and is distributed under the GNU General Public License,
+ * version 3 or later, the licence of ORB-SLAM3 (ORB_SLAM3/LICENSE). See NOTICE.
+ */
+/*
  * pybind11 wrapper for ORB_SLAM3. Only exposes what the pilot_core workers
  * actually use:
  *

@@ -1,0 +1,14 @@
+pilot_core
+Copyright 2024-2026 UTASR - UT Autonomous Scale Racing
+
+pilot_core is licensed under the Apache License, Version 2.0 (LICENSE), with the
+exceptions below.
+
+ORB-SLAM3 (submodule ORB_SLAM3/, a fork of UZ-SLAMLab/ORB_SLAM3) is licensed under the
+GNU General Public License, version 3 (ORB_SLAM3/LICENSE). orbslam3_wrapper/ links it
+and is distributed under the GPL, version 3 or later, as well. The built module
+orbslam3_python, and any program or image that includes it (the Dockerfile's slam-build
+and runtime targets), is a combined work under the GPL, version 3. The Dockerfile's
+noslam target and the Python packages run without ORB-SLAM3 and stay under Apache 2.0.
+
+The Arduino firmware (submodule firmware/) is a separate repository with its own terms.

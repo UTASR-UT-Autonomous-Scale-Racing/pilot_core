@@ -169,3 +169,31 @@ def test_seg_scan_worker_memory_in_the_slam_frame():
     finally:
         for b in (sb, fb, out, raw, pb):
             b.unlink()
+
+
+def test_a_gap_between_reads_is_not_a_teleport():
+    """A pose read 2 s after the last one, 1.2 m on, is the car driving; the same step within one
+    sim message is a respawn."""
+    from shared_buffer import LidarBuffer, PoseBuffer
+    from shared_buffer.track_boundary_buffer import TrackBoundaryBuffer
+    from workers import MappingWorker
+
+    u = uuid.uuid4().hex[:8]
+    pb = PoseBuffer(slots=16, name=f"om_tp_{u}", create=True)
+    sb = LidarBuffer(slots=16, name=f"om_ts_{u}", create=True)
+    bb = TrackBoundaryBuffer(slots=2, name=f"om_tb_{u}", create=True)
+    w = MappingWorker(name="mapping", pose_buffer=pb, boundary_buffer=bb, loop_event=mp.Event(),
+                      wall_source="occupancy", scan_buffer=sb, bev_axes=[0, 1], forward_axis=0,
+                      jump_threshold=0.4)
+    w._logger = MagicMock()
+    try:
+        w.setup()
+        for t, x in ((0.0, 0.0), (0.04, 0.03), (2.04, 1.23), (2.08, 2.43)):
+            T = np.eye(4, dtype=np.float32)
+            T[0, 3] = x
+            pb.write(T, ts=100.0 + t)
+            w.step()
+        assert len(w._mapper._disturbances) == 1          # only the 1.2 m step within 40 ms
+    finally:
+        for b in (pb, sb, bb):
+            b.unlink()

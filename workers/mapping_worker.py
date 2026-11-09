@@ -30,6 +30,8 @@ from shared_buffer.track_boundary_buffer import TrackBoundaryBuffer
 # m; the sim respawns to fixed checkpoints, up to 1.3 m off the path driven (compete build).
 # Further off than this the car was moved elsewhere and the lap starts again.
 RESPAWN_MAX_OFF_PATH = 2.0
+# m/s; a pose step faster than this is a teleport (the car tops out near 8 m/s in the sim)
+TELEPORT_SPEED = 12.0
 
 
 def _to_bev(points_3d: np.ndarray, axes: tuple = (0, 2)) -> np.ndarray:
@@ -380,6 +382,9 @@ class MappingWorker(BaseWorker):
         self._jump = float(jump) if jump is not None else math.inf
         self._path_length = 0.0
         self._path_s: list[float] = []      # arc length at each trajectory point
+        self._last_pose_t: Optional[float] = None
+        self._next_extract = 0.0
+        self._driven: list[tuple[float, float]] = []   # every position driven, 5 cm apart (occupancy)
         self._max_dist_from_start = 0.0
         self._closest_start: Optional[tuple[float, float]] = None   # (distance, arc length)
 
@@ -409,6 +414,7 @@ class MappingWorker(BaseWorker):
             self._last_pc_seq = self._pc_buf.latest_seq()
         if self._mapper is not None:
             self._mapper.reset()
+            self._driven = []
             self._pose_hist = []
             self._hist_seq = self._pose_buf.latest_seq()
             self._last_scan_seq = self._scan_buf.latest_seq()
@@ -429,9 +435,12 @@ class MappingWorker(BaseWorker):
             if pose_result is not None and pose_result[0].seq_no > self._last_pose_seq:
                 pose_header, pose, _, _ = pose_result
                 (x, y), heading = pose_to_bev(pose, self._bev_axes, self._forward_axis)
+                t = pose_header.produced_ts
                 if self._bev_trajectory:
                     step = float(np.hypot(x - self._bev_trajectory[-1][0], y - self._bev_trajectory[-1][1]))
-                    if step > self._jump:
+                    dt = t - self._last_pose_t if self._last_pose_t is not None else 0.0
+                    # a teleport, not a gap between two reads: faster than the car can drive
+                    if step > self._jump and (dt <= 0 or step / dt > TELEPORT_SPEED):
                         self._cut_back_to(x, y, step)
                         if self._mapper is not None:
                             self._mapper.mark_disturbance(pose_header.produced_ts)
@@ -442,6 +451,10 @@ class MappingWorker(BaseWorker):
                 )
                 self._path_s.append(self._path_length)
                 self._last_pose_seq = pose_header.seq_no
+                self._last_pose_t = t
+                if self._mapper is not None and (
+                        not self._driven or np.hypot(x - self._driven[-1][0], y - self._driven[-1][1]) > 0.05):
+                    self._driven.append((float(x), float(y)))
                 if self._auto_loop:
                     self._check_auto_loop(x, y)
 
@@ -469,6 +482,7 @@ class MappingWorker(BaseWorker):
             self._loop_event is not None
             and self._loop_event.is_set()
             and not self._boundaries_extracted
+            and time.monotonic() >= self._next_extract
         ):
             self._extract_boundaries()
 
@@ -545,12 +559,14 @@ class MappingWorker(BaseWorker):
         return t[:, [0, 1, 3]], "poses"
 
     def _retry(self, msg: str) -> None:
+        # not a sleep: poses and scans keep coming in while the lap goes on
         self.logger.warning(f"{msg} — will retry in 2s")
-        time.sleep(2.0)
+        self._next_extract = time.monotonic() + 2.0
 
     def _extract_occupancy(self):
         """(outer, inner) from the occupancy grid, or None after scheduling a retry."""
-        path = np.array(self._bev_trajectory, dtype=np.float32).reshape(-1, 4)[:, :2]
+        # everything driven, laps and respawns included: the grid only keeps floor connected to it
+        path = np.asarray(self._driven, dtype=np.float64).reshape(-1, 2)
         try:
             outer, inner = self._mapper.extract(path)
         except ValueError as e:

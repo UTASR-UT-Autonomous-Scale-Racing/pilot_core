@@ -11,6 +11,11 @@ origin's mount in the vehicle frame as its scan_offset (and as scan_origin here)
 A camera sees ~60 deg, a LiDAR 270: with a pose_buffer and memory_s, the edges seen in the last
 memory_s seconds are kept (world frame) and fill the beams outside the current view, so a wall
 that has left the image (the inside of a hairpin) still bounds the scan the gap follower drives on.
+The same scan without the remembered edges goes to raw_output_buffer for the mapping lap's
+occupancy grid, where a remembered edge seen from the current origin would free floor it never saw.
+
+The same worker runs on the car (SLAM pose, camera frame) and in the sim (ground-truth pose, Z-up):
+bev_axes and forward_axis name the pose's ground plane and travel axis, as for MappingWorker.
 """
 
 from __future__ import annotations
@@ -28,10 +33,13 @@ class SegScanWorker(BaseWorker):
       segment_buffer   SegmentationBuffer (VisionWorker)
       frame_buffer     FrameBuffer the masks were computed from (for their depth)
       output_buffer    LidarBuffer: 1080 ranges, -135..+135 deg, as the LiDAR's
+      raw_output_buffer  LidarBuffer for the same scan without remembered edges (optional)
       seg_scan         camera_settings + control.seg_scan.SegScanConfig fields
       pose_buffer      PoseBuffer (Twv), optional: with memory_s, remembered edges fill unseen beams
       memory_s         s of edges kept, default 0 (off)
-      scan_origin      [x, y] of the scan origin in the vehicle frame (the scan_offset), default [0, 0]
+      scan_origin      [forward, left] of the scan origin in the vehicle frame (the scan_offset), default [0, 0]
+      bev_axes         pose axes spanning the ground plane: sim [0, 1], SLAM [0, 2] (default)
+      forward_axis     body travel axis: sim 0, SLAM 2 (default)
     """
 
     def __init__(self, name: str = "seg_scan", **kwargs: Any) -> None:
@@ -50,6 +58,9 @@ class SegScanWorker(BaseWorker):
         self._seg_buf = self.config["segment_buffer"]
         self._frame_buf = self.config["frame_buffer"]
         self._out = self.config["output_buffer"]
+        self._raw_out = self.config.get("raw_output_buffer")
+        self._bev_axes = tuple(self.config.get("bev_axes", [0, 2]))
+        self._forward_axis = int(self.config.get("forward_axis", 2))
         cfg = dict(self.config.get("seg_scan", {}))
         self._K = Intrinsics.from_orbslam_settings(cfg.pop("camera_settings", "orbslam_oakd_rgbd.yaml"))
         self._cfg = SegScanConfig(**cfg)
@@ -81,6 +92,8 @@ class SegScanWorker(BaseWorker):
             self._missed += 1                 # its frame has left the ring
             return
         ranges = seg_edge_scan(mask, depth, self._K, self._cfg)
+        if self._raw_out is not None:
+            self._raw_out.write(ranges, ts=header.produced_ts)
         if self._memory_s > 0 and self._pose_buf is not None:
             ranges = self._with_memory(ranges, header.produced_ts)
         self._out.write(ranges, ts=header.produced_ts)
@@ -101,11 +114,15 @@ class SegScanWorker(BaseWorker):
     def _with_memory(self, ranges: np.ndarray, t: float) -> np.ndarray:
         """Remember this scan's edges (world frame); fill its unknown (NaN) beams from the
         edges remembered from the last memory_s seconds."""
+        from .bev import pose_to_bev
+
         T = self._pose_at(t)
         if T is None:
             return ranges
-        R, p = T[:2, :2], T[:2, 3]
-        o = p + R @ self._origin                                   # scan origin, world
+        p, heading = pose_to_bev(T, self._bev_axes, self._forward_axis)
+        c, s = np.cos(heading), np.sin(heading)
+        R = np.array([[c, -s], [s, c]])
+        o = np.asarray(p, dtype=np.float64) + R @ self._origin      # scan origin, world
         ok = np.isfinite(ranges) & (ranges > 0)
         pts = np.column_stack([ranges[ok] * np.cos(self._ang[ok]), ranges[ok] * np.sin(self._ang[ok])])
         self._memory.append((t, pts @ R.T + o))

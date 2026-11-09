@@ -525,17 +525,29 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         if key in depth_ftg_cfg:
             seg_scan_cfg.setdefault(key, depth_ftg_cfg[key])
 
-    # without a LiDAR in the sim (ground-truth pose): one SegScanWorker builds the scan of the
+    # a mapping lap on the car or in the sim: one SegScanWorker builds the scan of the
     # segmentation's track edge, with a short memory of edges that have left the camera's view;
-    # the mapping drive drives on it and the mapping lap's walls are projected from it
-    seg_scan_buf = None
-    scan_offset = list(mapping_cfg.get("scan_offset", [0.2733, 0.0, 0.10]))
-    if autodrive and lidar_buf is None and run_vision and sim_mapping_lap:
+    # the mapping drive drives on it, and the mapping lap's walls come from its raw scans
+    wall_source = mapping_cfg.get("wall_source", "occupancy")
+    if wall_source not in ("cloud", "occupancy"):
+        raise SystemExit(f"mapping.wall_source must be cloud or occupancy, not {wall_source!r}")
+    if wall_source == "occupancy" and enable_slam and not use_saved_map and not run_vision:
+        raise SystemExit("mapping.wall_source occupancy maps from the segmentation-edge scan, which needs "
+                         "vision.enabled: true (or mapping.wall_source: cloud for SLAM map points)")
+    seg_scan_buf = seg_raw_buf = None
+    scan_offset = list(mapping_cfg.get("scan_offset", [0.0, 0.0, 0.0]))
+    if lidar_buf is None and run_vision and enable_slam and not use_saved_map:
         seg_scan_buf = LidarBuffer(slots=16, name="seg_scan_buf", create=True)
         buffers.append(seg_scan_buf)
+        if wall_source == "occupancy":
+            seg_raw_buf = LidarBuffer(slots=64, name="seg_raw_buf", create=True)
+            buffers.append(seg_raw_buf)
         workers.append(SegScanWorker(name="seg_scan", segment_buffer=seg_buf, frame_buffer=frame_buf,
-                                     output_buffer=seg_scan_buf, seg_scan=seg_scan_cfg, pose_buffer=pose_buf,
-                                     memory_s=seg_scan_memory_s, scan_origin=scan_offset[:2]))
+                                     output_buffer=seg_scan_buf, raw_output_buffer=seg_raw_buf,
+                                     seg_scan=seg_scan_cfg, pose_buffer=pose_buf,
+                                     memory_s=seg_scan_memory_s, scan_origin=scan_offset[:2],
+                                     bev_axes=mapping_cfg.get("bev_axes", [0, 2]),
+                                     forward_axis=mapping_cfg.get("forward_axis", 2)))
 
     # control: track modes need a pose source; depth_ftg / vae / bc only frame_buf
     armed_event = mp.Event()
@@ -558,8 +570,6 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 depth_ftg_config=depth_ftg_cfg,
                 lidar_buffer=seg_scan_buf if seg_scan_buf is not None else (None if use_seg_scan else lidar_buf),
                 scan_name="segmentation-edge scan with edge memory (SegScanWorker)" if seg_scan_buf is not None else None,
-                segment_buffer=seg_buf if vision_cfg.get("enabled", False) else None,
-                seg_scan=seg_scan_cfg,
             )
         )
     elif control_mode in ("depth_ftg", "vae", "bc"):
@@ -621,7 +631,7 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
     )
 
     # SLAM + mapping
-    if enable_slam and sim_pose:
+    if enable_slam and sim_pose and wall_source == "cloud":
         # ground-truth pose mode: a 2-D scan -> world-frame 3D points: the LiDAR's, or without
         # one the scan of the segmentation's track edge (SegScanWorker), from the camera
         lidar_cfg = config.get("lidar", {}) or {}
@@ -652,6 +662,8 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
         logger.info("Using the sim's ground-truth pose + "
                     + ("LiDAR" if lidar_buf is not None else "segmentation-edge scans (no LiDAR)")
                     + " for the point cloud")
+    elif enable_slam and sim_pose:
+        logger.info("Using the sim's ground-truth pose + the segmentation-edge scans' occupancy grid for the walls")
     elif enable_slam:
         workers.append(
             SLAMWorker(
@@ -684,6 +696,10 @@ def _build(config: Dict[str, Any], buffers: List[Any]) -> Pipeline:
                 keyframe_buffer=kf_buf,
                 map_reset_event=map_reset_event,
                 boundary_buffer=boundary_buf,
+                wall_source=wall_source,
+                scan_buffer=seg_raw_buf,
+                scan_offset=scan_offset,
+                occupancy=mapping_cfg.get("occupancy", {}),
                 loop_event=loop_event,
                 mapping_done_event=mapping_done_event,
                 boundary_min_points=mapping_cfg.get("boundary_min_points", 50),

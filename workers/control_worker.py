@@ -45,11 +45,8 @@ class ControlWorker(BaseWorker):
       state_buffer, boundary_buffer, mapping_done_event   track modes
       track_config        track_control config section (fallback: depth_ftg;
                           mapping_drive: LidarGapConfig fields, drives the mapping lap)
-      lidar_buffer        LidarBuffer, for track_config.mapping_drive (simulator)
-      segment_buffer      SegmentationBuffer: without a lidar_buffer, mapping_drive gets an
-                          approximate scan from the mask's edge and the frame's depth
-                          (control/seg_scan.py; needs frame_buffer)
-      seg_scan            seg_scan config: camera_settings + SegScanConfig fields
+      lidar_buffer        LidarBuffer of LiDAR-format scans for track_config.mapping_drive:
+                          SegScanWorker's segmentation-edge scan, on the car and in the sim
       vehicle_params      vehicle params YAML
       safety              runtime safety settings, compared with a policy's
       frame_buffer, camera_settings, depth_ftg_config     depth_ftg / fallback
@@ -119,18 +116,22 @@ class ControlWorker(BaseWorker):
             self._fallback_after = float(self._track_cfg.get("fallback_after", 0.3))
             self._fallback_active = False
         drive_cfg = self._track_cfg.get("mapping_drive")
+        done = self.config.get("mapping_done_event")
+        if drive_cfg and self.config.get("lidar_buffer") is None and done is not None and done.is_set():
+            drive_cfg = None                  # racing on a saved map: there is no mapping lap to drive
         if drive_cfg:
             from control.lidar_gap import LidarGapConfig, LidarGapFollower
 
             self._lidar_buf = self.config.get("lidar_buffer")
             self._last_lidar_seq = 0
             if self._lidar_buf is None:
-                self._setup_seg_scan()
+                raise RuntimeError("mapping_drive needs a scan: lidar_buffer (SegScanWorker's output, "
+                                   "vision.enabled)")
             cfg = dict(drive_cfg)
             cfg.setdefault("speed_per_throttle", self._track_cfg.get("speed", {}).get(
                 "longitudinal", {}).get("speed_per_throttle", 3.0))
             self._mapping_driver = LidarGapFollower(self._vehicle, LidarGapConfig(**cfg))
-            source = self.config.get("scan_name") or ("LiDAR" if self._lidar_buf is not None else "segmentation-edge scan")
+            source = self.config.get("scan_name") or "segmentation-edge scan"
             self.logger.info(f"Mapping lap driven by follow-the-gap on the {source} ({cfg})")
         self.logger.info(
             f"ControlWorker ready — {self._mode} mode "
@@ -230,48 +231,15 @@ class ControlWorker(BaseWorker):
                 f"steer={cmd.steering:+.3f} throttle={cmd.throttle:+.3f}"
             )
 
-    def _setup_seg_scan(self) -> None:
-        """No LiDAR: build the mapping drive's scan from the segmentation mask + depth."""
-        from control.depth_ftg import Intrinsics
-        from control.seg_scan import SegScanConfig
-
-        self._seg_buf = self.config.get("segment_buffer")
-        self._frame_buf = self.config.get("frame_buffer")
-        if self._seg_buf is None or self._frame_buf is None:
-            raise RuntimeError("mapping_drive needs a scan: a lidar_buffer, or a segment_buffer and "
-                               "frame_buffer for the segmentation-edge scan (vision.enabled)")
-        cfg = dict(self.config.get("seg_scan", {}))
-        self._seg_K = Intrinsics.from_orbslam_settings(
-            cfg.pop("camera_settings", self.config.get("camera_settings", "orbslam_oakd_rgbd.yaml")))
-        self._seg_cfg = SegScanConfig(**cfg)
-
     def _read_scan(self):
-        """Newest unseen scan as (header, ranges), or None: the LiDAR's, or one built from the
-        newest mask and the depth of the frame it was computed from."""
-        if self._lidar_buf is not None:
-            result = self._lidar_buf.read_latest()
-            if result is None or result[0].seq_no <= self._last_lidar_seq:
-                return None
-            return result
-        from control.seg_scan import seg_edge_scan
-
-        seg = self._seg_buf.read_latest()
-        if seg is None or seg[0].seq_no <= self._last_lidar_seq:
+        """Newest unseen scan as (header, ranges), or None."""
+        result = self._lidar_buf.read_latest()
+        if result is None or result[0].seq_no <= self._last_lidar_seq:
             return None
-        header, mask = seg
-        # VisionWorker stamps a mask with its frame's capture time: find that frame's depth
-        frames = [self._frame_buf.read_latest()]
-        if frames[0] is not None and frames[0][0].produced_ts != header.produced_ts:
-            frames = self._frame_buf.read_since(max(0, frames[0][0].seq_no - 3))   # 1-2 behind normally
-        depth = next((f[2] for f in frames if f is not None and f[0].produced_ts == header.produced_ts), None)
-        if depth is None:
-            self._last_lidar_seq = header.seq_no      # its frame has left the ring; wait for the next
-            return None
-        return header, seg_edge_scan(mask, depth, self._seg_K, self._seg_cfg)
+        return result
 
     def _step_mapping_drive(self) -> None:
-        """Follow-the-gap until the track is mapped (sim stand-in for the RC lap): on the
-        LiDAR, or without one on the segmentation-edge scan."""
+        """Follow-the-gap on the segmentation-edge scan until the track is mapped."""
         result = self._read_scan()
         now = time.monotonic()
         if result is None:

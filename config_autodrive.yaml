@@ -1,6 +1,6 @@
 # AutoDRIVE RoboRacer Unity sim, linked directly (no ROS, no bridge): pilot_core is the
 # server the sim connects to on sim_port; telemetry in, supervised commands out.
-#   python start.py --config config_autodrive.yaml       # LiDAR mapping lap, then race
+#   python start.py --config config_autodrive.yaml       # segmentation mapping lap, then race
 #   (race on a saved map instead: enable_slam: false, use_saved_map: true below)
 # then connect the sim: HUD menu -> "Disconnected" toggle, or
 #   python scripts/autodrive_sim_ctl.py connect
@@ -72,23 +72,22 @@ track_control:
       ki: 0.006
       integral_limit: 0.006
       max_backward: 0.012
-  # drives the LiDAR mapping lap (on the car a human does that with the RC transmitter)
+  # drives the mapping lap on the segmentation-edge scan (on the car a human can drive it by RC)
   mapping_drive:
     speed: 0.6                  # m/s
     min_speed: 0.4
     gap_select: area            # widest-gap turns into the compete track's hairpin pockets
 
-# the mapping drive's scan from the segmentation mask's edge + depth (control/seg_scan.py), the
-# car's stand-in for a LiDAR. Here the LiDAR is used unless source: segmentation (needs
-# vision.enabled and sim_depth); scripts/seg_scan_eval.py scores it against the LiDAR offline
+# the mapping lap's scan from the segmentation mask's edge (control/seg_scan.py), as on the car;
+# with no depth in the sim each edge is placed where its pixel's ray meets the floor
 seg_scan:
   source: segmentation          # no LiDAR: track edges from the mask, placed on the floor (no depth)
   camera_pitch: 0.1833          # rad, 10.5 deg down (sim_camera/camera.yaml)
   camera_height: 0.17           # m
   origin_forward: -0.2883       # m, camera behind the LiDAR (cam_x - lidar_x), so ranges match its tuning
 
-# never used (the car has none): the mapping lap's walls come from the segmentation-edge scans,
-# projected like a LiDAR's (LidarProjectionWorker). range / voxel settings apply to those
+# never used (the car has none). With mapping.wall_source: cloud the segmentation-edge scans are
+# projected like a LiDAR's (LidarProjectionWorker), with these range / voxel settings
 lidar:
   enabled: false
   range_min: 0.1
@@ -96,7 +95,7 @@ lidar:
   voxel_size: 0.10
   move_threshold: 0.05
 
-# mapping. enable_slam here means LiDAR mapping on the ground-truth pose, not ORB-SLAM3
+# mapping. enable_slam here means a mapping lap on the ground-truth pose, not ORB-SLAM3
 enable_slam: true
 use_saved_map: false
 saved_map_path: "maps/autodrive_practice"
@@ -104,8 +103,8 @@ slam:
   vocabulary: "ORB_SLAM3/Vocabulary/ORBvoc.txt"
 
 mapping:
-  # the segmentation scan's origin in the vehicle frame (camera x - seg_scan.origin_forward);
-  # z lifts the edge (a wall's base) into the wall-height band
+  wall_source: occupancy        # walls from the segmentation-edge scans' occupancy grid
+  # the segmentation scan's origin in the vehicle frame (camera x - seg_scan.origin_forward)
   scan_offset: [0.2733, 0.0, 0.10]
   boundary_min_points: 50
   bev_axes: [0, 1]              # sim world is Z-up so X, Y are horizontal
@@ -116,7 +115,7 @@ mapping:
   auto_loop_overrun: 1.0        # m past the start before the lap is closed (covers the seam)
   jump_threshold: 0.4           # m; longer pose steps are sim respawns after a wall hit
   min_track_half_width: 0.2     # m; a narrower extracted track is rejected (bad lap), map again
-  boundary_save_path: "maps/autodrive_practice"   # null = don't save
+  boundary_save_path: "maps/autodrive_practice_seg"   # null = don't save
 
 buffers:
   frame:

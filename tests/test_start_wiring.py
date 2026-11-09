@@ -92,8 +92,9 @@ def test_autodrive_wiring():
         # pose; the gap follower drives that lap on the same kind of scan
         scan = by["seg_scan"].config["output_buffer"]
         assert sim.config["lidar_buffer"] is None and scan is not None
-        assert by["seg_proj"].config["lidar_buffer"] is scan and ctrl.config["lidar_buffer"] is scan
-        assert by["seg_proj"].config["range_max"] == 2.0 and by["seg_scan"].config["memory_s"] == 1.5
+        assert ctrl.config["lidar_buffer"] is scan and by["seg_scan"].config["memory_s"] == 1.5
+        assert by["mapping"].config["wall_source"] == "occupancy" and "seg_proj" not in by
+        assert by["mapping"].config["scan_buffer"] is by["seg_scan"].config["raw_output_buffer"] is not None
         assert by["mapping"].config["auto_loop_close"] is True
         assert by["mapping"].config["jump_threshold"] == 0.4      # sim respawns; off for SLAM
         assert "actuation" in by["recorder"].config["buffers"]
@@ -180,12 +181,12 @@ def test_sim_maps_from_the_segmentation_without_a_lidar():
     p = _build("config_autodrive.yaml")
     try:
         names = [w.name for w in p.workers]
-        assert "vision" in names and "seg_scan" in names and "seg_proj" in names and "lidar_proj" not in names
+        assert "vision" in names and "seg_scan" in names and "lidar_proj" not in names
         assert not any(getattr(b, "name", "").startswith("lidar_buf") for b in p.buffers)
         sim = next(w for w in p.workers if w.name == "autodrive")
         assert sim.config.get("lidar_buffer") is None and sim.config["sim_depth"]["depth"] == "none"
-        proj = next(w for w in p.workers if w.name == "seg_proj")
-        assert proj.config["scan_offset"] == [0.2733, 0.0, 0.10]
+        mapping = next(w for w in p.workers if w.name == "mapping")
+        assert mapping.config["scan_offset"] == [0.2733, 0.0, 0.10]
         ctrl = next(w for w in p.workers if w.name == "control")
         assert ctrl.config.get("lidar_buffer") is next(w for w in p.workers if w.name == "seg_scan").config["output_buffer"]
     finally:
@@ -207,3 +208,44 @@ def test_sim_race_uses_no_lidar_no_ground_truth_speed_and_no_idle_segmentation()
     finally:
         for b in p.buffers:
             b.unlink()
+
+
+def test_cloud_walls_project_the_segmentation_scan():
+    """mapping.wall_source: cloud keeps the projected point cloud (the earlier method)."""
+    config = start.load_config(os.path.join(REPO_ROOT, "config_autodrive.yaml"))
+    config["mapping"] = {**config["mapping"], "wall_source": "cloud"}
+    p = start.build_pipeline(config)
+    try:
+        by = {w.name: w for w in p.workers}
+        assert by["seg_proj"].config["lidar_buffer"] is by["seg_scan"].config["output_buffer"]
+        assert by["seg_proj"].config["range_max"] == 2.0
+        assert by["mapping"].config["scan_buffer"] is None
+    finally:
+        for b in p.buffers:
+            b.unlink()
+
+
+def _mapping_lap_classes(config_name, **overrides):
+    p = _build(config_name, **overrides)
+    try:
+        by = {w.name: type(w).__name__ for w in p.workers}
+        workers = {w.name: w for w in p.workers}
+        scan = workers["seg_scan"]
+        wiring = (workers["control"].config["lidar_buffer"] is scan.config["output_buffer"],
+                  workers["mapping"].config["scan_buffer"] is scan.config["raw_output_buffer"],
+                  workers["mapping"].config["wall_source"])
+        return {k: by[k] for k in ("vision", "seg_scan", "mapping", "control", "state", "actuator")}, wiring
+    finally:
+        for b in p.buffers:
+            b.unlink()
+
+
+def test_car_and_sim_map_and_drive_with_the_same_workers():
+    """One pipeline: the car's mapping lap (SLAM pose) and the sim's (ground-truth pose) run the
+    same segmentation, scan, mapping, control, state and actuator workers, wired the same way."""
+    car = _mapping_lap_classes("config.yaml", i2c_address=None,
+                               track_control={**start.load_config(os.path.join(REPO_ROOT, "config.yaml"))["track_control"],
+                                              "mapping_drive": {"speed": 0.5}})
+    sim = _mapping_lap_classes("config_autodrive.yaml")
+    assert car == sim
+    assert car[1] == (True, True, "occupancy")

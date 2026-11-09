@@ -1,8 +1,15 @@
 """
 MappingWorker: records the driven BEV trajectory (PoseBuffer, or SLAM keyframes if
-given) and the newest wall point cloud, and on ``loop_event`` extracts outer/inner
-track boundaries (extract_track_boundaries) into TrackBoundaryBuffer, then sets
-mapping_done_event. map_reset_event (SLAM world frame changed) drops everything recorded.
+given) and the walls, and on ``loop_event`` extracts outer/inner track boundaries into
+TrackBoundaryBuffer, then sets mapping_done_event. map_reset_event (SLAM world frame
+changed) drops everything recorded.
+
+Two wall sources:
+  cloud      the newest wall point cloud (SLAM map points, or projected scans), boundaries
+             by extract_track_boundaries
+  occupancy  the segmentation-edge scans themselves, on an occupancy grid
+             (control/occupancy_map.py): rays free the floor they cross, so edges placed
+             short from far away are cleared by the floor seen up close
 """
 
 from __future__ import annotations
@@ -295,6 +302,11 @@ class MappingWorker(BaseWorker):
                               the car after a wall hit): the trajectory is cut back to the
                               point nearest the new pose. Default None (off): SLAM poses can
                               legitimately be sparse
+      wall_source             "cloud" (default) or "occupancy"
+      scan_buffer             LidarBuffer of segmentation-edge scans without edge memory
+                              (SegScanWorker raw_output_buffer); wall_source occupancy
+      scan_offset             [forward, left, up] of the scan origin in the vehicle frame, m
+      occupancy               control.occupancy_map.OccupancyConfig overrides
     """
 
     def __init__(self, name: str = "mapping", **kwargs: Any) -> None:
@@ -323,7 +335,24 @@ class MappingWorker(BaseWorker):
     def setup(self) -> None:
         c = self.config
         self._pose_buf = c["pose_buffer"]
-        self._pc_buf = c["pointcloud_buffer"]
+        self._wall_source = c.get("wall_source", "cloud")
+        if self._wall_source not in ("cloud", "occupancy"):
+            raise ValueError(f"wall_source must be cloud or occupancy, not {self._wall_source!r}")
+        self._pc_buf = c.get("pointcloud_buffer")
+        if self._wall_source == "cloud" and self._pc_buf is None:
+            raise ValueError("wall_source cloud needs a pointcloud_buffer")
+        self._mapper = None
+        if self._wall_source == "occupancy":
+            from control.lidar_gap import ANGLE_INCREMENT, ANGLE_MIN
+            from control.occupancy_map import OccupancyConfig, OccupancyTrackMapper
+
+            self._scan_buf = c["scan_buffer"]
+            self._mapper = OccupancyTrackMapper(OccupancyConfig(**dict(c.get("occupancy") or {})))
+            self._scan_angles = ANGLE_MIN + np.arange(1080) * ANGLE_INCREMENT
+            self._scan_offset = np.asarray(list(c.get("scan_offset", [0.0, 0.0]))[:2], dtype=np.float64)
+            self._last_scan_seq = 0
+            self._hist_seq = 0
+            self._pose_hist: list[tuple[float, float, float, float]] = []   # (t, x, y, heading)
         self._kf_buf = c.get("keyframe_buffer")
         self._boundary_buf = c["boundary_buffer"]
         self._loop_event = c.get("loop_event")
@@ -357,7 +386,7 @@ class MappingWorker(BaseWorker):
         self.logger.info(
             f"MappingWorker ready (min_pts={self._min_points}, "
             f"bev_axes={self._bev_axes}, forward_axis={self._forward_axis}, "
-            f"half_width={self._half_width}m, height_band={self._height_band}m)"
+            f"half_width={self._half_width}m, height_band={self._height_band}m, walls={self._wall_source})"
         )
 
     def _reset(self) -> None:
@@ -376,7 +405,13 @@ class MappingWorker(BaseWorker):
         self._kf_traj = None
         # anything already in the buffers may still be from the old map
         self._last_pose_seq = self._pose_buf.latest_seq()
-        self._last_pc_seq = self._pc_buf.latest_seq()
+        if self._pc_buf is not None:
+            self._last_pc_seq = self._pc_buf.latest_seq()
+        if self._mapper is not None:
+            self._mapper.reset()
+            self._pose_hist = []
+            self._hist_seq = self._pose_buf.latest_seq()
+            self._last_scan_seq = self._scan_buf.latest_seq()
         if self._kf_buf is not None:
             self._last_kf_seq = self._kf_buf.latest_seq()
         self._map_reset_event.clear()
@@ -398,6 +433,8 @@ class MappingWorker(BaseWorker):
                     step = float(np.hypot(x - self._bev_trajectory[-1][0], y - self._bev_trajectory[-1][1]))
                     if step > self._jump:
                         self._cut_back_to(x, y, step)
+                        if self._mapper is not None:
+                            self._mapper.mark_disturbance(pose_header.produced_ts)
                     else:
                         self._path_length += step
                 self._bev_trajectory.append(
@@ -408,8 +445,11 @@ class MappingWorker(BaseWorker):
                 if self._auto_loop:
                     self._check_auto_loop(x, y)
 
+        if self._mapper is not None:
+            self._read_scans()
+
         # the cloud is the full deduplicated wall map, so replace rather than append
-        if self._pc_buf.latest_seq() > self._last_pc_seq:
+        if self._pc_buf is not None and self._pc_buf.latest_seq() > self._last_pc_seq:
             pc_result = self._pc_buf.read_latest()
             if pc_result is not None:
                 pc_header, pts_3d = pc_result
@@ -433,6 +473,28 @@ class MappingWorker(BaseWorker):
             self._extract_boundaries()
 
         time.sleep(0.01)
+
+    def _read_scans(self) -> None:
+        """New scans onto the occupancy grid, each placed with the pose nearest its time."""
+        for header, pose, *_ in self._pose_buf.read_since(self._hist_seq):
+            self._hist_seq = header.seq_no
+            (x, y), heading = pose_to_bev(pose, self._bev_axes, self._forward_axis)
+            self._pose_hist.append((header.produced_ts, float(x), float(y), float(heading)))
+        if not self._pose_hist:
+            return
+        newest = self._pose_hist[-1][0]
+        self._pose_hist = [p for p in self._pose_hist if p[0] > newest - 2.0]
+        times = np.array([p[0] for p in self._pose_hist])
+        for header, ranges in self._scan_buf.read_since(self._last_scan_seq):
+            self._last_scan_seq = header.seq_no
+            i = int(np.argmin(np.abs(times - header.produced_ts)))
+            if abs(times[i] - header.produced_ts) > 0.1:
+                continue
+            _, x, y, heading = self._pose_hist[i]
+            c, s = math.cos(heading), math.sin(heading)
+            fwd, left = self._scan_offset
+            origin = (x + fwd * c - left * s, y + fwd * s + left * c)
+            self._mapper.add_scan(header.produced_ts, ranges, self._scan_angles, origin, heading)
 
     def _cut_back_to(self, x: float, y: float, step: float) -> None:
         """Teleport (sim respawn after a wall hit): drop the stretch the car is put back
@@ -486,7 +548,24 @@ class MappingWorker(BaseWorker):
         self.logger.warning(f"{msg} — will retry in 2s")
         time.sleep(2.0)
 
+    def _extract_occupancy(self):
+        """(outer, inner) from the occupancy grid, or None after scheduling a retry."""
+        path = np.array(self._bev_trajectory, dtype=np.float32).reshape(-1, 4)[:, :2]
+        try:
+            outer, inner = self._mapper.extract(path)
+        except ValueError as e:
+            self._retry(f"No track in the occupancy grid yet ({e})")
+            return None
+        self.logger.info(f"Occupancy map: {self._mapper.n_samples} edge samples, "
+                         f"{len(path)} trajectory pts")
+        return outer, inner
+
     def _extract_boundaries(self) -> None:
+        if self._mapper is not None:
+            result = self._extract_occupancy()
+            if result is not None:
+                self._publish(*result, ccw=None, n_wall=self._mapper.n_samples)
+            return
         if not self._bev_wall_pts:
             return self._retry("No wall points accumulated")
 
@@ -527,7 +606,10 @@ class MappingWorker(BaseWorker):
 
         if len(outer) == 0 or len(inner) == 0:
             return self._retry(f"One side empty (outer={len(outer)}, inner={len(inner)})")
+        self._publish(outer, inner, ccw=ccw, n_wall=len(all_wall))
 
+    def _publish(self, outer: np.ndarray, inner: np.ndarray, ccw: Optional[bool], n_wall: int) -> None:
+        """Checks, then writes and saves the boundaries and ends the mapping lap."""
         if self._min_half_width is not None:
             from control.track import TrackModel
 
@@ -550,15 +632,13 @@ class MappingWorker(BaseWorker):
         if self._save_path is not None:
             import os
             os.makedirs(self._save_path, exist_ok=True)
-            np.save(os.path.join(self._save_path, "outer_line.npy"), outer)
-            np.save(os.path.join(self._save_path, "inner_line.npy"), inner)
+            np.save(os.path.join(self._save_path, "outer_line.npy"), outer.astype(np.float32))
+            np.save(os.path.join(self._save_path, "inner_line.npy"), inner.astype(np.float32))
             self.logger.info(f"Boundaries saved to {self._save_path}")
 
         self.logger.info("=" * 60)
-        self.logger.info(
-            f"Track mapped ({'counter-clockwise' if ccw else 'clockwise'} lap). "
-            f"{len(all_wall)} wall points."
-        )
+        direction = "" if ccw is None else f" ({'counter-clockwise' if ccw else 'clockwise'} lap)"
+        self.logger.info(f"Track mapped{direction}. {n_wall} wall samples.")
         self.logger.info(f"Outer boundary: {len(outer)} pts")
         self.logger.info(f"Inner boundary: {len(inner)} pts")
         self.logger.info("=" * 60)

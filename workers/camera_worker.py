@@ -71,6 +71,8 @@ class CameraWorker(BaseWorker):
       fps                  default 30
       resolution           [w, h] for RGB and depth, default [640, 400]
       imu_buffer           stream the on-board IMU into it if given
+      raw_imu_buffer       also stream accel + all three gyro axes (RawIMUBuffer), for
+                           ORB-SLAM3's RGB-D-inertial mode
       imu_rate_hz          default 100
       max_exposure_us      auto-exposure limit, default 4000 (0 = DepthAI default)
       settings_path        ORB-SLAM3 settings to check against, default orbslam_oakd_rgbd.yaml
@@ -88,6 +90,7 @@ class CameraWorker(BaseWorker):
         self._sync_q = None
         self._frame_count: int = 0
         self._imu_buf = None
+        self._raw_imu_buf = None
         self._imu_q = None
         self._has_rotation_vector = False
         self._step_errors = 0
@@ -101,6 +104,7 @@ class CameraWorker(BaseWorker):
             raise RuntimeError("depthai is not installed; CameraWorker needs it for the OAK-D")
         self._frame_buf = self.config["output_buffer"]
         self._imu_buf = self.config.get("imu_buffer")
+        self._raw_imu_buf = self.config.get("raw_imu_buffer")
         self._frame_timeout = float(self.config.get("frame_timeout_s", 1.0))
         self._startup_timeout = float(self.config.get("startup_timeout_s", 5.0))
         self._max_step_errors = int(self.config.get("max_step_errors", 5))
@@ -170,7 +174,7 @@ class CameraWorker(BaseWorker):
         self._sync_q = sync.out.createOutputQueue(maxSize=2, blocking=False)
 
         self._imu_q = None
-        if self._imu_buf is not None:
+        if self._imu_buf is not None or self._raw_imu_buf is not None:
             self._setup_imu(device, self.config.get("imu_rate_hz", 100))
 
         self._pipeline.start()
@@ -298,7 +302,8 @@ class CameraWorker(BaseWorker):
     def _drain_imu(self) -> None:
         """Push pending IMU packets as [qw, qx, qy, qz, ax, ay, az, gx, gy] (gyro x/y
         where the I2C path has throttle/steering feedback), stamped with the
-        accelerometer capture time. Quaternion is NaN without a rotation vector."""
+        accelerometer capture time. Quaternion is NaN without a rotation vector.
+        With a raw_imu_buffer, also [ax, ay, az, gx, gy, gz] per packet."""
         for imu_data in self._imu_q.tryGetAll():
             for packet in imu_data.packets:
                 acc = packet.acceleroMeter
@@ -308,10 +313,19 @@ class CameraWorker(BaseWorker):
                     quat = (rv.real, rv.i, rv.j, rv.k)
                 else:
                     quat = (np.nan,) * 4
-                vec = np.array(
-                    [*quat, acc.x, acc.y, acc.z, gyro.x, gyro.y], dtype=np.float32
-                )
-                self._imu_buf.write(vec, ts=acc.getTimestamp().total_seconds())
+                ts = acc.getTimestamp().total_seconds()
+                if self._imu_buf is not None:
+                    vec = np.array(
+                        [*quat, acc.x, acc.y, acc.z, gyro.x, gyro.y], dtype=np.float32
+                    )
+                    self._imu_buf.write(vec, ts=ts)
+                if self._raw_imu_buf is not None:
+                    # a packet pairs an accel and a gyro sample whose own stamps can differ
+                    # by up to a sample period: stamp the pair with their mean
+                    t_pair = 0.5 * (ts + gyro.getTimestamp().total_seconds())
+                    self._raw_imu_buf.write(
+                        np.array([acc.x, acc.y, acc.z, gyro.x, gyro.y, gyro.z], dtype=np.float32),
+                        ts=t_pair)
 
     def step(self) -> None:
         try:

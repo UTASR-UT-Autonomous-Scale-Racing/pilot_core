@@ -20,7 +20,7 @@ def _unique_buffer_names(monkeypatch):
     # every buffer class takes name=...; give each test run its own names
     suffix = uuid.uuid4().hex[:6]
     for cls_name in ("FrameBuffer", "IMUBuffer", "SegmentationBuffer", "PoseBuffer", "ControlBuffer",
-                     "PointCloudBuffer", "TrackBoundaryBuffer", "LidarBuffer", "StateBuffer"):
+                     "PointCloudBuffer", "TrackBoundaryBuffer", "LidarBuffer", "StateBuffer", "RawIMUBuffer"):
         cls = getattr(start, cls_name)
 
         def make(*args, _cls=cls, **kwargs):
@@ -88,24 +88,33 @@ def test_autodrive_wiring():
         assert sim.config["reset_event"] is p.reset_event is not None
         assert sim.config["lap_counter"] is p.counters["lap"]
         assert sim.config["log_dir"] == p.recording_dir
-        # LiDAR mapping on the ground-truth pose; the gap follower drives that lap
-        assert sim.config["lidar_buffer"] is by["lidar_proj"].config["lidar_buffer"] is not None
-        assert ctrl.config["lidar_buffer"] is sim.config["lidar_buffer"]
+        # no LiDAR: the mapping lap's walls from the segmentation-edge scan on the ground-truth
+        # pose; the gap follower drives that lap on the same kind of scan
+        scan = by["seg_scan"].config["output_buffer"]
+        assert sim.config["lidar_buffer"] is None and scan is not None
+        assert ctrl.config["lidar_buffer"] is scan and by["seg_scan"].config["memory_s"] == 1.5
+        assert by["mapping"].config["wall_source"] == "occupancy" and "seg_proj" not in by
+        assert by["mapping"].config["scan_buffer"] is by["seg_scan"].config["raw_output_buffer"] is not None
         assert by["mapping"].config["auto_loop_close"] is True
         assert by["mapping"].config["jump_threshold"] == 0.4      # sim respawns; off for SLAM
         assert "actuation" in by["recorder"].config["buffers"]
     finally:
         for b in p.buffers:
             b.unlink()
-    # racing on a saved map: no mapping workers, but the scan is still recorded
+    # racing on a saved map: no mapping workers, no scan
     p = _build("config_autodrive.yaml", recording=True, enable_slam=False, use_saved_map=True)
     try:
         by = {w.name: w for w in p.workers}
-        assert "mapping" not in by and "lidar_proj" not in by
-        assert "lidar" in by["recorder"].config["buffers"]
+        assert "mapping" not in by and "seg_proj" not in by and "lidar_proj" not in by
+        assert "lidar" not in by["recorder"].config["buffers"]
     finally:
         for b in p.buffers:
             b.unlink()
+    # asking for the LiDAR, or depth from it, is an error: pilot_core never uses one
+    with pytest.raises(SystemExit):
+        _build("config_autodrive.yaml", lidar={"enabled": True})
+    with pytest.raises(SystemExit):
+        _build("config_autodrive.yaml", sim_depth={"camera": "sim_camera/camera.yaml", "scale": 2, "depth": "lidar"})
 
 
 def test_removed_modes_are_rejected():
@@ -141,3 +150,102 @@ def test_sim_depth_frames_fit_and_vision_uses_the_sim_camera():
     finally:
         for b in p.buffers:
             b.unlink()
+
+
+def test_rear_imu_feeds_the_imu_worker_and_the_state_worker():
+    rear = {"enabled": True, "rotation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "lever_m": [-0.25, 0.0]}
+    p = _build("config.yaml", rear_imu=rear, use_oakd_imu=False, recording=True)
+    try:
+        imu = next(w for w in p.workers if w.name == "imu")
+        buf = imu.config["raw_output_buffer"]
+        assert buf is not None
+        state = [w for w in p.workers if w.name == "state"]
+        if state:
+            assert state[0].config["rear_imu_buffer"] is buf
+            assert state[0].config["rear_imu"]["lever_m"] == [-0.25, 0.0]
+        rec = next(w for w in p.workers if w.name == "recorder")
+        assert rec.config["buffers"]["rear_imu"]["buffer"] is buf
+    finally:
+        for b in p.buffers:
+            b.unlink()
+
+
+def test_rear_imu_needs_the_arduino_imu():
+    with pytest.raises(SystemExit):
+        _build("config.yaml", rear_imu={"enabled": True}, use_oakd_imu=True)
+
+
+def test_sim_maps_from_the_segmentation_without_a_lidar():
+    """The sim configs use no LiDAR (as the car): no lidar buffer; the mapping lap's walls come
+    from the segmentation-edge scan (VisionWorker -> SegScanWorker -> projection)."""
+    p = _build("config_autodrive.yaml")
+    try:
+        names = [w.name for w in p.workers]
+        assert "vision" in names and "seg_scan" in names and "lidar_proj" not in names
+        assert not any(getattr(b, "name", "").startswith("lidar_buf") for b in p.buffers)
+        sim = next(w for w in p.workers if w.name == "autodrive")
+        assert sim.config.get("lidar_buffer") is None and sim.config["sim_depth"]["depth"] == "none"
+        mapping = next(w for w in p.workers if w.name == "mapping")
+        assert mapping.config["scan_offset"] == [0.2733, 0.0, 0.10]
+        ctrl = next(w for w in p.workers if w.name == "control")
+        assert ctrl.config.get("lidar_buffer") is next(w for w in p.workers if w.name == "seg_scan").config["output_buffer"]
+    finally:
+        for b in p.buffers:
+            b.unlink()
+
+
+
+def test_sim_race_uses_no_lidar_no_ground_truth_speed_and_no_idle_segmentation():
+    """The race config: no LiDAR buffer, the sim's own velocity is not fused into the state, and
+    the segmentation (only needed for a mapping lap) is not started."""
+    p = _build("config_autodrive_compete.yaml")
+    try:
+        by = {w.name: w for w in p.workers}
+        assert by["autodrive"].config.get("lidar_buffer") is None
+        assert by["state"].config["use_pose_speed"] is False
+        assert "vision" not in by and "seg_scan" not in by
+        assert p.mapping_done_event.is_set()          # racing on the saved map
+    finally:
+        for b in p.buffers:
+            b.unlink()
+
+
+def test_cloud_walls_project_the_segmentation_scan():
+    """mapping.wall_source: cloud keeps the projected point cloud (the earlier method)."""
+    config = start.load_config(os.path.join(REPO_ROOT, "config_autodrive.yaml"))
+    config["mapping"] = {**config["mapping"], "wall_source": "cloud"}
+    p = start.build_pipeline(config)
+    try:
+        by = {w.name: w for w in p.workers}
+        assert by["seg_proj"].config["lidar_buffer"] is by["seg_scan"].config["output_buffer"]
+        assert by["seg_proj"].config["range_max"] == 2.0
+        assert by["mapping"].config["scan_buffer"] is None
+    finally:
+        for b in p.buffers:
+            b.unlink()
+
+
+def _mapping_lap_classes(config_name, **overrides):
+    p = _build(config_name, **overrides)
+    try:
+        by = {w.name: type(w).__name__ for w in p.workers}
+        workers = {w.name: w for w in p.workers}
+        scan = workers["seg_scan"]
+        wiring = (workers["control"].config["lidar_buffer"] is scan.config["output_buffer"],
+                  workers["mapping"].config["scan_buffer"] is scan.config["raw_output_buffer"],
+                  workers["mapping"].config["wall_source"])
+        return {k: by[k] for k in ("vision", "seg_scan", "mapping", "control", "state", "actuator")}, wiring
+    finally:
+        for b in p.buffers:
+            b.unlink()
+
+
+def test_car_and_sim_map_and_drive_with_the_same_workers():
+    """One pipeline: the car's mapping lap (SLAM pose) and the sim's (ground-truth pose) run the
+    same segmentation, scan, mapping, control, state and actuator workers, wired the same way."""
+    car = _mapping_lap_classes("config.yaml", i2c_address=None,
+                               track_control={**start.load_config(os.path.join(REPO_ROOT, "config.yaml"))["track_control"],
+                                              "mapping_drive": {"speed": 0.5}})
+    sim = _mapping_lap_classes("config_autodrive.yaml")
+    assert car == sim
+    assert car[1] == (True, True, "occupancy")

@@ -37,6 +37,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 PY = sys.executable
+_ROOT = os.environ.get("AUTODRIVE_ROOT", "/workspaces")
+SIM_LOG = os.path.join(os.environ.get("AUTODRIVE_LOG_DIR", os.path.join(_ROOT, "logs")), "autodrive_sim.log")
+SIM_ENV = os.path.join(_ROOT, "autodrive_sim", "sim.env")
 
 
 def set_path(cfg: dict, dotted: str, value: Any) -> None:
@@ -105,11 +108,14 @@ def _cpu_ticks(pid: int) -> Optional[int]:
 
 def run_pilot(base_config: str, out: str, overrides: dict, laps: int = 3, timeout: float = 600.0,
               stop: str = "quit", capture: bool = True, settle: float = 2.0,
-              drive_s: Optional[float] = None, max_collisions: Optional[int] = None) -> dict:
+              drive_s: Optional[float] = None, max_collisions: Optional[int] = None,
+              competition_start: bool = False) -> dict:
     """One start.py run against the sim. Returns timings, laps and paths.
     stop: quit (key q) | term (SIGTERM to start.py) | kill (SIGKILL to start.py) |
     killall (SIGKILL to every pilot_core process). drive_s: stop that long after the
-    racing starts instead of after `laps` laps."""
+    racing starts instead of after `laps` laps. competition_start: as the competition container
+    starts: the sim restarted (car on its spawn), the config's own auto_arm, no reset and no
+    arm key; the car drives as soon as the sim connects."""
     import autodrive_capture as cap
     import autodrive_sim_ctl as sim_ctl
 
@@ -121,6 +127,14 @@ def run_pilot(base_config: str, out: str, overrides: dict, laps: int = 3, timeou
         set_path(cfg, k, v)
     cfg["recording"] = True
     cfg["recording_path"] = os.path.join(out, "rec")
+    if competition_start:
+        if not cfg.get("auto_arm"):
+            raise ValueError("competition_start needs a config with auto_arm: true (the competition container)")
+        restart_sim()
+    else:
+        # the run resets the sim and then arms: a config that arms itself on connect (the
+        # competition container) would start driving before that reset teleports it
+        cfg["auto_arm"] = False
     cfg_path = os.path.join(out, "config.yaml")
     with open(cfg_path, "w") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
@@ -155,9 +169,12 @@ def run_pilot(base_config: str, out: str, overrides: dict, laps: int = 3, timeou
         rec_dir = rec_dirs[-1] if rec_dirs else None
         res["recording_dir"] = rec_dir
         time.sleep(1.0)
-        res["t_reset"] = key("r")
-        time.sleep(settle)
-        res["t_armed"] = key("a")
+        if competition_start:
+            res["t_armed"] = res["t_connected"]       # armed itself on connect
+        else:
+            res["t_reset"] = key("r")
+            time.sleep(settle)
+            res["t_armed"] = key("a")
         pids = _worker_pids(log_path)
         pids["start"] = proc.pid
         res["worker_pids"] = pids
@@ -410,9 +427,23 @@ def stage_cells(mx: dict, stage: str, out: str) -> list[dict]:
     return cells
 
 
+def restart_sim() -> None:
+    """Restart the supervisor-run sim and wait until it is up: the car back on its spawn."""
+    log = SIM_LOG
+    size = os.path.getsize(log) if os.path.exists(log) else 0
+    subprocess.run(["supervisorctl", "restart", "autodrive_sim"], check=True, capture_output=True)
+    deadline = time.monotonic() + 120
+    while not _tail_has(log, "UnloadTime", since=size):
+        if time.monotonic() > deadline:
+            raise RuntimeError("the sim did not come up")
+        time.sleep(1)
+    import autodrive_sim_ctl as sim_ctl
+    sim_ctl.wait_scene()
+
+
 def ensure_sim_variant(variant: str) -> None:
     """Switch the supervisor-run sim between the practice and compete builds."""
-    env = "/workspaces/autodrive_sim/sim.env"
+    env = SIM_ENV
     with open(env) as f:
         lines = f.read().splitlines()
     cur = next((ln.split("=", 1)[1] for ln in lines if ln.startswith("SIM_VARIANT=")), "practice")
@@ -421,7 +452,7 @@ def ensure_sim_variant(variant: str) -> None:
     lines = [ln for ln in lines if not ln.startswith("SIM_VARIANT=")] + [f"SIM_VARIANT={variant}"]
     with open(env, "w") as f:
         f.write("\n".join(lines) + "\n")
-    log = "/workspaces/logs/autodrive_sim.log"
+    log = SIM_LOG
     size = os.path.getsize(log) if os.path.exists(log) else 0
     subprocess.run(["supervisorctl", "restart", "autodrive_sim"], check=True, capture_output=True)
     deadline = time.monotonic() + 120
@@ -429,7 +460,8 @@ def ensure_sim_variant(variant: str) -> None:
         if time.monotonic() > deadline:
             raise RuntimeError(f"sim ({variant}) did not come up")
         time.sleep(1)
-    time.sleep(3)
+    import autodrive_sim_ctl as sim_ctl
+    sim_ctl.wait_scene()
 
 
 def _summarise(runs: list[dict]) -> dict:
@@ -648,6 +680,9 @@ def main() -> int:
     r.add_argument("--timeout", type=float, default=600)
     r.add_argument("--stop", choices=["quit", "term", "kill", "killall"], default="quit")
     r.add_argument("--drive-s", type=float, help="stop after this long racing instead of --laps")
+    r.add_argument("--max-collisions", type=int, help="stop once the run has more collisions than this")
+    r.add_argument("--competition-start", action="store_true",
+                   help="start as the competition container does: sim restarted, the config's auto_arm, no reset / arm keys")
     mxp = sub.add_parser("matrix")
     mxp.add_argument("matrix")
     mxp.add_argument("--stage", required=True)
@@ -678,7 +713,8 @@ def main() -> int:
         print(json.dumps(score_run(a.run_dir), indent=1, default=float))
         return 0
     if a.cmd == "run":
-        res = run_pilot(a.config, a.out, parse_sets(a.set), a.laps, a.timeout, a.stop, drive_s=a.drive_s)
+        res = run_pilot(a.config, a.out, parse_sets(a.set), a.laps, a.timeout, a.stop, drive_s=a.drive_s,
+                        max_collisions=a.max_collisions, competition_start=a.competition_start)
         laps = [e for e in res["events"] if e["event"] == "lap"]
         coll = [e for e in res["events"] if e["event"] == "collision"]
         print(json.dumps({"laps": [(round(e["t"] - res["t_armed"], 1), e.get("lap_time")) for e in laps],

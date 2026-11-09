@@ -73,8 +73,9 @@ def test_mask_hides_the_body_without_corners():
     assert filled - no_car <= (with_block - no_car) / 4
 
 
-def test_autodrive_worker_writes_rgbd_from_lidar():
-    """sim_depth on: a sim message becomes an upscaled RGB-D frame for SLAMWorker."""
+def test_autodrive_worker_prepares_frames_without_the_lidar():
+    """sim_depth (depth: none, the default): a sim message becomes the upscaled frame the
+    segmentation was trained on, car body painted out, with no depth: the LiDAR is not read."""
     import logging
     import uuid
 
@@ -91,11 +92,12 @@ def test_autodrive_worker_writes_rgbd_from_lidar():
         w._frame_buf = fb
         w._depth_fn = LidarDepth(CameraModel.from_yaml("sim_camera/camera.yaml", scale=2))
         w._depth_clahe = True
-        w._write_rgbd(autodrive_to_internal(FakeAutoDRIVE(port=1).telemetry()))
+        assert w._depth_source == "none"
+        msg = autodrive_to_internal(FakeAutoDRIVE(port=1).telemetry())
+        msg.pop("lidar", None)                                # no LiDAR needed
+        w._write_rgbd(msg)
         _, rgb, depth = fb.read_latest()
         assert rgb.shape == (216, 384, 3) and depth.shape == (216, 384)
-        assert (depth > 0).mean() > 0.2                       # floor / walls below the horizon
-        assert not depth[w._depth_fn.mask].any()              # nothing on the car body
-        assert depth.max() <= 10.0
+        assert not depth.any()                                # no depth at all
     finally:
         fb.unlink()

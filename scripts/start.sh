@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Docker deploy on the Jetson: pull, perf mode, OAK-D udev rule, build and run (foreground).
+# Docker deploy on the Jetson: the release tag, perf mode, OAK-D udev rule, build, the
+# self-test in the container, then run (foreground).
 #   scripts/start.sh                              # start.py --config config.yaml
 #   scripts/start.sh --config X.yaml [--enable-slam ...]   # args are passed to start.py
+#   PILOT_REF=<ref> / SKIP_SELFTEST=1             # as for jetson_run.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# pilot_core fast-forward, submodules at the commits pilot_core pins
-git pull --ff-only
-git submodule sync --quiet
-git submodule update --init --recursive
+# pilot_core at the release tag (or PILOT_REF), submodules at its pinned commits
+# shellcheck source=deploy_ref.sh
+source scripts/deploy_ref.sh
+update_repo
 
 # start.py args: config.yaml unless the caller passes --config
 args=("$@")
@@ -57,15 +59,13 @@ echo ""
 
 # --privileged: OAK-D over USB; --device: Arduino I2C; --ipc=host: host /dev/shm
 # for the ring buffers (Docker's default is 64 MB).
+RUN_FLAGS=(--runtime nvidia --rm --privileged --net=host --ipc=host --device /dev/i2c-1)
+if [ "${SKIP_SELFTEST:-0}" != 1 ]; then
+    sudo docker run "${RUN_FLAGS[@]}" --entrypoint python3 "$IMAGE_NAME" \
+        scripts/jetson_selftest.py --config "$CONFIG_FILE" || {
+        echo "Self-test failed; fix it or run with SKIP_SELFTEST=1." >&2
+        exit 1
+    }
+fi
 echo "Started container utasr-container (logs follow; q or Ctrl+C to stop)."
-exec sudo docker run \
-    --runtime nvidia \
-    --rm \
-    -it \
-    --privileged \
-    --net=host \
-    --ipc=host \
-    --device /dev/i2c-1 \
-    --name utasr-container \
-    "$IMAGE_NAME" \
-    "${args[@]}"
+exec sudo docker run "${RUN_FLAGS[@]}" -it --name utasr-container "$IMAGE_NAME" "${args[@]}"

@@ -119,14 +119,13 @@ def test_gap_follower_with_nothing_free_aims_at_the_deepest_known_beam():
 
 # ---------------------------------------------------------------- ControlWorker
 
-def _control_rig(segment: bool = True):
+def _control_rig(scan: bool = True):
     from control import VehicleState
-    from shared_buffer import ControlBuffer, FrameBuffer, SegmentationBuffer, StateBuffer, TrackBoundaryBuffer
+    from shared_buffer import ControlBuffer, LidarBuffer, StateBuffer, TrackBoundaryBuffer
     from workers import ControlWorker
 
     bufs = {
-        "frame": FrameBuffer(slots=4, name=f"ss_f_{_uid()}", create=True),
-        "seg": SegmentationBuffer(slots=4, name=f"ss_s_{_uid()}", create=True),
+        "scan": LidarBuffer(slots=4, name=f"ss_l_{_uid()}", create=True),
         "state": StateBuffer(slots=4, name=f"ss_st_{_uid()}", create=True),
         "boundary": TrackBoundaryBuffer(slots=2, name=f"ss_b_{_uid()}", create=True),
         "ctrl": ControlBuffer(slots=8, name=f"ss_c_{_uid()}", create=True),
@@ -137,9 +136,7 @@ def _control_rig(segment: bool = True):
         mapping_done_event=MagicMock(is_set=MagicMock(return_value=False)),
         track_config={"mapping_drive": {"speed": 0.6, "min_speed": 0.4}},
         vehicle_params="vehicle_params_roboracer.yaml",
-        frame_buffer=bufs["frame"], segment_buffer=bufs["seg"] if segment else None,
-        seg_scan={"camera_settings": "orbslam_oakd_rgbd.yaml", "camera_pitch": float(PITCH),
-                  "camera_height": CAM_H},
+        lidar_buffer=bufs["scan"] if scan else None,
     )
     w._logger = MagicMock()
     bufs["state"].write(VehicleState(t=time.monotonic(), x=0.0, y=0.0, yaw=0.0, v=0.5, yaw_rate=0.0))
@@ -151,11 +148,7 @@ def test_control_worker_drives_the_mapping_lap_on_the_segmentation_scan():
     try:
         w.setup()
         mask, depth = _scene(wall_fwd=3.0)
-        rgb = np.zeros((H, W, 3), np.uint8)
-        ts = time.monotonic()
-        bufs["frame"].write(rgb, depth, ts=ts)
-        bufs["frame"].write(rgb, depth, ts=ts + 0.03)      # a newer frame arrived during inference
-        bufs["seg"].write(mask, ts=ts)                      # VisionWorker stamps the frame's time
+        bufs["scan"].write(seg_edge_scan(mask, depth, K, _cfg()), ts=time.monotonic())
         w.step()
         assert bufs["ctrl"].latest_seq() == 1
         _, steer, throttle = bufs["ctrl"].read_latest()
@@ -165,24 +158,25 @@ def test_control_worker_drives_the_mapping_lap_on_the_segmentation_scan():
             b.unlink()
 
 
-def test_a_mask_whose_frame_has_left_the_ring_is_skipped():
+def test_a_scan_is_driven_on_once():
     w, bufs = _control_rig()
     try:
         w.setup()
         mask, depth = _scene(wall_fwd=3.0)
-        bufs["frame"].write(np.zeros((H, W, 3), np.uint8), depth, ts=time.monotonic())
-        bufs["seg"].write(mask, ts=time.monotonic() - 5.0)
+        bufs["scan"].write(seg_edge_scan(mask, depth, K, _cfg()), ts=time.monotonic() - 1.0)
         w.step()
-        assert bufs["ctrl"].latest_seq() == 0
+        assert bufs["ctrl"].latest_seq() == 1
+        w.step()                                            # no new scan, and the old one is too old to hold
+        assert bufs["ctrl"].latest_seq() == 1
     finally:
         for b in bufs.values():
             b.unlink()
 
 
-def test_mapping_drive_without_lidar_or_segmentation_is_an_error():
-    w, bufs = _control_rig(segment=False)
+def test_mapping_drive_without_a_scan_is_an_error():
+    w, bufs = _control_rig(scan=False)
     try:
-        with pytest.raises(RuntimeError, match="segment_buffer"):
+        with pytest.raises(RuntimeError, match="lidar_buffer"):
             w.setup()
     finally:
         for b in bufs.values():
@@ -229,29 +223,27 @@ def test_car_mapping_drive_runs_on_the_segmentation_scan(_unique_buffer_names):
     p = _build("config_cpu.yaml", control_mode="pure_pursuit", enable_slam=True,
                track_control={"mapping_drive": {"speed": 0.5}}, vision={"enabled": True})
     try:
-        ctrl = next(w for w in p.workers if w.name == "control")
-        vision = next(w for w in p.workers if w.name == "vision")
-        assert ctrl.config["lidar_buffer"] is None
-        assert ctrl.config["segment_buffer"] is vision.config["output_buffer"] is not None
-        assert ctrl.config["seg_scan"]["camera_height"] == 0.12      # depth_ftg's, one camera mount
+        by = {w.name: w for w in p.workers}
+        scan = by["seg_scan"]
+        assert scan.config["segment_buffer"] is by["vision"].config["output_buffer"] is not None
+        assert by["control"].config["lidar_buffer"] is scan.config["output_buffer"] is not None
+        assert scan.config["seg_scan"]["camera_height"] == 0.12      # depth_ftg's, one camera mount
+        assert scan.config["bev_axes"] == [0, 2] and scan.config["forward_axis"] == 2   # SLAM frame
+        assert by["mapping"].config["scan_buffer"] is scan.config["raw_output_buffer"] is not None
     finally:
         for b in p.buffers:
             b.unlink()
 
 
-def test_sim_uses_the_lidar_unless_told_otherwise(_unique_buffer_names):
+def test_sim_never_uses_the_lidar(_unique_buffer_names):
+    """The mapping drive drives on SegScanWorker's segmentation-edge scan, never the sim's LiDAR."""
     p = _build("config_autodrive.yaml")
     try:
-        ctrl = next(w for w in p.workers if w.name == "control")
-        assert ctrl.config["lidar_buffer"] is not None
-    finally:
-        for b in p.buffers:
-            b.unlink()
-    p = _build("config_autodrive.yaml", seg_scan={"source": "segmentation"}, vision={"enabled": True})
-    try:
-        ctrl = next(w for w in p.workers if w.name == "control")
-        assert ctrl.config["lidar_buffer"] is None and ctrl.config["segment_buffer"] is not None
-        assert ctrl.config["seg_scan"]["origin_forward"] == pytest.approx(-0.2883)
+        by = {w.name: w for w in p.workers}
+        ctrl = by["control"]
+        assert ctrl.config["lidar_buffer"] is by["seg_scan"].config["output_buffer"]
+        assert by["autodrive"].config.get("lidar_buffer") is None
+        assert by["seg_scan"].config["seg_scan"]["origin_forward"] == pytest.approx(-0.2883)
     finally:
         for b in p.buffers:
             b.unlink()

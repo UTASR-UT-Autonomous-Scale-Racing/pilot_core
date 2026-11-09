@@ -1,9 +1,13 @@
 """
-SLAMWorker: FrameBuffer -> ORB_SLAM3 RGBD -> PoseBuffer (Twc, camera-to-world), map points
-and keyframe positions. Poses carry the frame's capture ts (time.monotonic()) and are only
+SLAMWorker: FrameBuffer -> ORB_SLAM3 RGBD (or RGBD-inertial, with the OAK-D's IMU samples
+from a RawIMUBuffer) -> PoseBuffer (Twc, camera-to-world), map points and keyframe
+positions. Poses carry the frame's capture ts (time.monotonic()) and are only
 published while tracking is OK, in a floor-aligned "level" world frame (Y down along the
 floor normal, Z = forward on the floor, so BEV axes [0, 2] hold). A map switch sets
-map_reset_event; in localization mode poses are withheld outside the reference map.
+map_reset_event; in localization mode poses are withheld outside the reference map. In the
+inertial mode ORB-SLAM3 re-rotates its map to gravity while the IMU initialises; the
+poses and map points are published relative to the map's origin keyframe, which those
+rotations move along with everything else, so the published frame does not move.
 """
 
 from __future__ import annotations
@@ -98,6 +102,10 @@ class SLAMWorker(BaseWorker):
       level_frames          good floor fits to average, default 5
       level_timeout_frames  give up levelling after this many frames, default 150
       floor_height_range    accepted camera height above the floor, default (0.03, 1.0) m
+      inertial              ORB-SLAM3 IMU_RGBD instead of RGBD, default False (the settings
+                            file needs the IMU block: scripts/gen_orbslam_settings.py --imu)
+      raw_imu_buffer        RawIMUBuffer with the camera's IMU samples (inertial only)
+      imu_wait_s            wait this long for IMU samples to catch up with a frame, default 0.03
     """
 
     _PC_PUBLISH_INTERVAL = 30  # also publish point cloud every N frames
@@ -132,6 +140,15 @@ class SLAMWorker(BaseWorker):
         self._plane_fits: list[np.ndarray] = []
         self._level_tries = 0
         self._R_level: Optional[np.ndarray] = None  # 4x4, world -> level
+
+        # inertial mode
+        self._inertial = bool(kwargs.get("inertial", False))
+        self._imu_buf: Optional[Any] = None
+        self._imu_wait_s = float(kwargs.get("imu_wait_s", 0.03))
+        self._imu_seq = 0
+        self._imu_pending: list = []           # [t, ax, ay, az, gx, gy, gz] not yet given to SLAM
+        self._T_origin: Optional[np.ndarray] = None   # Twc of the map's origin keyframe
+        self._imu_initialized = False
 
         # map identity
         self._map_key: Optional[tuple] = None   # current (map_id, init_kf_id)
@@ -172,9 +189,17 @@ class SLAMWorker(BaseWorker):
         from control.types import resolve_path
 
         vocab_path, settings_path = resolve_path(vocab_path), resolve_path(settings_path)
-        self._slam = _slam_mod.System(vocab_path, settings_path, _slam_mod.RGBD)
+        if self._inertial:
+            self._imu_buf = self.config.get("raw_imu_buffer")
+            if self._imu_buf is None:
+                raise RuntimeError("inertial SLAM needs a raw_imu_buffer (the OAK-D's IMU)")
+            if not hasattr(_slam_mod, "IMU_RGBD"):
+                raise RuntimeError("orbslam3_python has no IMU_RGBD: rebuild orbslam3_wrapper")
+        sensor = _slam_mod.IMU_RGBD if self._inertial else _slam_mod.RGBD
+        self._slam = _slam_mod.System(vocab_path, settings_path, sensor)
         self.logger.info(
-            f"ORB_SLAM3 initialised (vocab={vocab_path}, settings={settings_path})"
+            f"ORB_SLAM3 initialised ({'RGBD-inertial' if self._inertial else 'RGBD'}, "
+            f"vocab={vocab_path}, settings={settings_path})"
         )
         if self._level_world:
             self._K = read_settings_intrinsics(settings_path)
@@ -229,6 +254,9 @@ class SLAMWorker(BaseWorker):
             )
 
     def _level_points(self, pts: np.ndarray) -> np.ndarray:
+        if self._inertial and self._T_origin is not None:
+            # world -> origin keyframe frame: R_o^T (p - t_o), as row vectors
+            pts = (pts - self._T_origin[:3, 3]) @ self._T_origin[:3, :3]
         return (pts @ self._R_level[:3, :3].T).astype(np.float32)
 
     # map identity
@@ -250,10 +278,51 @@ class SLAMWorker(BaseWorker):
                 if self._map_reset_event is not None:
                     self._map_reset_event.set()
             self._map_key = key
+            self._T_origin = None
             if self._ref_map_key is None or not self._localization_activated:
                 self._ref_map_key = key
         if key != self._ref_map_key:
             return False  # localization mode in a map that isn't the mapped track
+        return True
+
+    # inertial mode
+
+    def _imu_until(self, ts: float) -> np.ndarray:
+        """IMU samples with t <= ts not yet handed out, as (N, 7) float64 [t, acc, gyro].
+        Waits up to imu_wait_s for the IMU to catch up with the frame (it can lag it)."""
+        deadline = time.monotonic() + self._imu_wait_s
+        while True:
+            for header, sample in self._imu_buf.read_since(self._imu_seq):
+                if self._imu_seq and header.seq_no > self._imu_seq + 1:
+                    self.logger.warning(
+                        f"Lost {header.seq_no - self._imu_seq - 1} IMU samples (SLAM fell behind "
+                        "the raw IMU buffer)")
+                self._imu_seq = header.seq_no
+                self._imu_pending.append([header.produced_ts, *sample.tolist()])
+            if (self._imu_pending and self._imu_pending[-1][0] >= ts) or time.monotonic() >= deadline:
+                break
+            time.sleep(0.002)
+        n = sum(1 for row in self._imu_pending if row[0] <= ts)
+        out = np.array(self._imu_pending[:n], dtype=np.float64).reshape(-1, 7)
+        del self._imu_pending[:n]
+        return out
+
+    def _update_origin(self) -> bool:
+        """Re-read the origin keyframe (inertial mode). False when it rotated since the last
+        frame: ORB-SLAM3 re-aligned its map to gravity around this frame, so its pose is
+        withheld in case the tracker's pose and the origin straddle the rotation."""
+        T_o = np.asarray(self._slam.origin_pose(), dtype=np.float32)
+        initialized = bool(self._slam.imu_initialized())
+        if initialized and not self._imu_initialized:
+            self.logger.info("IMU initialised: ORB-SLAM3 map aligned to gravity")
+        self._imu_initialized = initialized
+        prev, self._T_origin = self._T_origin, T_o
+        if prev is None:
+            return True
+        cos = (float(np.trace(prev[:3, :3].T @ T_o[:3, :3])) - 1.0) / 2.0
+        if math.degrees(math.acos(max(-1.0, min(1.0, cos)))) > 0.2:
+            self.logger.info("ORB-SLAM3 re-rotated its map (gravity); poses stay in the origin frame")
+            return False
         return True
 
     def step(self) -> None:
@@ -288,6 +357,7 @@ class SLAMWorker(BaseWorker):
         # keep resetting; they still feed the floor fit
         if self._R_level is None:
             self._update_level(depth)
+        imu = self._imu_until(ts) if self._inertial else None
         if self._frame_count <= self._warmup_frames:
             return
 
@@ -302,7 +372,8 @@ class SLAMWorker(BaseWorker):
             )
 
         t0 = time.perf_counter()
-        Tcw = self._slam.track_rgbd(rgb, depth, ts)
+        Tcw = self._slam.track_rgbd(rgb, depth, ts, imu) if self._inertial else \
+            self._slam.track_rgbd(rgb, depth, ts)
         self._track_ms.append(1e3 * (time.perf_counter() - t0))
         state = self._slam.get_tracking_state()
         tracking_ok = state == _TRACKING_OK
@@ -316,6 +387,12 @@ class SLAMWorker(BaseWorker):
         map_ok = self._check_map() if tracking_ok else False
         level_ok = self._R_level is not None
         Twc = invert_se3(np.asarray(Tcw, dtype=np.float32))
+        if self._inertial:
+            # relative to the origin keyframe: the frame the floor was levelled in, and
+            # unmoved by ORB-SLAM3's gravity re-rotations
+            if not self._update_origin():
+                map_ok = False
+            Twc = invert_se3(self._T_origin) @ Twc
         if level_ok:
             Twc = self._R_level @ Twc
         if tracking_ok and map_ok and level_ok:

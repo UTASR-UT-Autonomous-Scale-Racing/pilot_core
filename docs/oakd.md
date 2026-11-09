@@ -30,8 +30,9 @@ Measured with the `CameraWorker` pipeline:
 
 ## Requirements
 
-- **USB 3 for 30 fps.** On USB 2, 30 fps RGB-D drops frames and lags about 320 ms, too old
-  for the 150 ms command watchdog. Use a SuperSpeed port and a USB 3 cable; with USB-C, try
+- **USB 3 for 30 fps.** On USB 2, 30 fps RGB-D drops frames and lags about 320 ms. The 150 ms
+  command watchdog only checks that commands keep arriving, not how old the camera data behind
+  them is, so it does not catch this; `scripts/stage_latency.py` on a recording does. Use a SuperSpeed port and a USB 3 cable; with USB-C, try
   flipping the plug. `CameraWorker` logs a warning when the link is slower than USB 3 and
   fps is above 15. Check the link:
 

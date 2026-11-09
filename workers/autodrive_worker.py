@@ -134,11 +134,14 @@ class AutoDRIVEWorker(SimDecoder):
       sim_depth           {camera: sim_camera/camera.yaml, scale: 2}: RGB-D for ORB-SLAM3 from a
                           camera without depth (workers/lidar_depth.py): the frame is upscaled,
                           the car body hidden, depth comes from the same message's LiDAR scan
+      pose_degrade        control.pose_degrade.PoseDegradeConfig fields: the ground-truth pose
+                          published late, noisy, drifting and with dropouts, like SLAM's
     """
 
     def __init__(self, name: str = "autodrive", **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
         self._server = None
+        self._depth_source = "none"     # sim_depth.depth (setup); never the LiDAR
         self._server_thread: Optional[threading.Thread] = None
         self._ws = None
         self._ws_lock: Optional[threading.Lock] = None   # created in setup(): spawn pickles the worker
@@ -156,6 +159,7 @@ class AutoDRIVEWorker(SimDecoder):
         self._frames = 0
         self._connections = 0
         self._last_rx = 0.0
+        self._degrader = None
 
     # setup / teardown
 
@@ -183,7 +187,21 @@ class AutoDRIVEWorker(SimDecoder):
         self._reset_started: Optional[float] = None
         self._dedupe = bool(cfg.get("sim_time_dedupe", True))
         self._depth_fn = None
+        self._depth_source = "none"
         self._frame_errors = 0
+        self._degrader = None
+        pd = dict(cfg.get("pose_degrade") or {})
+        if pd.get("enabled") and self._pose_buf is not None:
+            from control.pose_degrade import PoseDegradeConfig, PoseDegrader
+
+            self._degrader = PoseDegrader(PoseDegradeConfig(**pd))
+            self._degrade_lock = threading.Lock()
+            threading.Thread(target=self._release_poses, daemon=True, name="pose-degrade").start()
+            c = self._degrader.cfg
+            self.logger.info(f"Pose degraded like SLAM: +{c.base_latency_s * 1000:.0f} ms + tracking "
+                             f"{c.latency_median_s * 1000:.1f}/{c.latency_p95_s * 1000:.1f} ms (p50/p95), "
+                             f"noise {c.xy_sigma} m / {c.yaw_sigma} rad, bias {c.bias_sigma} m over {c.bias_tau} s, "
+                             f"{c.dropout_rate}/s dropouts of {c.dropout_s} s")
         sd = cfg.get("sim_depth")
         if sd and self._frame_buf is not None:
             from .lidar_depth import CameraModel, LidarDepth
@@ -191,7 +209,13 @@ class AutoDRIVEWorker(SimDecoder):
             cam = CameraModel.from_yaml(sd.get("camera", "sim_camera/camera.yaml"), scale=float(sd.get("scale", 2.0)))
             self._depth_fn = LidarDepth(cam)
             self._depth_clahe = bool(sd.get("clahe", True))
-            self.logger.info(f"RGB-D from LiDAR: {cam.size[0]}x{cam.size[1]}, vfov {cam.vfov_deg:.1f} deg, "
+            # depth: lidar (synthesised from the 2-D LiDAR) or none (frames prepared the same way,
+            # depth all zero: no LiDAR is used; the segmentation scan places edges on the floor)
+            self._depth_source = str(sd.get("depth", "none"))
+            if self._depth_source not in ("lidar", "none"):
+                raise ValueError(f"sim_depth.depth must be lidar or none, not {self._depth_source!r}")
+            self.logger.info(f"{'RGB-D from LiDAR' if self._depth_source == 'lidar' else 'RGB, no depth (no LiDAR)'}: "
+                             f"{cam.size[0]}x{cam.size[1]}, vfov {cam.vfov_deg:.1f} deg, "
                              f"car mask {'on' if self._depth_fn.mask is not None else 'off'}")
 
         log_dir = cfg.get("log_dir")
@@ -215,6 +239,20 @@ class AutoDRIVEWorker(SimDecoder):
             f"{self._cmd_timeout * 1000:.0f} ms, logs={'on' if log_dir else 'off'}) — "
             f"connect the sim (HUD 'Disconnected' toggle, or scripts/autodrive_sim_ctl.py connect)"
         )
+
+    def _write_pose(self, pose: np.ndarray, speed: float, ts: float) -> None:
+        if self._degrader is None:
+            return super()._write_pose(pose, speed, ts)
+        with self._degrade_lock:
+            self._degrader.add(ts, pose)
+
+    def _release_poses(self) -> None:
+        while not self._closing:
+            with self._degrade_lock:
+                ready = self._degrader.due(time.monotonic())
+            for t, pose in ready:
+                self._pose_buf.write(pose, None, speed=0.0, ts=t)
+            time.sleep(0.002)
 
     def step(self) -> None:
         now = time.monotonic()
@@ -321,7 +359,8 @@ class AutoDRIVEWorker(SimDecoder):
             # (and so the controller) or the other sensors
             try:
                 if self._frame_buf is not None:
-                    if self._depth_fn is not None and data.get("front_camera") and data.get("lidar"):
+                    if self._depth_fn is not None and data.get("front_camera") and (
+                            self._depth_source == "none" or data.get("lidar")):
                         self._write_rgbd(data)
                     else:
                         self._process_frame_data(data)
@@ -340,7 +379,8 @@ class AutoDRIVEWorker(SimDecoder):
         self._log_message(data, sim_time, new_frame, *sent)
 
     def _write_rgbd(self, data: dict) -> None:
-        """Sim camera + LiDAR depth -> frame_buf (see workers/lidar_depth.py)."""
+        """Sim camera (upscaled, car body painted out) + LiDAR depth, or none -> frame_buf
+        (see workers/lidar_depth.py)."""
         import cv2
 
         from .lidar_depth import mask_rgb
@@ -352,7 +392,10 @@ class AutoDRIVEWorker(SimDecoder):
         w, h = self._depth_fn.cam.size
         rgb = cv2.resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), (w, h), interpolation=cv2.INTER_LINEAR)
         rgb = mask_rgb(rgb, self._depth_fn.mask, clahe=self._depth_clahe)
-        depth = self._depth_fn(np.asarray(data["lidar"], dtype=np.float32))
+        if self._depth_source == "none":
+            depth = np.zeros((h, w), dtype=np.float32)
+        else:
+            depth = self._depth_fn(np.asarray(data["lidar"], dtype=np.float32))
         self._frame_buf.write(np.ascontiguousarray(rgb), depth)
 
     def _command(self, now: float) -> tuple[float, float, float]:

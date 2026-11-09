@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""The xdotool subset autodrive_sim_ctl.py / autodrive_capture.py use, on python-xlib, for
+machines without xdotool (the Alliance clusters)."""
+import os
+import sys
+
+from Xlib import X, display
+from Xlib.ext import xtest
+
+d = display.Display(os.environ.get("DISPLAY", ":99"))
+root = d.screen().root
+
+
+def windows(w):
+    yield w
+    for c in w.query_tree().children:
+        yield from windows(c)
+
+
+a = sys.argv[1:]
+if a[:2] == ["search", "--class"]:
+    for w in windows(root):
+        try:
+            cls = w.get_wm_class()
+        except Exception:
+            cls = None
+        if cls and any(a[2].lower() in c.lower() for c in cls):
+            print(w.id)
+elif a[0] == "getdisplaygeometry":
+    print(d.screen().width_in_pixels, d.screen().height_in_pixels)
+elif a[0] == "windowactivate":
+    d.create_resource_object("window", int(a[-1])).set_input_focus(X.RevertToParent, X.CurrentTime)
+    d.sync()
+elif a[0] == "mousemove":
+    root.warp_pointer(int(a[1]), int(a[2]))
+    d.sync()
+elif a[0] in ("mousedown", "mouseup"):
+    xtest.fake_input(d, X.ButtonPress if a[0] == "mousedown" else X.ButtonRelease, int(a[1]))
+    d.sync()
+else:
+    sys.exit(f"xdotool shim: unsupported {a}")

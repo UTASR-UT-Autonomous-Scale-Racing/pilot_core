@@ -10,9 +10,11 @@ use_oakd_imu: false           # true = OAK-D IMU through the camera worker, fals
 i2c_address: 0x08             # Arduino address. null -> actuator/IMU run as dummies
 i2c_bus: 1                    # /dev/i2c-<bus>
 
-# drivable-track segmentation; feeds the seg_scan mapping drive
+# drivable-track segmentation; feeds the segmentation-edge scan the mapping lap maps from.
+# ground_plane needs no training (RANSAC floor from the depth); switch to onnx once a model
+# trained on real-track frames exists (docs/datasets.md)
 vision:
-  enabled: false
+  enabled: true
   model: ground_plane           # ground_plane | onnx
   onnx_model: track_seg.onnx    # model: onnx — network from scripts/train_vision.py (+ .json sidecar)
 
@@ -23,7 +25,7 @@ pwm:
   steer_min: 1105             # full left
   steer_max: 1825             # full right
   steer_neutral: 1461         # straight
-  throttle_min: 1199          # full backward
+  throttle_min: 1206          # full backward (firmware ESC_MIN)
   throttle_max: 1595          # full forward
   throttle_neutral: 1397      # coast
 
@@ -66,10 +68,10 @@ track_control:
       max_backward: 0.3         # max reverse input used for braking
       min_speed_for_backward: 0.3   # m/s, no reverse braking below this
 
-# no LiDAR on the car: a track_control.mapping_drive (follow-the-gap mapping lap, otherwise
-# driven by hand with RC) runs on a scan made from the segmentation mask's edge + depth
-# (control/seg_scan.py). Needs vision.enabled and a segmentation model trained on the real
-# track. camera_height / camera_pitch come from depth_ftg (one camera mount)
+# no LiDAR on the car: the segmentation mask's edge + depth make a LiDAR-format scan
+# (control/seg_scan.py, SegScanWorker), the same worker as in the sim. The mapping lap's walls
+# come from it, and a track_control.mapping_drive (follow-the-gap; otherwise the lap is driven
+# by hand with RC) drives on it. camera_height / camera_pitch come from depth_ftg (one camera mount)
 seg_scan:
   origin_forward: 0.0           # m, camera ahead of the scan origin
 
@@ -104,6 +106,17 @@ estimator:
   yaw_std: 0.03                 # rad
   stale_after: 0.5              # s without a pose and we stop driving
 
+# rear-of-car IMU (the Arduino's ICM-20948 over I2C) for the state estimate: StateWorker runs
+# control.ImuEKF on it, corrected by the SLAM poses, instead of the pose-only EKF above (gyro
+# yaw rate, bridges SLAM gaps; docs/slam.md). Run scripts/check_rear_imu.py on the car first:
+# it measures the rate and finds rotation from a hand turn and a push, and prints this block
+rear_imu:
+  enabled: false
+  rotation: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]   # ICM-20948 axes -> car (x forward, y left, z up)
+  lever_m: [0.0, 0.0]           # m, the IMU from the camera in the car frame (x forward, y left)
+  delay_s: 0.0                  # s, the IMU's filter + read delay (check_rear_imu.py --recording)
+  estimator: {}                 # control.ImuEstimatorConfig overrides
+
 # safety supervisor, runs in ActuatorWorker
 safety:
   command_timeout: 0.150        # s, no fresh command -> neutral throttle
@@ -125,11 +138,19 @@ enable_slam: true               # ORB-SLAM3 + mapping, same as start.py --enable
 slam:
   vocabulary: ORB_SLAM3/Vocabulary/ORBvoc.txt
   settings: orbslam_oakd_rgbd.yaml    # regenerate with scripts/gen_orbslam_settings.py
+  # RGB-D-inertial ORB-SLAM3 on the OAK-D's own accel + gyro (separate from use_oakd_imu,
+  # which picks the IMU for imu_buf). Needs the settings' IMU block: generate them with
+  # scripts/gen_orbslam_settings.py --imu, at the camera's imu_rate_hz (default 100)
+  inertial: false
 
 # mapping / BEV boundaries
 mapping:
-  boundary_min_points: 50       # wall points needed before we try extracting boundaries
-  max_track_half_width: 1.5     # m, wall points further from the driven line are dropped
+  wall_source: occupancy        # occupancy (segmentation-edge scans, as in the sim) | cloud (SLAM map points)
+  scan_offset: [0.0, 0.0, 0.0]  # m, scan origin in the vehicle (camera) frame: [forward, left, up]
+  bev_axes: [0, 2]              # SLAM's levelled camera frame: X right, Z forward
+  forward_axis: 2
+  boundary_min_points: 50       # wall points needed before we try extracting boundaries (cloud)
+  max_track_half_width: 1.5     # m, wall points further from the driven line are dropped (cloud)
 
 recording: false                # dump buffers to disk (or start.py --recording)
 recording_path: /tmp/pilot_recordings   # a timestamped folder per run is created here

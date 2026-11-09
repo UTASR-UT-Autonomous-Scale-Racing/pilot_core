@@ -1,6 +1,6 @@
 # AutoDRIVE RoboRacer Unity sim, linked directly (no ROS, no bridge): pilot_core is the
 # server the sim connects to on sim_port; telemetry in, supervised commands out.
-#   python start.py --config config_autodrive.yaml       # LiDAR mapping lap, then race
+#   python start.py --config config_autodrive.yaml       # segmentation mapping lap, then race
 #   (race on a saved map instead: enable_slam: false, use_saved_map: true below)
 # then connect the sim: HUD menu -> "Disconnected" toggle, or
 #   python scripts/autodrive_sim_ctl.py connect
@@ -24,12 +24,18 @@ fps: 15
 depth_max_meters: 15.0          # Joshua Choi's modified build: far clip of DepthCamera.cs (stock build has no depth)
 depth_raw_scale: null
 
+# no LiDAR, as on the car: the drivable area comes from the camera's segmentation. sim_depth
+# prepares the frames it was trained on (upscaled x2, car body painted out) with depth: none
+sim_depth:
+  camera: "sim_camera/camera.yaml"
+  scale: 2
+  depth: none                   # none: no depth (lidar would synthesise it from the LiDAR)
+
 vision:
-  enabled: false
-  # needs sim_depth (frames upscaled x2, car body hidden, depth from the LiDAR): the
-  # intrinsics are the sim camera's at that resolution, not slam.settings
+  enabled: true
+  # the intrinsics are the sim camera's at sim_depth's resolution, not slam.settings
   camera_settings: "sim_camera/orbslam_settings.yaml"
-  model: ground_plane           # ground_plane | onnx
+  model: onnx                   # ground_plane needs depth | onnx
   # Fast-SCNN trained on sim runs (not tracked; regenerate, docs/autodrive.md "Vision"):
   # unseen compete track, live: IoU 0.94
   onnx_model: "sim_track_seg.onnx"
@@ -38,6 +44,12 @@ control_mode: "pure_pursuit"    # pure_pursuit | stanley | lqr | mpc | policy
 control_rate_hz: 50             # StateWorker + ActuatorWorker loop rate
 
 vehicle_params: "vehicle_params_roboracer.yaml"
+
+# state estimate: a collision respawns the car elsewhere; a pose that far from the
+# prediction restarts the EKF there (standing still) and resets the controllers, instead of
+# reading the jump as speed and yaw rate (that steered it into the wall again, every respawn)
+estimator:
+  jump_reset_m: 0.4             # m, as mapping.jump_threshold
 
 # runtime safety (ActuatorWorker). In the stock sim throttle behaves like a speed
 # set-point of ~25 m/s per unit (0.06 -> 1.5 m/s), so every throttle bound is small;
@@ -60,29 +72,45 @@ track_control:
       ki: 0.006
       integral_limit: 0.006
       max_backward: 0.012
-  # drives the LiDAR mapping lap (on the car a human does that with the RC transmitter)
+  # drives the mapping lap on the segmentation-edge scan (on the car a human can drive it by RC)
   mapping_drive:
     speed: 0.6                  # m/s
     min_speed: 0.4
     gap_select: area            # widest-gap turns into the compete track's hairpin pockets
 
-# the mapping drive's scan from the segmentation mask's edge + depth (control/seg_scan.py), the
-# car's stand-in for a LiDAR. Here the LiDAR is used unless source: segmentation (needs
-# vision.enabled and sim_depth); scripts/seg_scan_eval.py scores it against the LiDAR offline
+# the mapping lap's scan from the segmentation mask's edge (control/seg_scan.py), as on the car;
+# with no depth in the sim each edge is placed where its pixel's ray meets the floor
 seg_scan:
-  source: auto                  # auto: LiDAR if there is one | segmentation
+  source: segmentation          # no LiDAR: track edges from the mask, placed on the floor (no depth)
   camera_pitch: 0.1833          # rad, 10.5 deg down (sim_camera/camera.yaml)
   camera_height: 0.17           # m
   origin_forward: -0.2883       # m, camera behind the LiDAR (cam_x - lidar_x), so ranges match its tuning
 
-# LidarProjectionWorker (enable_slam + sim_pose); sim Hokuyo UST-10LX, 1081 rays, 0.06-10 m
+# never used (the car has none). With mapping.wall_source: cloud the segmentation-edge scans are
+# projected like a LiDAR's (LidarProjectionWorker), with these range / voxel settings
 lidar:
+  enabled: false
   range_min: 0.1
   range_max: 9.5
   voxel_size: 0.10
   move_threshold: 0.05
 
-# mapping. enable_slam here means LiDAR mapping on the ground-truth pose, not ORB-SLAM3
+# the sim's ground-truth pose published like ORB-SLAM3's on the car: late, noisy, off by a
+# wandering bias, with tracking dropouts (control/pose_degrade.py). Defaults from ORB-SLAM3 RGB-D on rendered
+# sequences of this track (bench/2026-10-29_vio_sim/inertial_fix.md), not from the car
+sim_pose_degrade:
+  enabled: false
+  base_latency_s: 0.033
+  latency_median_s: 0.0084
+  latency_p95_s: 0.0414
+  xy_sigma: 0.01
+  yaw_sigma: 0.005
+  bias_sigma: 0.07
+  bias_tau: 2.0
+  dropout_rate: 0.15
+  dropout_s: 0.3
+
+# mapping. enable_slam here means a mapping lap on the ground-truth pose, not ORB-SLAM3
 enable_slam: true
 use_saved_map: false
 saved_map_path: "maps/autodrive_practice"
@@ -90,6 +118,9 @@ slam:
   vocabulary: "ORB_SLAM3/Vocabulary/ORBvoc.txt"
 
 mapping:
+  wall_source: occupancy        # walls from the segmentation-edge scans' occupancy grid
+  # the segmentation scan's origin in the vehicle frame (camera x - seg_scan.origin_forward)
+  scan_offset: [0.2733, 0.0, 0.10]
   boundary_min_points: 50
   bev_axes: [0, 1]              # sim world is Z-up so X, Y are horizontal
   forward_axis: 0               # X forward in the sim vehicle frame
@@ -99,7 +130,7 @@ mapping:
   auto_loop_overrun: 1.0        # m past the start before the lap is closed (covers the seam)
   jump_threshold: 0.4           # m; longer pose steps are sim respawns after a wall hit
   min_track_half_width: 0.2     # m; a narrower extracted track is rejected (bad lap), map again
-  boundary_save_path: "maps/autodrive_practice"   # null = don't save
+  boundary_save_path: "maps/autodrive_practice_seg"   # null = don't save
 
 buffers:
   frame:

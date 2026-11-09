@@ -11,7 +11,7 @@ from .ring_buffer import SharedRingBuffer
 from .schema import SlotHeader, DTypeTag, HEADER_SIZE, HEADER_STRUCT
 from .typed import TypedRingBuffer
 from .frame_buffer import FrameBuffer
-from .imu_buffer import IMUBuffer
+from .imu_buffer import IMUBuffer, RawIMUBuffer
 from .segment_buffer import SegmentationBuffer
 from .pose_buffer import PoseBuffer
 from .control_buffer import ControlBuffer
@@ -33,6 +33,7 @@ def buffer_name(prefix: Optional[str], base: str) -> str:
 BUFFER_CLASSES: Dict[int, Type[TypedRingBuffer]] = {
     DTypeTag.FRAME: FrameBuffer,
     DTypeTag.IMU: IMUBuffer,
+    DTypeTag.RAW_IMU: RawIMUBuffer,
     DTypeTag.SEGMENTATION: SegmentationBuffer,
     DTypeTag.POSE: PoseBuffer,
     DTypeTag.CONTROL: ControlBuffer,
@@ -46,6 +47,7 @@ BUFFER_CLASSES: Dict[int, Type[TypedRingBuffer]] = {
 BUFFER_CLASSES_BY_NAME: Dict[str, Type[TypedRingBuffer]] = {
     "frame": FrameBuffer,
     "imu": IMUBuffer,
+    "raw_imu": RawIMUBuffer,
     "segmentation": SegmentationBuffer,
     "pose": PoseBuffer,
     "control": ControlBuffer,
@@ -74,6 +76,7 @@ __all__ = [
     "TypedRingBuffer",
     "FrameBuffer",
     "IMUBuffer",
+    "RawIMUBuffer",
     "SegmentationBuffer",
     "PoseBuffer",
     "ControlBuffer",

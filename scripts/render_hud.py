@@ -9,8 +9,9 @@ One 1280x720 frame per output tick, every panel drawn from what the car had at t
 
   sim view        screen.mp4 (sim chase camera); the depth image when the run has no video
   car camera      camera/rgb_*.png with the VisionWorker mask (segmentation/seg_*.png)
-  map             LiDAR wall points accumulated so far, the pose trail coloured by speed,
-                  the current scan, the car, and the extracted boundary once the loop closes
+  map             wall points accumulated so far (point-cloud mapping), the pose trail coloured by
+                  speed, the current scan, the car, and the track boundary (extracted once the
+                  loop closes, or the saved map)
   telemetry       speed / steering / throttle gauges (command vs. after the safety supervisor),
                   10 s strip charts, lap times, collisions and per-buffer data age
 
@@ -362,7 +363,8 @@ class HUD:
             pts = np.round(car_polygon(c, yaw + (np.pi / 2 if m.rot else 0.0)) * 4).astype(np.int32)
             cv2.fillPoly(img, [pts], (255, 255, 255), cv2.LINE_AA, shift=2)
             cv2.polylines(img, [pts], True, (0, 0, 0), 1, cv2.LINE_AA, shift=2)
-        texts.append((12, HEADER + TOP_H + 10, "MAP  ·  LiDAR walls, trail coloured by speed", self.f_label, TEXT))
+        source = "mapped from the camera" if self._has_mapping() else "saved map"
+        texts.append((12, HEADER + TOP_H + 10, f"MAP  ·  {source}, trail coloured by speed", self.f_label, TEXT))
         # legend
         y0 = HEADER + TOP_H + BOT_H - 22
         x0 = 12
@@ -506,7 +508,7 @@ class HUD:
         if run.t_reset is not None and t < run.t_reset:
             return "STANDBY", MUTED
         if self._has_mapping() and _latest(run.boundary["t_mono"], t) < 0:
-            return "MAPPING LAP  ·  LiDAR follow-the-gap", BOUNDARY
+            return "MAPPING LAP  ·  follow-the-gap on the camera", BOUNDARY
         if run.laps and t > run.laps[-1][0]:
             return "FINISHED", MUTED
         return f"RACING  ·  {self.ctrl_mode}", SPEED

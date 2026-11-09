@@ -48,3 +48,13 @@ def test_dropouts_remove_stretches_of_poses():
     lost = d.dropped / (d.dropped + d.published)
     expected = 0.5 * 0.3 / (1 + 0.5 * 0.3)
     assert lost == pytest.approx(expected, abs=0.05)
+
+
+def test_the_bias_stays_bounded_over_a_long_race():
+    d = PoseDegrader(PoseDegradeConfig(enabled=True, dropout_rate=0.0, xy_sigma=0.0, seed=4))
+    bias = []
+    for i in range(6000):                               # 240 s at 25 Hz
+        d.add(0.04 * i, np.eye(4, dtype=np.float32))
+        bias.append(float(np.hypot(*d._bias)))
+    assert np.sqrt(np.mean(np.square(bias))) == pytest.approx(0.07 * np.sqrt(2), rel=0.3)
+    assert max(bias) < 0.4

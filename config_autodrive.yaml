@@ -95,8 +95,8 @@ lidar:
   voxel_size: 0.10
   move_threshold: 0.05
 
-# the sim's ground-truth pose published like ORB-SLAM3's on the car: late, noisy, drifting, with
-# tracking dropouts (control/pose_degrade.py). Defaults from ORB-SLAM3 RGB-D on rendered
+# the sim's ground-truth pose published like ORB-SLAM3's on the car: late, noisy, off by a
+# wandering bias, with tracking dropouts (control/pose_degrade.py). Defaults from ORB-SLAM3 RGB-D on rendered
 # sequences of this track (bench/2026-10-29_vio_sim/inertial_fix.md), not from the car
 sim_pose_degrade:
   enabled: false
@@ -105,7 +105,8 @@ sim_pose_degrade:
   latency_p95_s: 0.0414
   xy_sigma: 0.01
   yaw_sigma: 0.005
-  bias_rw: 0.03
+  bias_sigma: 0.07
+  bias_tau: 2.0
   dropout_rate: 0.15
   dropout_s: 0.3
 

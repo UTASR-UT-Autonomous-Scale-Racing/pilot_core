@@ -200,7 +200,7 @@ class AutoDRIVEWorker(SimDecoder):
             c = self._degrader.cfg
             self.logger.info(f"Pose degraded like SLAM: +{c.base_latency_s * 1000:.0f} ms + tracking "
                              f"{c.latency_median_s * 1000:.1f}/{c.latency_p95_s * 1000:.1f} ms (p50/p95), "
-                             f"noise {c.xy_sigma} m / {c.yaw_sigma} rad, drift {c.bias_rw} m/sqrt(s), "
+                             f"noise {c.xy_sigma} m / {c.yaw_sigma} rad, bias {c.bias_sigma} m over {c.bias_tau} s, "
                              f"{c.dropout_rate}/s dropouts of {c.dropout_s} s")
         sd = cfg.get("sim_depth")
         if sd and self._frame_buf is not None:

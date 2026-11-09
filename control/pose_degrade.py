@@ -1,10 +1,11 @@
 """
 Degrade the sim's ground-truth pose to look like a visual SLAM pose on the car.
 
-The sim's pose is exact and on time; ORB-SLAM3's is late, noisy, drifts, and stops while
-tracking is lost. Each pose is published late (a frame's transfer plus a log-normal tracking
-time), in order, still stamped with its capture time; it carries white noise and a slowly
-wandering position bias; and during dropouts nothing is published.
+The sim's pose is exact and on time; ORB-SLAM3's is late, noisy, off by a slowly wandering
+error, and stops while tracking is lost. Each pose is published late (a frame's transfer plus a
+log-normal tracking time), in order, still stamped with its capture time; it carries white noise
+and a position bias that wanders and reverts (localising against the saved map keeps SLAM's error
+bounded, it does not drift away); and during dropouts nothing is published.
 
 The defaults come from ORB-SLAM3 RGB-D (the CUDA fork) replaying rendered sequences of the
 compete track in real time (bench/2026-10-29_vio_sim/inertial_fix.md): tracking time p50
@@ -29,7 +30,8 @@ class PoseDegradeConfig:
     latency_p95_s: float = 0.0414
     xy_sigma: float = 0.01            # m, white noise per pose
     yaw_sigma: float = 0.005          # rad, white noise per pose
-    bias_rw: float = 0.03             # m / sqrt(s), random walk of the position bias
+    bias_sigma: float = 0.07          # m per axis, spread of the position bias (about 0.1 m 2-D RMS)
+    bias_tau: float = 2.0             # s, how fast the bias wanders and reverts
     dropout_rate: float = 0.15        # tracking losses per second
     dropout_s: float = 0.3            # s, length of each
     seed: int = 0
@@ -62,7 +64,9 @@ class PoseDegrader:
         c = self.cfg
         dt = 0.0 if self._last_t is None else max(t - self._last_t, 0.0)
         self._last_t = t
-        self._bias += self._rng.normal(0.0, c.bias_rw * math.sqrt(dt), 2)
+        if dt > 0 and c.bias_tau > 0:
+            a = math.exp(-dt / c.bias_tau)
+            self._bias = a * self._bias + self._rng.normal(0.0, c.bias_sigma * math.sqrt(1.0 - a * a), 2)
         if t < self._lost_until:
             self.dropped += 1
             return

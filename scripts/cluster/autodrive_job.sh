@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=48G
-#SBATCH --time=1:20:00
+#SBATCH --time=1:40:00
 #SBATCH --exclude=rack13-08
 #SBATCH --output=/scratch/dandebru/pilot_core/logs/%x_%j.out
 # AutoDRIVE sim on a Slurm GPU node, no Docker or supervisor: Xvfb, the sim in a
@@ -102,6 +102,24 @@ PY
   ultra)
     variant compete; ultra
     bench ultra --config config_autodrive_compete.yaml --laps 10 --timeout 420 ;;
+  live)     # in-loop mapping lap on the occupancy walls, then 10 laps on that map, 3 times on
+            # $VARIANT (practice | compete). Each map run goes to maps/autodrive_<variant>_live<n>
+    V=${VARIANT:-compete}; variant "$V"
+    for i in 1 2 3; do
+        M=maps/autodrive_${V}_live$i; rm -rf "$M"
+        bench map_$i --config config_autodrive_compete.yaml --laps 1 --timeout 600 \
+            --set enable_slam=true --set use_saved_map=false --set mapping.boundary_save_path=$M \
+            --set track_control.raceline_path=null
+        [ -f "$M/outer_line.npy" ] || { echo "map_$i: no map"; continue; }
+        timeout -k 10 1200 python scripts/make_raceline.py "$M" --margin ${MARGIN:-0.65} \
+            | tee "runs/$TAG/raceline_$i.txt" || continue
+        bench race_$i --config config_autodrive_compete.yaml --laps 10 --timeout 420 \
+            --set saved_map_path=$M --set track_control.raceline_path=$M/raceline.npy
+    done ;;
+  degraded) # the final on the saved map with the pose degraded like SLAM's, 3 runs
+    variant compete
+    for i in 1 2 3; do bench degraded$i --config config_autodrive_compete.yaml --laps 10 --timeout 420 \
+        --set sim_pose_degrade.enabled=true --set sim_pose_degrade.seed=$i; done ;;
   qual)     # qualifier on the practice build's segmentation map
     variant practice
     bench qual --config config_autodrive_compete.yaml --laps 10 --timeout 420 \

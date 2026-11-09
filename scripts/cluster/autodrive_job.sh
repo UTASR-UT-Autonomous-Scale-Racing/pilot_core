@@ -10,9 +10,15 @@
 # AutoDRIVE sim on a Slurm GPU node, no Docker or supervisor: Xvfb, the sim in a
 # relaunch loop, the display tools from scripts/cluster/bin. Runs STAGES from this file.
 #   sbatch [--export=ALL,STAGES="map race"] scripts/cluster/autodrive_job.sh
+# Each job in its own network namespace (its own loopback: the sim always connects to :4567)
+# and its own sim settings and log, so several jobs can share a node.
+if [ -z "${AD_IN_NETNS:-}" ] && unshare -rn true 2>/dev/null; then
+    exec unshare -rn env AD_IN_NETNS=1 bash -c 'ip link set lo up && exec bash "$0" "$@"' "$0" "$@"
+fi
 BASE=${AD_BASE:-/scratch/dandebru/pilot_core}
 cd "$BASE/repo" || exit 1
-export AUTODRIVE_ROOT=$BASE/root AUTODRIVE_LOG_DIR=$BASE/root/logs
+export AUTODRIVE_ROOT=$BASE/root/job_${SLURM_JOB_ID:-local}
+export AUTODRIVE_LOG_DIR=$AUTODRIVE_ROOT/logs
 mkdir -p "$AUTODRIVE_ROOT/autodrive_sim" "$AUTODRIVE_LOG_DIR" runs
 for v in compete practice; do ln -sfn "$BASE/sim/$v" "$AUTODRIVE_ROOT/autodrive_sim/$v"; done
 export PATH=$BASE/repo/scripts/cluster/bin:$BASE/venv/bin:/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/bin:$PATH
@@ -102,10 +108,10 @@ PY
   ultra)
     variant compete; ultra
     bench ultra --config config_autodrive_compete.yaml --laps 10 --timeout 420 ;;
-  live)     # in-loop mapping lap on the occupancy walls, then 10 laps on that map, 3 times on
-            # $VARIANT (practice | compete). Each map run goes to maps/autodrive_<variant>_live<n>
+  live)     # in-loop mapping lap on the occupancy walls, then 10 laps on that map, for each of
+            # $REPS (default 1 2 3) on $VARIANT (practice | compete): maps/autodrive_<variant>_live<n>
     V=${VARIANT:-compete}; variant "$V"
-    for i in 1 2 3; do
+    for i in ${REPS:-1 2 3}; do
         M=maps/autodrive_${V}_live$i; rm -rf "$M"
         bench map_$i --config config_autodrive_compete.yaml --laps 1 --timeout 600 \
             --set enable_slam=true --set use_saved_map=false --set mapping.boundary_save_path=$M \
@@ -116,10 +122,12 @@ PY
         bench race_$i --config config_autodrive_compete.yaml --laps 10 --timeout 420 \
             --set saved_map_path=$M --set track_control.raceline_path=$M/raceline.npy
     done ;;
-  degraded) # the final on the saved map with the pose degraded like SLAM's, 3 runs
+  degraded) # the final on the saved map with the pose degraded like SLAM's, for each of $REPS;
+            # $DEGRADE_SETS (space-separated key=value) overrides parts of the degradation
     variant compete
-    for i in 1 2 3; do bench degraded$i --config config_autodrive_compete.yaml --laps 10 --timeout 420 \
-        --set sim_pose_degrade.enabled=true --set sim_pose_degrade.seed=$i; done ;;
+    extra=; for kv in ${DEGRADE_SETS:-}; do extra="$extra --set sim_pose_degrade.$kv"; done
+    for i in ${REPS:-1 2 3}; do bench degraded$i --config config_autodrive_compete.yaml --laps 10 --timeout 420 \
+        --set sim_pose_degrade.enabled=true --set sim_pose_degrade.seed=$i $extra; done ;;
   qual)     # qualifier on the practice build's segmentation map
     variant practice
     bench qual --config config_autodrive_compete.yaml --laps 10 --timeout 420 \

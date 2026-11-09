@@ -3,9 +3,8 @@
 Data and trained models stay out of git (`.gitignore`). These are the bundles the team
 needs, with where each file goes in a checkout and how to rebuild it from scratch.
 
-**Status (2026-10-21):** all three bundles are built and checksummed, but **not yet uploaded**.
-Proposed home: GitHub Release `data-v1` on this repo; every bundle is under the 2 GB
-asset limit. After upload:
+The three bundles are GitHub Release
+[`data-v1`](https://github.com/UTASR-UT-Autonomous-Scale-Racing/pilot_core/releases/tag/data-v1):
 
 ```bash
 gh release download data-v1 -R UTASR-UT-Autonomous-Scale-Racing/pilot_core -D /tmp/data-v1
@@ -48,9 +47,9 @@ efcb62577c7d00e9e67429a4b3f19de8d67359d00a4432a39169552d5aaace0b  pilot_core-tel
 | ---- | ---- | ----- | ------------- |
 | AutoDRIVE RoboRacer sim builds | – | `/workspaces/autodrive_sim` | `scripts/vast_autodrive_setup.sh` downloads the release; `scripts/autodrive_texture_sim.py` makes the textured copy |
 | ORB-SLAM3 vocabulary and build | ~930 MB | `ORB_SLAM3/` submodule | `scripts/setup.sh --with-slam`, [slam.md](slam.md) |
-| Saved track maps | 28 KB | `maps/autodrive_{practice,compete}` | in git |
-| Benchmark raw runs, 2026-10-20 | 1.3 GB | maintainer archive | `scripts/autodrive_bench.py matrix bench/matrix.yaml`. Summary tables are in git (`bench/2026-10-20/`) |
-| Validation evidence (runs, GIFs, logs) | 1.1 GB | maintainer archive | `scripts/autodrive_validate.py`; summary in [results.md](results.md) |
+| Saved track maps | 28 KB | `maps/autodrive_*` | in git: `_practice` / `_compete` from the LiDAR (reference only), `_seg` built offline from the camera, `_live*` from in-loop mapping laps |
+| No-LiDAR sim runs, 2026-10-30 onwards | 5.6 GB | the team's cluster scratch (`runs/`) | `scripts/cluster/autodrive_job.sh`; summary tables in `bench/` |
+| Benchmark raw runs and validation evidence, 2026-10-20 | – | not kept: the cloud box was released | `scripts/autodrive_bench.py matrix bench/matrix.yaml`, `scripts/autodrive_validate.py`; summary tables in `bench/2026-10-20/` and [results.md](results.md) |
 | Real-car recordings (OAK-D) | – | **none yet** | `start.py --recording`; see "Still to collect" |
 
 ## Still to collect

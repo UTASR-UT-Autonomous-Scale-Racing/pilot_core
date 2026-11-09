@@ -32,7 +32,9 @@ The script installs the stock `2026-iros` practice and compete builds under
 ### On a Slurm cluster (no Docker or supervisor)
 
 `scripts/cluster/autodrive_job.sh` runs Xvfb and the sim in a relaunch loop on an L40S node
-and any of the stages `sweep`, `segmap`, `race`, `qual`, `ultra`, `start`. `scripts/cluster/bin`
+and any of the stages `sweep`, `segmap`, `live` (mapping lap in the loop, then 10 laps on that map),
+`race`, `degraded` (the race with `sim_pose_degrade` on), `qual`, `ultra`, `start`. Each job runs in
+its own network namespace with its own sim settings, so several can share a node. `scripts/cluster/bin`
 stands in for xdotool, xwininfo and supervisorctl, which the nodes lack. Clicks work without
 a window manager. The sim's root and logs come from `AUTODRIVE_ROOT`, `AUTODRIVE_LOG_DIR`.
 
@@ -118,9 +120,24 @@ The protocol spike is `scripts/autodrive_spike.py`; the live probes are in
 ## Racing (`config_autodrive_compete.yaml`)
 
 The race settings on the stock `2026-iros` compete build, no LiDAR, no sim speed
-(L40S, Low quality, 640×360), 10 laps, 3 runs: 120.04, 120.46 and 130.64 s adjusted, 0, 0 and 1
-collisions; first lap about 14 s from a standing start, then 11.5–12.1 s
-([bench/2026-10-31_autodrive_nolidar/results.md](../bench/2026-10-31_autodrive_nolidar/results.md)).
+(L40S, 640×360), 10 laps, scored like the published final (race time + 10 s per collision),
+on the map built offline from five mapping runs
+([bench/2026-10-31_autodrive_nolidar/results.md](../bench/2026-10-31_autodrive_nolidar/results.md)):
+
+| run | collisions | adjusted (s) |
+| --- | --- | --- |
+| final 1 / 2 / 3, Low quality | 1 / 0 / 0 | 130.64 / 120.04 / 120.46 |
+| Ultra quality | 1 | 129.52 |
+| competition start (sim restarted, `auto_arm`, no keys) | 1 | 139.53 |
+| qualifier, practice track | 0 | 75.21 |
+
+First lap about 14 s from a standing start (22.5 s after the competition start), then
+11.5–12.7 s. Two of the five compete runs were clean.
+
+Mapping in the loop (`mapping.wall_source: occupancy`, the default) builds the map during the
+mapping lap itself; `maps/autodrive_{practice,compete}_live*` are such maps, and
+[results.md](results.md#mapping-in-the-loop-2026-11-09) has their races. `scripts/seg_map.py`
+builds one offline from recorded laps with the same code:
 
 ```bash
 python scripts/seg_map.py runs/x/map/rec/* --out maps/autodrive_compete_seg   # camera map

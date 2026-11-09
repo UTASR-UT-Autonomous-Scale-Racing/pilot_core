@@ -9,25 +9,26 @@ mapping, control and actuation, run as Python processes that share data through
 shared-memory ring buffers. The same pipeline drives the real car (OAK-D, Jetson,
 Arduino) and the AutoDRIVE RoboRacer simulator.
 
-![Telemetry HUD: a mapping lap, then a racing lap, in the AutoDRIVE RoboRacer sim](docs/images/hud.gif)
+![Telemetry HUD: a camera-only mapping lap, then racing, in the AutoDRIVE RoboRacer sim](docs/images/hud.gif)
 
-The AutoDRIVE RoboRacer sim at 5× speed. A LiDAR follow-the-gap lap maps the track and closes
-the loop, then `pure_pursuit` races the boundary it just extracted (16.73 s, 0 collisions).
-Every panel is drawn from the recorded buffers on one clock:
-
-- sim chase view
-- car camera with the live Fast-SCNN segmentation
-- map built from LiDAR, with the trail coloured by speed
-- controller command vs. what the safety supervisor actually sent
-
-Rendered by [`scripts/render_hud.py`](#telemetry-hud). Full-resolution frame: [hud_frame.png](docs/images/hud_frame.png).
+The AutoDRIVE RoboRacer sim at 4× speed, camera only: follow-the-gap on the segmentation's
+track edge drives the mapping lap, the walls come from an occupancy grid over those scans, and
+`pure_pursuit` races the map it just built. Every panel is drawn from the recorded buffers on one
+clock (sim chase view, car camera with the live Fast-SCNN mask, map and trail, commands before and
+after the safety supervisor), by [`scripts/render_hud.py`](#telemetry-hud).
+Full-resolution frame: [hud_frame.png](docs/images/hud_frame.png).
 
 | | |
 | --- | --- |
-| **Sim validation** | link, arming, steering, reset, stop and map-then-race checks pass; 84 benchmark runs, 0 errors ([results](docs/results.md)) |
-| **Controllers** | `pure_pursuit`: 12.89 s best practice lap, 0 collisions; `mpc` about 0.25 s per lap slower, with the lowest cross-track error |
-| **Vision** | sim track segmentation IoU 0.94 on an unseen track, live in the loop |
-| **Safety** | neutral until armed; 150 ms command watchdog; speed cap and slew limits; RC override on the car |
+| **No LiDAR** | car and sim map and race from the camera's segmentation; one set of workers for both ([sim to real](docs/sim_to_real.md)) |
+| **Mapping in the loop** | practice track mapped in 55 s with 0 hits, 3 of 3 runs; then 10 laps, 0 collisions, 76.2–76.9 s. Compete track mapped in 3 of 3 runs, 4–5 hits ([results](docs/results.md)) |
+| **Racing** | compete track, 10 laps on the camera map: 120.04 s with 0 collisions in 2 of 5 runs (published final: 15th 113.19 s) |
+| **Sim to real** | a SLAM-like degraded pose for the sim; latency and dropouts, not noise, are what the race settings cannot take yet |
+| **Jetson** | self-test before every start, per-stage latency from any recording, deploys from release tags, image built in CI ([deployment](docs/deployment.md)) |
+| **Safety** | neutral until armed; 150 ms command watchdog; speed cap and slew limits; RC override and a 250 ms firmware timeout on the car |
+| **Tests** | 398 hardware-free tests in CI |
+
+Nothing here has yet run on the car with this code; [docs/roadmap.md](docs/roadmap.md#car) lists the steps.
 
 ## Quick start
 
@@ -87,17 +88,18 @@ All timestamps are on `time.monotonic()`. Controllers use signed units (steering
 
 | `control_mode` | Controller | Needs |
 | -------------- | ---------- | ----- |
-| `pure_pursuit` (default), `stanley`, `lqr`, `mpc` | Track followers | SLAM + mapped track |
+| `pure_pursuit` (default), `stanley`, `lqr`, `mpc` | Track followers (`lqr` / `mpc` sim-only until the car's yaw rate is measured) | SLAM + mapped track |
 | `policy` | PPO policy (ONNX) from `rl/train.py` | SLAM + mapped track + model |
 | `depth_ftg` | Follow-the-Gap on a depth scan | depth camera |
 | `bc`, `vae` | Behaviour cloning / VAE policy (ONNX) | depth camera + model |
 
-**No LiDAR on the car.** The follow-the-gap mapping drive (`track_control.mapping_drive`)
-takes a 2D scan. In the sim that is the LiDAR's; on the car it is built from the edge of
-the segmentation mask and the depth at that edge (`control/seg_scan.py`, `seg_scan:` in the
-configs, needs `vision.enabled`). On the sim's showcase run, inside the camera's view, it
-places walls within 0.9 cm median (10.9 cm p90) of the LiDAR, misses none within 3 m, and
-steers within 0.2° of the LiDAR-driven gap follower ([results](docs/results.md#segmentation-edge-scan)).
+**No LiDAR, on the car or in the sim.** `SegScanWorker` turns the segmentation mask's edge
+into a LiDAR-format scan (`control/seg_scan.py`): the depth at the edge places it, or where there
+is none, the point where its pixel's ray meets the floor. The follow-the-gap mapping drive
+(`track_control.mapping_drive`) drives on that scan, and `MappingWorker` builds the walls from it
+on an occupancy grid (`control/occupancy_map.py`): rays free the floor they cross, so an edge
+placed short from far away is cleared by the floor seen up close. The same workers run on the car
+and in the sim ([docs/sim_to_real.md](docs/sim_to_real.md)).
 
 Safety supervisor (`control/safety.py`): neutral until armed; commands older than
 150 ms, future-stamped or non-finite → neutral throttle; 1.5 m/s speed cap, reverse
@@ -156,15 +158,16 @@ python scripts/recording_to_dataset.py <run> --vision datasets/track --bootstrap
 `config_autodrive.yaml` runs the whole pipeline against the AutoDRIVE RoboRacer Unity
 simulator. pilot_core is the server the sim connects to on port 4567, so no ROS or
 bridge is involved. Sensors fill the usual buffers, and the actuator's supervised
-command goes back to the sim. A LiDAR follow-the-gap lap maps the track, then the
-control mode races on it. Setup on a GPU box, the sim's protocol quirks, calibration
-and the benchmark are in [docs/autodrive.md](docs/autodrive.md).
+command goes back to the sim. A follow-the-gap lap on the camera's scan maps the track, then
+the control mode races on it; `sim_pose_degrade.enabled` makes the sim's ground-truth pose late,
+noisy and drifting like ORB-SLAM3's. Setup on a GPU box or a Slurm cluster, the sim's protocol
+quirks, calibration and the benchmark are in [docs/autodrive.md](docs/autodrive.md).
 
 ```bash
 python start.py --config config_autodrive.yaml      # then: python scripts/autodrive_sim_ctl.py connect
 ```
 
-Validation and benchmark results: [docs/results.md](docs/results.md).
+Results: [docs/results.md](docs/results.md).
 
 ## Telemetry HUD
 
@@ -193,7 +196,7 @@ contents, checksums, rebuild commands and the data still to collect are in
 | Path | Contents |
 | ---- | -------- |
 | `start.py` | Entry point: builds the pipeline from a config, supervises workers, handles keys |
-| `workers/` | One process per stage (camera, IMU, SLAM, LiDAR, state, mapping, vision, control, actuator, AutoDRIVE link, recorder) |
+| `workers/` | One process per stage (camera, IMU, SLAM, segmentation scan, state, mapping, vision, control, actuator, AutoDRIVE link, recorder) |
 | `shared_buffer/` | Shared-memory ring buffers, one typed buffer per stream |
 | `control/` | Controllers, EKF, safety supervisor, bicycle-model sim (plain library) |
 | `vision/` | Track segmentation models, training and inference |
@@ -213,6 +216,7 @@ contents, checksums, rebuild commands and the data still to collect are in
 python -m pytest -m "not oakd and not slam"                     # hardware-free suite (CI)
 OAKD_AVAILABLE=1 python -m pytest -m oakd                       # with an OAK-D on USB 3
 python -m pyflakes control vision workers shared_buffer rl scripts tests start.py
+python scripts/jetson_selftest.py --skip camera,i2c             # the checks the Jetson runs before a start
 ```
 
 ## Documentation
@@ -220,10 +224,11 @@ python -m pyflakes control vision workers shared_buffer rl scripts tests start.p
 | Guide | |
 | ----- | - |
 | [docs/autodrive.md](docs/autodrive.md) | AutoDRIVE sim: setup, protocol, calibration, benchmark, vision, telemetry export |
-| [docs/results.md](docs/results.md) | Sim validation and benchmark results |
+| [docs/results.md](docs/results.md) | Sim results: camera-only racing, in-loop mapping, degraded pose, stage latency |
+| [docs/sim_to_real.md](docs/sim_to_real.md) | Every gap between the sim and the car, and how the pipeline handles it |
 | [docs/oakd.md](docs/oakd.md) | OAK-D bench check, USB 3 requirement, open camera items |
 | [docs/slam.md](docs/slam.md) | ORB-SLAM3 build and the Python wrapper |
-| [docs/deployment.md](docs/deployment.md) | Running on the Jetson, natively or in Docker |
+| [docs/deployment.md](docs/deployment.md) | Running on the Jetson: release tags, self-test, measuring, Docker |
 | [docs/datasets.md](docs/datasets.md) | Data and model bundles, and what is still to collect |
 | [docs/roadmap.md](docs/roadmap.md) | What is next |
 | `firmware/README.md` | Arduino firmware and the I2C interface |

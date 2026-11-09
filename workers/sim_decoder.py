@@ -219,7 +219,7 @@ class SimDecoder(BaseWorker):
             speed = float(data.get('speed', 0.0))
             now = time.monotonic()
             if self._pose_buf is not None:
-                self._pose_buf.write(pose, None, speed=speed, ts=now)
+                self._write_pose(pose, speed, now)
             if self._state_buf is not None:
                 # sim world is Z-up: ground plane is X, Y; yaw from the body X axis
                 yaw = float(np.arctan2(R[1, 0], R[0, 0]))
@@ -228,6 +228,9 @@ class SimDecoder(BaseWorker):
 
         except Exception as e:
             self.logger.warning(f"Pose processing failed: {e}")
+
+    def _write_pose(self, pose: np.ndarray, speed: float, ts: float) -> None:
+        self._pose_buf.write(pose, None, speed=speed, ts=ts)
 
     def _process_lidar_data(self, data: dict) -> None:
         if self._lidar_buf is None:
